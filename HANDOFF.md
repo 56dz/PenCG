@@ -221,3 +221,22 @@ navBack('play');                     // 最后关自己，露出 index
 顺带说一句：`src/services/nav.js` 里那套 `requestHome/takeHomeHop/clearHomeHop`
 （接力旗）**没有用上，且跨页面不共享模块状态** —— 保留只为说明「为什么这条路不通」，
 真要接力得把状态落在 `$falcon` 能共享的地方。当前实现不依赖它。
+
+### 版本号必须三处一致（2026-11-07 22:20，用户 m14526 报「release 是 v1.0.3、软件里写 1.0.0」）
+
+版本号现在只有一个来源：`src/services/version.js` 的 `APP_VERSION`。
+`src/components/mine-body.vue` 底部、关于卡片、关于 toast 全部读它。
+
+改版本要同时动三处，否则又会出现「tag 和界面不一致」：
+1. `src/services/version.js` 的 `APP_VERSION`
+2. `package.json` 的 `"version"`（它还决定 AMR 的文件名 `<appid>.<a>_<b>_<c>.amr`）
+3. git tag / release（如 `v1.0.3`）
+
+**不要动** `src/services/net.js` 里的 `X-Ver: 1.0.0` —— 那是冒充官方 web 客户端的
+请求头，不是我们的版本号。
+
+真机证据：`profiles/evidence/mine_version_1_0_3.png`（关于卡片「版本 1.0.3」+
+页脚「PenCG 1.0.3 · appid 8002026110200003」）。
+
+顺带记两条设备操作：`/usr/bin/send_event touch slip x y` 单次滑不动 `<scroller>`，
+要 `press` → 多次 `slip`（每次几十像素）→ `release`；只发一次 slip 会被当成点击。

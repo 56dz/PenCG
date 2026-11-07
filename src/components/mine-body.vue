@@ -95,7 +95,7 @@
       </div>
 
       <div class="mb-foot">
-        <text class="mb-foot-text">PenCG 1.0.0 · appid 8002026110200003</text>
+        <text class="mb-foot-text">PenCG {{ ver }} · appid 8002026110200003</text>
         <text class="mb-foot-text">非官方客户端，仅供个人学习使用</text>
       </div>
      </div>
@@ -112,6 +112,7 @@ import { listPlays, clearPlays } from '../services/history.js';
 import { loadSettings, saveSettings } from '../services/settings.js';
 import { loadGameDetail } from '../services/catalog.js';
 import { navTo } from '../services/nav.js';
+import { APP_VERSION } from '../services/version.js';
 import { imgUrl } from '../services/img.js';
 import { QUALITY_LABEL } from '../services/const.js';
 import { logInfo, logWarn } from '../services/log.js';
@@ -135,6 +136,8 @@ function monthDay(ts) {
 export default {
   data() {
     return {
+      /* 版本号来自 services/version.js，与 package.json、git tag 保持同一号 */
+      ver: APP_VERSION,
       logged: false,
       /* booted：restoreSession() 是否已经跑完。
        * 真机现象（用户反馈 1）：进入软件后点「我的」，会先闪一下
@@ -291,7 +294,7 @@ export default {
       return [
         { id: 'quality', label: '画质设置', desc: '当前 ' + qLabel },
         { id: 'history', label: '清除历史', desc: '清空游玩记录' },
-        { id: 'about', label: '关于 PenCG', desc: '版本 1.0.0' },
+        { id: 'about', label: '关于 PenCG', desc: '版本 ' + APP_VERSION },
         { id: 'logout', label: '退出登录', desc: '清除本地会话' }
       ];
     }
@@ -512,7 +515,7 @@ export default {
         return;
       }
       if (id === 'about') {
-        this.showToast('PenCG 1.0.0 · 非官方客户端');
+        this.showToast('PenCG ' + APP_VERSION + ' · 非官方客户端');
         return;
       }
       if (id === 'logout') {
