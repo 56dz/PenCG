@@ -1,4 +1,4 @@
-# PenCG 交接说明（2026-11-07 20:05）
+# PenCG 交接说明（2026-11-07 20:52）
 
 ## 一句话
 网易云游戏（cg.163.com）的有道 X6 Pro 客户端。**界面层、网络层、信令层、媒体层协议栈全部完成，
@@ -27,6 +27,31 @@
 3. **`aplay` 的 `-B`/`-F` 是时间（微秒），不是帧数** —— 换采样率不用跟着改。设备上
    `/bin/aplay` 是 **1.2.4**，`-B/-F/--buffer-size/--period-size` 全支持。
 
+### 登录态三处修正（2026-11-07 20:52，用户 m13280 反馈）
+
+1. **「我的」页先闪「还没有登录」** —— `components/mine-body.vue` 的 `logged` 初值 false 而
+   `restoreSession()` 是异步的，模板在等待期走了未登录分支。修法：加 `booted` 状态，
+   `boot()` 里 `await reloadLocal()` 之后才置 true，等待期显示「正在读取账号…」。
+2. **登录成功后导航塌成两项 / 仍显示未登录** —— 两个独立根因：
+   - 登录页 `navTo('mine')` 压的是一个只有「首页 / 我的」两项的薄壳页；改成
+     `setPendingTab('mine')` + `navBack()` 回到 index 原地切栏目（`services/nav.js` 新增
+     `setPendingTab`/`takeTabParam`，30 秒过期）。
+   - **更隐蔽的一处**：`index.vue` 的 `onShow()` 在 `if (t && t !== this.tab) { this.setTab(t); return; }`
+     里直接 `return`，导致「登录成功 → navBack → setTab('mine')」这条路径下
+     `mine-body.refresh()` 永远不执行。而组件是 `v-if` 挂载的，登录前就已挂上（logged=false），
+     登录后不会重新挂载 → 界面一直停在「还没有登录」。修法：抽出 `refreshMineBody()`
+     （`$refs.body` → `$root.__mineBody` → `this.__mineBody` 三级回退 + 120/260ms 两次重试），
+     并在 `setTab` 之后用 `$nextTick` 调它，不再 `return`。
+3. **易盾文案** —— 密码登录返 `1125 need_yidun_validate_fail_enough`、发短信返
+   `1122 phone_validate_fail_yidun`，`friendlyErr()` 都没处理，直接把「易盾校验失败次数过大,
+   要前端cool」甩给用户。统一成「易盾校验失败，请切换网络或稍后重试」；
+   `sendCode()` 的 catch 里对这类完整文案**不再加「发送失败：」前缀**。
+
+> 注：易盾风控会把账号锁成 `1125`（正确密码也拒），主机侧 `POST api/v1/phone-captchas/86-<phone>`
+> 同样返 `1122`。短信修法时断了、修好后又能发。冷却时长来自
+> `getCustomizeSettings("yidun_signin_validate")` 的 `risk_control_cooling_time`，
+> 但 `api/v1/customize-settings/yidun_signin_validate/all` 返回 `{"val":null}`（服务端未配置）。
+
 ### 两个必须记住的回归陷阱
 1. **视频管线不能加 `! queue`** —— 加了之后 `mppvideodec` 输出全零缓冲，画面变成 BT.601 的纯绿 `(0,135,0)`。
    音频那条 `queue` 必须保留（opusdec 的 caps 协商依赖它）。
@@ -36,7 +61,7 @@
 ## 产物
 | 文件 | 大小 | 说明 |
 |---|---|---|
-| `8002026110200003.1_0_0.amr` | 217600 B | 可安装包，含两个 native .so + logo 资源 |
+| `8002026110200003.1_0_0.amr` | 218665 B | 可安装包，含两个 native .so + logo 资源 |
 | `app_icon.png` | 23106 B | 256x256，官方 logo 矢量化重建 |
 | `src/assets/logo.png` | 10451 B | 128x128，界面内使用的软件图标 |
 | `libs/libjsapi_cgnative.so` | 62200 B | HTTP + 加密原语 + 自建 WebSocket + webp 转码 |

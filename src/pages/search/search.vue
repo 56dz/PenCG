@@ -110,7 +110,7 @@
 import { v1 } from '../../services/cg.js';
 import { imgUrl } from '../../services/img.js';
 import { loadHotSearches, loadGameList } from '../../services/catalog.js';
-import { navTo, navBack, peekParams } from '../../services/nav.js';
+import { navTo, navBack, peekParams, setPendingTab } from '../../services/nav.js';
 import { getJSON, setJSON } from '../../services/storage.js';
 import { logInfo, logWarn } from '../../services/log.js';
 import { ImSession } from '../../services/im.js';
@@ -393,8 +393,12 @@ export default {
     },
     setTab(id) {
       if (id === 'search') return;
+      /* 用户反馈 2：不能 navTo('mine') —— 那会压一个新的 mine 薄壳页，
+       * 它的顶栏只有「首页 / 我的」两项，左侧导航看起来就塌了。
+       * 正确做法是退回 index 再让它切到「我的」栏目。 */
       if (id === 'mine') {
-        navTo('mine', {});
+        try { setPendingTab('mine'); } catch (e) {}
+        if (!navBack()) navTo('index', { tab: 'mine' });
         return;
       }
       navBack();

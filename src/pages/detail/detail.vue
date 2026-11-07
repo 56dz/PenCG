@@ -100,7 +100,7 @@ import { loadGameDetail, loadGameList } from '../../services/catalog.js';
 import { v1 } from '../../services/cg.js';
 import { recordPlay, listPlays } from '../../services/history.js';
 import { loadSettings, saveSettings } from '../../services/settings.js';
-import { navTo, navBack, peekParams } from '../../services/nav.js';
+import { navTo, navBack, peekParams, setPendingTab } from '../../services/nav.js';
 import { QUALITIES, QUALITY_LABEL, normQuality } from '../../services/const.js';
 import { logInfo, logWarn } from '../../services/log.js';
 import logoImg from '../../assets/logo.png';
@@ -399,7 +399,9 @@ export default {
         return;
       }
       if (id === 'mine') {
-        navTo('mine', {});
+        /* 同 search.vue：退回 index 再切栏目，避免压一层只有两项导航的薄壳页 */
+        try { setPendingTab('mine'); } catch (e) {}
+        if (!navBack()) navTo('index', { tab: 'mine' });
         return;
       }
       // 其余分区回首页（首页自己管 tab 态）

@@ -105,7 +105,7 @@
 <script>
 import { loadHomeTabs, loadBanners, loadNotices, loadRecommendations, loadGameList } from '../../services/catalog.js';
 import { restoreSession } from '../../services/auth.js';
-import { navTo } from '../../services/nav.js';
+import { navTo, takeTabParam } from '../../services/nav.js';
 import { logInfo, logWarn } from '../../services/log.js';
 import logoImg from '../../assets/logo.png';
 import MineBody from '../../components/mine-body.vue';
@@ -160,7 +160,61 @@ export default {
   mounted() {
     this.boot();
   },
+  /* 用户反馈 2 的另一半：登录成功后是 navBack() 回到本页的（不是重新
+   * navTo 一个 mine 页），而 navBack 没法带参数，所以登录页先用
+   * setPendingTab('mine') 留一个标记，这里取一次即销。
+   *
+   * 另外「我的」栏目的 mine-body 是 v-if 挂载的，从登录页回来时它已经
+   * 销毁又重建，所以这里必须让它重新 refresh 一次，否则会看到登录前的旧状态。 */
+  onShow() {
+    let t = '';
+    try {
+      t = takeTabParam();
+    } catch (e) {
+      t = '';
+    }
+    if (t && t !== this.tab) {
+      this.setTab(t);
+      // ★ 不能 return。之前这里直接 return，导致「登录成功 → navBack 回首页 →
+      // setTab('mine')」这条路径下 mine-body 的 refresh() 永远不执行。
+      // 组件是 v-if 挂载的，登录前就已经挂上（那时 logged=false），登录后
+      // 不会重新挂载，于是界面一直停在「还没有登录网易云游戏」——用户 m13280
+      // 报的第 2 条「登录后跳过去还是未登录」就是这个。
+      // 这里要多等一帧让 v-if 渲染完再拿引用，所以用 setTimeout(0)+重试。
+      this.$nextTick
+        ? this.$nextTick(this.refreshMineBody)
+        : this.refreshMineBody();
+      return;
+    }
+    if (this.tab === 'mine') this.refreshMineBody();
+  },
   methods: {
+    /* 拿 mine-body 组件实例并让它重新读一次会话。
+     * 三条回退路径都不能省：$refs 在本运行时实测常常拿不到（Weex 渲染树
+     * 和 Vue 实例树不是一一对应），组件自己在 mounted 里挂了 this.$root.__mineBody。 */
+    refreshMineBody() {
+      const self = this;
+      const pick = function () {
+        return (self.$refs && self.$refs.body) || (self.$root && self.$root.__mineBody) || self.__mineBody;
+      };
+      const run = function () {
+        const b = pick();
+        if (b && b.refresh) {
+          try {
+            b.refresh();
+          } catch (e) {
+            /* ignore */
+          }
+          return true;
+        }
+        logWarn('[index] mine-body 实例未就绪，重试');
+        return false;
+      };
+      if (run()) return;
+      // 组件可能刚被 v-if 挂上去，实例还没就绪；重试两轮就够（总约 260ms）
+      setTimeout(run, 120);
+      setTimeout(run, 260);
+    },
     // Weex 的 lines:1 在本机型上不可靠（实测中文长名会换行并溢出卡片），
     // 所以按字符数硬截断。74px 宽的卡片用 10px 字只能放 6 个汉字。
     clipName(name, max) {

@@ -16,6 +16,14 @@
       </div>
     </div>
 
+    <div v-else-if="!booted" class="mb-guest">
+      <div class="mb-guest-avatar"><text class="mb-guest-avatar-text">·</text></div>
+      <div class="mb-guest-info">
+        <text class="mb-guest-title">正在读取账号…</text>
+        <text class="mb-guest-desc">请稍候</text>
+      </div>
+    </div>
+
     <div v-else-if="!logged" class="mb-guest">
       <div class="mb-guest-avatar"><text class="mb-guest-avatar-text">?</text></div>
       <div class="mb-guest-info">
@@ -128,6 +136,12 @@ export default {
   data() {
     return {
       logged: false,
+      /* booted：restoreSession() 是否已经跑完。
+       * 真机现象（用户反馈 1）：进入软件后点「我的」，会先闪一下
+       * 「还没有登录网易云游戏」，一两秒后才换成真实资料 —— 因为
+       * logged 初值是 false，而 restoreSession() 是异步的。
+       * 没跑完之前不该断言「未登录」，只能显示读取中。 */
+      booted: false,
       busy: false,
       toast: '',
       errText: '',
@@ -337,12 +351,17 @@ export default {
         this.settings = null;
       }
       await this.reloadLocal();
+      // 会话已恢复完，这时才算「确定」了登录态，可以安全地显示真实内容
+      this.booted = true;
       logInfo('[mine] boot logged=' + this.logged);
       if (this.logged) this.refreshProfile();
     },
     // 外层（index.vue 内嵌、mine.vue 薄壳的 onShow）统一调它
     async refresh() {
       await this.reloadLocal();
+      // 诊断用：用户 m13280 第 2 条「登录后跳过来还显示未登录」，需要区分
+      // 是 refresh 根本没被调用，还是调用了但读到的会话仍是空。
+      logInfo('[mine] refresh logged=' + this.logged + ' booted=' + this.booted);
       if (this.logged) await this.refreshProfile();
     },
     async reloadLocal() {

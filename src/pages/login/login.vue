@@ -89,7 +89,7 @@
 <script>
 import { loginByPassword, loginBySms, sendSmsCode, restoreSession, currentSession } from '../../services/auth.js';
 import { getString, setString } from '../../services/storage.js';
-import { navTo, navBack } from '../../services/nav.js';
+import { navTo, navBack, setPendingTab } from '../../services/nav.js';
 import logoImg from '../../assets/logo.png';
 import { ImSession } from '../../services/im.js';
 import { logInfo, logWarn } from '../../services/log.js';
@@ -205,7 +205,21 @@ export default {
       navBack();
     },
     goMine() {
-      navTo('mine', {});
+      // 同 goBackToMine：顶栏「我的」也不能 navTo('mine')，
+      // 否则会压一个只有两项导航的薄壳页（用户反馈 2）。
+      this.goBackToMine();
+    },
+    // 登录成功后回到「我的」栏目：先尝试 navBack 退回 index（保住它已经
+    // 加载好的首页数据），退不掉才 navTo('index')。两条路都通过 nav.js 的
+    // pending 把 tab:'mine' 传给 index，让它在 onShow 里切到「我的」。
+    goBackToMine() {
+      try {
+        setPendingTab('mine');
+      } catch (e) {
+        /* ignore */
+      }
+      const ok = navBack();
+      if (!ok) navTo('index', { tab: 'mine' });
     },
     showToast(t) {
       this.toast = t;
@@ -351,7 +365,11 @@ export default {
         this.showToast('验证码已发送');
         logInfo('[login] sms sent wait=' + this.smsWait);
       } catch (e) {
-        this.errText = '发送失败：' + this.friendlyErr(e, 'sms');
+        // 易盾（1122/1125）给的是完整可执行文案，前面再叠「发送失败：」会变成
+        // 「发送失败：易盾校验失败，请切换网络或稍后重试」——用户 m13280 第 3 条
+        // 明确要的是后者这一句本身，所以这类文案不加前缀。
+        const msg = this.friendlyErr(e, 'sms');
+        this.errText = msg.indexOf('易盾') === 0 ? msg : '发送失败：' + msg;
         logWarn('[login] sms fail ' + ((e && e.message) || e) + ' | detail=' + this.errText);
       } finally {
         this.busy = false;
@@ -378,6 +396,18 @@ export default {
       if (code === 1103) return '区号无效，请检查 +86';
       if (code === 1104) return '该手机号未注册';
       if (code === 1006) return '登录已过期，请重新登录';
+      /* 1125：password 接口被风控拦下，服务端原文是
+       *   errmsg  need_yidun_validate_fail_enough
+       *   errmsgcn「易盾校验失败次数过大,要前端cool」
+       * 原文直接甩给用户完全看不懂（"前端cool"是给开发者看的）。
+       * 实测触发条件是同一 IP 短时间内多次登录失败，换网络/等一会儿就能恢复，
+       * 所以文案必须给出可执行的动作。 */
+      /* 1122 / 1125 都是易盾（网易风控）拦下的：
+       *   1122 → 发短信验证码时（phone-captchas）
+       *   1125 → 密码登录时（user-pwd-tokens，need_yidun_validate_fail_enough）
+       * 真机日志实证：`[login] sms fail 1122 易盾校验失败`。
+       * 两者对用户的处置动作完全一样，合并成一个文案。 */
+      if (code === 1122 || code === 1125) return '易盾校验失败，请切换网络或稍后重试';
       // auth.js 在 user-pwd-info 缺 salt 时抛的是这句话（未注册号码只返回 is_registered:false）
       if (msg.indexOf('取登录参数失败') >= 0) return '该手机号未注册，或未设置密码';
       if (msg.indexOf('native 加密模块不可用') >= 0) return '本机加密模块缺失，无法密码登录（可改用短信登录）';
@@ -413,14 +443,24 @@ export default {
           r = await loginBySms(this.phone, this.cc, this.smsCode);
         }
         await setString(LAST_PHONE_KEY, this.phone);
-        this.showToast('登录成功');
         logInfo('[login] success uid=' + (r && r.userId));
+        /* 用户反馈 4：原来只 toast「登录成功」两秒就没了，而真正跳回「我的」
+         * 还要再等一会儿拉 @me 资料，中间这段没有任何提示，像是卡住了。
+         * 现在把 loading 态文案直接写在页面上（statusText），并明确说在跳转。 */
+        this.statusText = '登录成功，正在跳转…';
+        this.showToast('登录成功，正在跳转…');
         this.refreshStatus();
         const self = this;
         setTimeout(function () {
           self.busy = false;
-          navTo('mine', {});
-        }, 800);
+          /* 关键（用户反馈 2）：登录页是 navTo 进来的独立页，登录完必须
+           * navBack() 回到 index 原地栏目，而不是 navTo('mine') ——
+           * navTo('mine') 会再压一个新的 mine 薄壳页，它的顶栏只有
+           * 「首页 / 我的」两项，用户就以为左侧导航塌了。
+           * index 现在支持 tab 参数（见 index.vue 的 takeTabParam），
+           * 回退时带上 tab:'mine' 就能直接落在「我的」栏目。 */
+          self.goBackToMine();
+        }, 600);
       } catch (e) {
         this.busy = false;
         this.errText = this.friendlyErr(e, this.mode);
