@@ -42,6 +42,8 @@ export default {
     };
   },
   onShow() {
+  },
+  onShow() {
     // 优先 ref；$refs 在本运行时不一定可用，回退到组件自己挂在根实例上的引用。
     // 注意第三条 `this.$root.__mineBody` 之前漏了，只写了 `this.__mineBody`，
     // 而 mine-body 挂的是 $root 上的那个，导致本页 onShow 永远刷不到数据。
@@ -64,7 +66,8 @@ export default {
   },
   methods: {
     goIndex() {
-      navTo('index', {});
+      // 本页就压在 index 之上，直接关自己即为 pop
+      if (!navBack('mine')) navTo('index', {});
     },
     goTab(id) {
       if (id === 'mine') return;

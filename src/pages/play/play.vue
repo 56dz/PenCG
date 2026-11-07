@@ -134,7 +134,7 @@
   </div>
 </template>
 <script>
-import { navTo, peekParams } from '../../services/nav.js';
+import { navTo, navBack, peekParams, requestHome } from '../../services/nav.js';
 import { restoreSession, isLoggedIn, currentSession } from '../../services/auth.js';
 import { applyTicket, stopGame } from '../../services/session.js';
 import { startPlay, stopPlay, setQuality, setRect, mediaState, setEventHandler, setVideoVisible, setInputBusy, requestKeyFrame } from '../../services/media.js';
@@ -1052,7 +1052,7 @@ export default {
       // 未登录时从来没申请过机位，直接回首页，别白发一轮 DELETE
       if (self.stage === 'nologin') {
         self.clearTimers();
-        navTo('index', {});
+        self.goHome();
         return Promise.resolve(null);
       }
       self.busy = true;
@@ -1077,15 +1077,31 @@ export default {
         self.clearTimers();
         self.busy = false;
         logInfo('[play] 退出完成 → index');
-        navTo('index', {});
+        self.goHome();
         return null;
       });
     },
     goLogin: function () {
       navTo('login', {});
     },
+    /* 回首页：只关掉自己，剩下「再退一层」交给被露出来的 detail / queue
+     * 在自己 onShow 里接力（见 services/nav.js 的 requestHome 注释）。
+     * 直接 navTo('index') 会新压一层 index —— 动画是 push、页面栈还会变深。 */
+    goHome: function () {
+      /* 一次退到底：先把夹在中间的那些页按名字从栈里摘掉，最后再关自己。
+       * 不能「先关自己再 setTimeout 关别人」——自己的 JS 上下文一没，定时器
+       * 就跟着没了，后面的关不掉（真机实测会停在中间页 detail 上）。
+       * 反过来（先摘下面的、最后关自己）在本固件上可行，实测见 HANDOFF。 */
+      try {
+        if (typeof $falcon !== 'undefined' && typeof $falcon.closePageByName === 'function') {
+          $falcon.closePageByName('detail');
+          $falcon.closePageByName('queue');
+        }
+      } catch (e) { /* ignore */ }
+      if (!navBack('play')) navTo('index', {});
+    },
     goIndex: function () {
-      navTo('index', {});
+      this.goHome();
     },
     startTimers: function () {
       if (this.dead) return;

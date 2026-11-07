@@ -111,3 +111,33 @@ export function navBack(pageName) {
   logWarn('[nav] 无法关闭页面 name=' + p);
   return false;
 }
+
+/* ── 「一路退回首页」的接力旗 ──────────────────────────────────────────
+ *
+ * 场景：播放页 / 排队页 / 我的薄壳页里点「回首页」。栈可能是
+ *   index → detail → play        或 index → queue → play
+ * 只 navBack('play') 会落到 detail（或 queue），不是用户要的首页。
+ *
+ * 不能这么写：先 closePageByName('play')、再 setTimeout 关 detail ——
+ * 关掉自己的时候所在页面的 JS 上下文连同定时器一起没了，后面的关不掉。
+ *
+ * 所以改成接力：调用方记一个「还要再退 N 层」的旗子，然后只管关自己；
+ * 被露出来的那一页在自己的 onShow 里取一次旗子，如果还有剩余就接着关自己。
+ * 每一页关门用的都是它**自己**的上下文，定时器不受影响。
+ * index.vue 的 onShow 负责把旗子清零，避免残旗误伤（比如用户自己按返回）。 */
+let homeHops = 0;
+
+export function requestHome(hops) {
+  const n = Number(hops);
+  homeHops = n > 0 ? Math.floor(n) : 1;
+}
+
+export function takeHomeHop() {
+  if (homeHops <= 0) return false;
+  homeHops--;
+  return true;
+}
+
+export function clearHomeHop() {
+  homeHops = 0;
+}

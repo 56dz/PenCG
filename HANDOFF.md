@@ -198,3 +198,26 @@ src rect[1600x900] / dst pos[107,487] rect[266x473]`，比例 0.5625 与 0.5623 
 - `free_time_left`：0（VIP 不走这个额度）
 - 机位：`games_playing = []`，无残留
 - 后台进程：无残留
+
+### 「回首页」也从 push 改成 pop（2026-11-07 22:05）
+
+`play.vue` 退出游戏 / `queue.vue` 排队成功 / `mine.vue` 薄壳页的「首页」原来都是
+`navTo('index')` —— 和返回键那个 bug 同源：新压一层 index，动画是 push、栈还会变深。
+
+**唯一可行的写法是「先摘中间页、最后关自己」**：
+```js
+$falcon.closePageByName('detail');   // 夹在中间的先从栈里摘掉
+$falcon.closePageByName('queue');
+navBack('play');                     // 最后关自己，露出 index
+```
+反过来（先关自己，再 `setTimeout` 关 detail）**真机实测会停在 detail 上**：自己的 JS
+上下文一没，定时器跟着没，后面的关不掉。这条踩过一次，别再写回去。
+
+真机证据（`profiles/evidence/`）：
+- `nav_exit_play_pop.png` —— 动画中帧：index 已占满左侧，play 页只剩最右边一条正在滑出 = pop
+- `nav_exit_play_index.png` —— 落点就是 index（197105 B），不再停在 detail
+- 日志：`[play] 退出完成 → index` → `[nav] closePageByName play`，`plane=0`
+
+顺带说一句：`src/services/nav.js` 里那套 `requestHome/takeHomeHop/clearHomeHop`
+（接力旗）**没有用上，且跨页面不共享模块状态** —— 保留只为说明「为什么这条路不通」，
+真要接力得把状态落在 `$falcon` 能共享的地方。当前实现不依赖它。

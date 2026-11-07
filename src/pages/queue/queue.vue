@@ -333,7 +333,14 @@ export default {
     goIndex: function () {
       this.finished = true;
       this.clearTimers();
-      navTo('index', {});
+      // 排队成功回首页：栈里可能还夹着 detail，先摘中间页、最后关自己
+      // （反过来会停在中面页上，见 HANDOFF「回首页也从 push 改成 pop」）。
+      try {
+        if (typeof $falcon !== 'undefined' && typeof $falcon.closePageByName === 'function') {
+          $falcon.closePageByName('detail');
+        }
+      } catch (e) { /* ignore */ }
+      if (!navBack('queue')) navTo('index', {});
     },
     startTimers: function () {
       var self = this;
