@@ -1,0 +1,37 @@
+# Falcon 构建产物（由 aiot-vue-cli 生成，不入库）
+.falcon_/
+.falcon_tmp/
+*.amr
+
+# native 编译产物
+libs/*.so
+*.o
+*.a
+*.d
+
+# 设备导入库 / 交叉编译 SDK（体积大，按需本地准备，见 docs/DEV.md）
+native/stubs-aarch64/
+native/stubs-aarch64-gst/
+native/vendor/
+native/iot-miniapp-sdk/
+native/third_party/
+
+# 临时取证与调试脚本
+.tmp/
+
+# 调试期的中间过程截图（只保留 docs 引用到的验收图）
+profiles/archive/
+
+# 依赖
+node_modules/
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+*.swp
+__pycache__/
+*.pyc
+
+# 编辑器
+.vscode/
+.idea/

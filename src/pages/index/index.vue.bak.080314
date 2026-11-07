@@ -1,0 +1,568 @@
+<template>
+  <div class="page">
+    <!-- 左侧竖导航：76px -->
+    <div class="bar">
+      <div class="brand">
+        <div class="brand-mark"><text class="brand-mark-text">P</text></div>
+      </div>
+      <div v-for="t in tabs" :key="t.id" :class="tab === t.id ? 'tab tab-on' : 'tab'" @click="setTab(t.id)">
+        <text :class="tab === t.id ? 'tab-text tab-text-on' : 'tab-text'">{{ t.label }}</text>
+      </div>
+    </div>
+
+    <!-- 内容区：884x266 -->
+    <div class="content">
+      <!-- 顶部条：标题 + 搜索 + 账号 -->
+      <div class="topbar">
+        <text class="topbar-title">{{ title }}</text>
+        <div class="search-entry" @click="goSearch">
+          <text class="search-hint">搜索游戏 / 关键词</text>
+        </div>
+        <div class="topbar-right">
+          <text class="topbar-user" @click="goMine">{{ userText }}</text>
+        </div>
+      </div>
+
+      <!-- 加载中 -->
+      <div v-if="loading" class="state-row">
+        <text class="state-text">{{ loadingText }}</text>
+      </div>
+
+      <!-- 出错 -->
+      <div v-else-if="errText" class="state-row" @click="reload">
+        <text class="state-text">{{ errText }}</text>
+        <div class="retry-btn"><text class="retry-text">重试</text></div>
+      </div>
+
+      <!-- 首页：横幅 + 多行模块 -->
+      <scroller v-else class="body">
+        <!-- 横幅 -->
+        <div v-if="banners.length" class="banner-row">
+          <div v-for="b in banners" :key="b.id" class="banner" @click="openBanner(b)">
+            <image class="banner-img" :src="b.image" :width="200" :height="76"></image>
+            <div class="banner-mask">
+              <text class="banner-name">{{ b.gameName || '活动' }}</text>
+            </div>
+          </div>
+        </div>
+
+        <!-- 公告 -->
+        <div v-if="notice" class="notice-row">
+          <text class="notice-tag">公告</text>
+          <text class="notice-text">{{ notice }}</text>
+        </div>
+
+        <!-- 推荐模块：横向滑动 -->
+        <div v-for="m in modules" :key="m.id" class="mod">
+          <div class="mod-head">
+            <text class="mod-title">{{ m.title }}</text>
+            <text class="mod-count">{{ m.games.length }} 款</text>
+          </div>
+          <scroller class="mod-scroll">
+            <div class="mod-row">
+              <div v-for="g in m.games" :key="m.id + '_' + g.code" class="gcard" @click="openGame(g)">
+                <div class="gcard-icon-wrap"><image class="gcard-icon" :src="g.icon" :width="56" :height="56"></image></div>
+                <div class="gcard-line"><text class="gcard-name">{{ clipName(g.name) }}</text></div>
+                <div class="gcard-line"><text class="gcard-btn">秒玩</text></div>
+              </div>
+            </div>
+          </scroller>
+        </div>
+
+        <!-- 分类列表：网格 -->
+        <div v-if="list.length" class="mod">
+          <div class="mod-head">
+            <text class="mod-title">{{ listTitle }}</text>
+            <text class="mod-count">共 {{ total }} 款</text>
+          </div>
+          <div class="grid">
+            <div v-for="g in list" :key="'l' + g.code" class="lcard" @click="openGame(g)">
+              <div class="lcard-icon-wrap"><image class="lcard-icon" :src="g.icon" :width="56" :height="56"></image></div>
+              <div class="lcard-info">
+                <text class="lcard-name">{{ clipName(g.name, 16) }}</text>
+                <text class="lcard-sum">{{ g.summary || g.tags.join(' · ') }}</text>
+              </div>
+            </div>
+          </div>
+          <div class="more-row">
+            <div class="more-btn" @click="loadMore"><text class="more-text">{{ moreText }}</text></div>
+          </div>
+        </div>
+
+        <div v-if="!modules.length && !list.length && !loading" class="state-row">
+          <text class="state-text">暂无内容，点顶部搜索试试</text>
+        </div>
+      </scroller>
+    </div>
+  </div>
+</template>
+
+<script>
+import { loadHomeTabs, loadBanners, loadNotices, loadRecommendations, loadGameList } from '../../services/catalog.js';
+import { restoreSession, currentSession } from '../../services/auth.js';
+import { navTo } from '../../services/nav.js';
+import { logInfo, logWarn } from '../../services/log.js';
+
+const TABS = [
+  { id: 'recommend', label: '推荐' },
+  { id: 'mobile', label: '手游' },
+  { id: 'pc', label: '端游' },
+  { id: 'free', label: '限免' },
+  { id: 'search', label: '搜索' },
+  { id: 'mine', label: '我的' }
+];
+
+export default {
+  data() {
+    return {
+      tabs: TABS,
+      tab: 'recommend',
+      title: '推荐',
+      loading: true,
+      loadingText: '正在加载推荐…',
+      errText: '',
+      banners: [],
+      notice: '',
+      modules: [],
+      list: [],
+      listTitle: '全部游戏',
+      page: 0,
+      total: 0,
+      moreText: '加载更多',
+      userText: '未登录',
+      tabIds: null
+    };
+  },
+  mounted() {
+    this.boot();
+  },
+  methods: {
+    // Weex 的 lines:1 在本机型上不可靠（实测中文长名会换行并溢出卡片），
+    // 所以按字符数硬截断。74px 宽的卡片用 10px 字只能放 6 个汉字。
+    clipName(name, max) {
+      const s = String(name || '');
+      const n = max || 6;
+      return s.length > n ? s.slice(0, n) + '…' : s;
+    },
+    async boot() {
+      try {
+        const ok = await restoreSession();
+        const s = currentSession();
+        this.userText = ok && s ? s.nickname || '我的' : '未登录';
+      } catch (e) {
+        /* ignore */
+      }
+      await this.loadHome();
+    },
+    async prepareTabs() {
+      if (this.tabIds) return this.tabIds;
+      try {
+        const t = await loadHomeTabs();
+        const map = {};
+        for (const x of t) map[x.type || x.id] = x.id;
+        this.tabIds = map;
+      } catch (e) {
+        this.tabIds = {};
+      }
+      return this.tabIds;
+    },
+    async loadHome() {
+      this.loading = true;
+      this.errText = '';
+      this.loadingText = '正在加载推荐…';
+      try {
+        const t = await this.prepareTabs();
+        const tabId = t.recommend || t[''] || '';
+        const [bs, ns, mods] = await Promise.all([
+          loadBanners().catch(() => []),
+          loadNotices().catch(() => []),
+          loadRecommendations(tabId).catch((e) => {
+            logWarn('[index] 推荐失败: ' + ((e && e.message) || e));
+            return [];
+          })
+        ]);
+        this.banners = (bs || []).slice(0, 4);
+        this.notice = (ns && ns[0] && ns[0].text) || '';
+        this.modules = (mods || []).slice(0, 6);
+        logInfo('[index] 推荐模块 ' + this.modules.length + ' 个, banner ' + this.banners.length);
+        if (!this.modules.length) {
+          // 兜底：直接拉列表
+          await this.loadList(0, true);
+        }
+      } catch (e) {
+        this.errText = '加载失败：' + ((e && e.message) || e);
+      } finally {
+        this.loading = false;
+      }
+    },
+    async loadList(page, reset) {
+      this.loadingText = '正在加载游戏列表…';
+      const gt = this.tab === 'pc' ? 'pc' : 'mobile';
+      try {
+        const r = await loadGameList({ page: page || 0, perPage: 24, gameType: gt });
+        if (reset) this.list = r.items;
+        else this.list = this.list.concat(r.items);
+        this.total = r.total;
+        this.page = page || 0;
+        this.listTitle = gt === 'pc' ? '端游列表' : '手游列表';
+        this.moreText = this.list.length < this.total ? '加载更多' : '已经到底了';
+      } catch (e) {
+        this.errText = '列表加载失败：' + ((e && e.message) || e);
+      } finally {
+        this.loading = false;
+      }
+    },
+    async setTab(id) {
+      if (id === 'search') {
+        navTo('search', {});
+        return;
+      }
+      if (id === 'mine') {
+        navTo('mine', {});
+        return;
+      }
+      this.tab = id;
+      const names = { recommend: '推荐', mobile: '手游', pc: '端游', free: '限免' };
+      this.title = names[id] || '推荐';
+      this.modules = [];
+      this.list = [];
+      this.banners = [];
+      this.notice = '';
+      if (id === 'recommend') {
+        await this.loadHome();
+        return;
+      }
+      this.loading = true;
+      await this.loadList(0, true);
+    },
+    async loadMore() {
+      if (!this.list.length) return;
+      this.moreText = '加载中…';
+      await this.loadList(this.page + 1, false);
+    },
+    reload() {
+      this.loadHome();
+    },
+    goSearch() {
+      navTo('search', {});
+    },
+    goMine() {
+      navTo('mine', {});
+    },
+    openGame(g) {
+      navTo('detail', { code: g.code, name: g.name });
+    },
+    openBanner(b) {
+      if (b.gameCode) {
+        navTo('detail', { code: b.gameCode, name: b.gameName });
+        return;
+      }
+      navTo('search', { keyword: b.gameName });
+    }
+  }
+};
+</script>
+
+<style lang="less" scoped>
+@import "base.less";
+
+.topbar {
+  height: 38px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 12px;
+  padding-right: 10px;
+}
+
+.topbar-title {
+  font-size: 17px;
+  color: @text-color;
+  width: 78px;
+}
+
+.search-entry {
+  height: 26px;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  border-radius: 13px;
+  background-color: @card-background-color;
+  justify-content: center;
+  padding-left: 12px;
+}
+
+.search-hint {
+  font-size: 13px;
+  color: @text-color-dim;
+}
+
+.topbar-right {
+  width: 92px;
+  flex-direction: row;
+  justify-content: flex-end;
+}
+
+.topbar-user {
+  font-size: 13px;
+  color: @accent-blue;
+}
+
+.body {
+  flex-direction: column;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  padding-left: 12px;
+  padding-right: 8px;
+  padding-bottom: 6px;
+}
+
+.banner-row {
+  flex-direction: row;
+  height: 78px;
+}
+
+.banner {
+  width: 200px;
+  height: 76px;
+  margin-right: 6px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.banner-img {
+  width: 200px;
+  height: 76px;
+}
+
+.banner-mask {
+  height: 20px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 6px;
+  background-color: rgba(0, 0, 0, 0.45);
+}
+
+.banner-name {
+  font-size: 11px;
+  color: @text-color-strong;
+}
+
+.notice-row {
+  height: 24px;
+  flex-direction: row;
+  align-items: center;
+  margin-top: 2px;
+}
+
+.notice-tag {
+  font-size: 11px;
+  color: #ffffff;
+  background-color: @accent;
+  border-radius: 3px;
+  padding-left: 4px;
+  padding-right: 4px;
+  margin-right: 6px;
+}
+
+.notice-text {
+  font-size: 12px;
+  color: @text-color-dim;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  lines: 1;
+}
+
+.mod {
+  flex-direction: column;
+  margin-top: 4px;
+}
+
+.mod-head {
+  height: 20px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.mod-title {
+  font-size: 14px;
+  color: @text-color;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+}
+
+.mod-count {
+  font-size: 11px;
+  color: @text-color-dim;
+}
+
+.gcard:active {
+  background-color: @ctrl-background;
+}
+
+.mod-scroll {
+  height: 102px;
+}
+
+.mod-row {
+  flex-direction: row;
+}
+
+/* 卡片 74x98 = padding 4 + 图标 60 + 名字行 15 + 秒玩行 15 + 余 4
+   关键：<text> 在 Weex 里 height 常被内容行高顶掉，所以文字一律套一个
+   定高 + overflow:hidden 的 div 容器（.gcard-line），由容器裁掉溢出。 */
+.gcard {
+  width: 74px;
+  height: 100px;
+  margin-right: 6px;
+  border-radius: 8px;
+  background-color: @card-background-color;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 4px;
+  overflow: hidden;
+}
+
+.gcard-icon-wrap {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.gcard-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+}
+
+.gcard-line {
+  width: 70px;
+  height: 13px;
+  margin-top: 3px;
+  overflow: hidden;
+  justify-content: center;
+  align-items: center;
+}
+
+/* 说明：Weex 的 <text> 默认行高按字号 * 1.3~1.4 算，只给 height 会溢出到卡片外，
+   必须显式写 line-height 才能压住。窄卡（74px）中文名只能放 6 个字，靠 lines:1 截断。 */
+.gcard-name {
+  font-size: 10px;
+  line-height: 12px;
+  color: @text-color;
+  text-align: center;
+  lines: 1;
+}
+
+.gcard-btn {
+  font-size: 10px;
+  line-height: 12px;
+  color: @accent;
+  text-align: center;
+  lines: 1;
+}
+
+.grid {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.lcard {
+  width: 278px;
+  height: 64px;
+  margin-right: 6px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  background-color: @card-background-color;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 6px;
+}
+
+.lcard-icon-wrap {
+  width: 56px;
+  height: 56px;
+}
+
+.lcard-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+}
+
+.lcard-info {
+  flex-direction: column;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  padding-left: 8px;
+  padding-right: 6px;
+}
+
+.lcard-name {
+  font-size: 13px;
+  color: @text-color;
+  lines: 1;
+}
+
+.lcard-sum {
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 1;
+}
+
+.more-row {
+  height: 30px;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+}
+
+.more-btn {
+  height: 26px;
+  padding-left: 16px;
+  padding-right: 16px;
+  border-radius: 13px;
+  background-color: @ctrl-background;
+  justify-content: center;
+  align-items: center;
+}
+
+.more-text {
+  font-size: 12px;
+  color: @text-color;
+}
+
+.state-row {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+}
+
+.state-text {
+  font-size: 14px;
+  color: @text-color-dim;
+}
+
+.retry-btn {
+  height: 26px;
+  margin-left: 10px;
+  padding-left: 14px;
+  padding-right: 14px;
+  border-radius: 13px;
+  background-color: @accent;
+  justify-content: center;
+  align-items: center;
+}
+
+.retry-text {
+  font-size: 12px;
+  color: #ffffff;
+}
+</style>

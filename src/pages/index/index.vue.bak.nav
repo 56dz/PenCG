@@ -1,0 +1,825 @@
+<template>
+  <div class="page">
+    <!-- 左侧竖导航：76px -->
+    <div class="bar" @touchstart="onBarStart" @touchmove="onBarMove" @touchend="onBarEnd" @touchcancel="onBarEnd">
+      <div class="brand">
+        <image class="brand-logo" :src="logo" :width="26" :height="26"></image>
+      </div>
+      <div v-for="t in tabs" :key="t.id" :class="tabClass(t)" @click="setTab(t.id)">
+        <div class="ih-tab-inner">
+          <text :class="tab === t.id ? 'ih-tab-text ih-tab-text-on' : 'ih-tab-text'">{{ t.label }}</text>
+          <text v-if="t.jump" class="ih-tab-arrow">&#8250;</text>
+        </div>
+      </div>
+    </div>
+
+    <!-- 内容区：884x266 -->
+    <div class="content">
+      <!-- 顶部条：标题 + 搜索（右上角用户名已按需求移除） -->
+      <div class="topbar">
+        <text class="topbar-title">{{ title }}</text>
+        <div class="search-entry" @click="goSearch">
+          <text class="search-hint">搜索游戏 / 关键词</text>
+        </div>
+      </div>
+
+      <!-- 加载中 -->
+      <div v-if="loading && !hasAny" class="state-row">
+        <text class="state-text">{{ loadingText }}</text>
+      </div>
+
+      <!-- 出错 -->
+      <div v-else-if="errText && !hasAny" class="state-row" @click="reload">
+        <text class="state-text">{{ errText }}</text>
+        <div class="retry-btn"><text class="retry-text">重试</text></div>
+      </div>
+
+      <!-- 首页：横幅 + 多行模块 -->
+      <scroller v-else :key="fadeKey" class="body ih-fade">
+        <div v-if="errText" class="ih-err" @click="reload">
+          <text class="state-text">{{ errText }}</text>
+        </div>
+        <!-- 横幅 -->
+        <div v-if="banners.length" class="banner-row">
+          <div v-for="b in banners" :key="b.id" :class="'ih-banner ' + bannerCls" @click="openBanner(b)">
+            <image :class="'ih-banner-img ' + imgCls" :src="b.image" :width="bannerW" :height="76"></image>
+            <div class="banner-mask">
+              <text class="banner-name">{{ b.gameName || '活动' }}</text>
+            </div>
+          </div>
+        </div>
+
+        <!-- 公告 -->
+        <div v-if="notice" class="ih-notice-row">
+          <text class="ih-notice-tag">公告</text>
+          <div class="ih-notice-box"><text class="ih-notice-text">{{ noticeText }}</text></div>
+        </div>
+
+        <!-- 推荐模块：横向滑动 -->
+        <div v-for="m in modules" :key="m.id" class="mod">
+          <div class="mod-head">
+            <text class="mod-title">{{ m.title }}</text>
+            <text class="mod-count">{{ m.games.length }} 款</text>
+          </div>
+          <scroller class="mod-scroll">
+            <div class="mod-row">
+              <div v-for="g in m.games" :key="m.id + '_' + g.code" class="gcard" @click="openGame(g)">
+                <div class="gcard-icon-wrap"><image class="gcard-icon" :src="g.icon" :width="56" :height="56"></image></div>
+                <div class="gcard-line"><text class="gcard-name">{{ clipName(g.name) }}</text></div>
+                <div class="gcard-line"><text class="gcard-btn">秒玩</text></div>
+              </div>
+            </div>
+          </scroller>
+        </div>
+
+        <!-- 分类列表：网格 -->
+        <div v-if="list.length" class="mod">
+          <div class="mod-head">
+            <text class="mod-title">{{ listTitle }}</text>
+            <text class="mod-count">共 {{ total }} 款</text>
+          </div>
+          <div class="grid">
+            <div v-for="g in list" :key="'l' + g.code" class="lcard" @click="openGame(g)">
+              <div class="lcard-icon-wrap"><image class="lcard-icon" :src="g.icon" :width="56" :height="56"></image></div>
+              <div class="lcard-info">
+                <text class="lcard-name">{{ clipName(g.name, 16) }}</text>
+                <text class="lcard-sum">{{ g.summary || g.tags.join(' · ') }}</text>
+              </div>
+            </div>
+          </div>
+          <div class="more-row">
+            <div class="more-btn" @click="loadMore"><text class="more-text">{{ moreText }}</text></div>
+          </div>
+        </div>
+
+        <div v-if="!modules.length && !list.length" class="state-row">
+          <text class="state-text">暂无内容，点顶部搜索试试</text>
+        </div>
+      </scroller>
+    </div>
+  </div>
+</template>
+
+<script>
+import { loadHomeTabs, loadBanners, loadNotices, loadRecommendations, loadGameList } from '../../services/catalog.js';
+import { restoreSession } from '../../services/auth.js';
+import { navTo } from '../../services/nav.js';
+import { logInfo, logWarn } from '../../services/log.js';
+import logoImg from '../../assets/logo.png';
+
+// jump:true = 点了会跳到独立页面（不是原地换内容），用不同底色 + 右箭头做语义区分
+const TABS = [
+  { id: 'recommend', label: '推荐', jump: false },
+  { id: 'mobile', label: '手游', jump: false },
+  { id: 'pc', label: '端游', jump: false },
+  { id: 'free', label: '限免', jump: false },
+  { id: 'search', label: '搜索', jump: true },
+  { id: 'mine', label: '我的', jump: true }
+];
+// 上下滑动手势只在“原地换内容”的 4 个栏目间循环，不会误跳页
+const SWIPE_ORDER = ['recommend', 'mobile', 'pc', 'free'];
+
+export default {
+  data() {
+    return {
+      tabs: TABS,
+      tab: 'recommend',
+      title: '推荐',
+      loading: true,
+      logo: logoImg,      // 左侧栏顶部软件图标（构建时由 image 插件拷进 images/）
+      loadingText: '正在加载推荐…',
+      errText: '',
+      banners: [],
+      notice: '',
+      modules: [],
+      list: [],
+      listTitle: '全部游戏',
+      page: 0,
+      total: 0,
+      moreText: '加载更多',
+      tabIds: null,
+      // ---- 以下为 UI 修复新增 ----
+      hasAny: false,      // 是否已有可显示内容（决定 loading 是整页替换还是保持旧帧）
+      fadeKey: 0,         // 每次整体替换 +1，靠 :key 重挂载重放统一入场动画
+      bannerW: 282,       // banner 宽度，按张数平分整行
+      bannerCls: 'ih-bn3',
+      imgCls: 'ih-img3',
+      noticeText: '',     // JS 硬截断后的公告
+      barY: -1,           // 手势起点 pageY
+      barMoved: 0,
+      swipeLock: false
+    };
+  },
+  mounted() {
+    this.boot();
+  },
+  methods: {
+    // Weex 的 lines:1 在本机型上不可靠（实测中文长名会换行并溢出卡片），
+    // 所以按字符数硬截断。74px 宽的卡片用 10px 字只能放 6 个汉字。
+    clipName(name, max) {
+      const s = String(name || '');
+      const n = max || 6;
+      return s.length > n ? s.slice(0, n) + '…' : s;
+    },
+    async boot() {
+      try {
+        // 右上角用户名已移除，这里仍恢复会话，避免影响后续详情/队列页的登录态
+        await restoreSession();
+      } catch (e) {
+        /* ignore */
+      }
+      await this.loadHome();
+    },
+    async prepareTabs() {
+      if (this.tabIds) return this.tabIds;
+      try {
+        const t = await loadHomeTabs();
+        const map = {};
+        for (const x of t) map[x.type || x.id] = x.id;
+        this.tabIds = map;
+      } catch (e) {
+        this.tabIds = {};
+      }
+      return this.tabIds;
+    },
+    async loadHome() {
+      this.errText = '';
+      this.loading = true;
+      this.loadingText = '正在加载推荐…';
+      try {
+        const t = await this.prepareTabs();
+        const tabId = t.recommend || t[''] || '';
+        const [bs, ns, mods] = await Promise.all([
+          loadBanners().catch(() => []),
+          loadNotices().catch(() => []),
+          loadRecommendations(tabId).catch((e) => {
+            logWarn('[index] 推荐失败: ' + ((e && e.message) || e));
+            return [];
+          })
+        ]);
+        const nb = (bs || []).slice(0, 4);
+        const nm = (mods || []).slice(0, 6);
+        logInfo('[index] 推荐模块 ' + nm.length + ' 个, banner ' + nb.length);
+        let fb = null;
+        if (!nm.length) {
+          // 兜底：直接拉列表（先拿到结果，再和其它块一起提交）
+          fb = await this.fetchList(0);
+        }
+        // ==== 一次性整体替换：所有内容在同一帧生效，不会出现“半边先到” ====
+        this.banners = nb;
+        this.setNotice((ns && ns[0] && ns[0].text) || '');
+        this.modules = nm;
+        if (fb) {
+          this.applyList(fb.items, fb.total, 0);
+        } else {
+          this.list = [];
+          this.total = 0;
+          this.page = 0;
+        }
+        this.applyBannerWidth(nb.length);
+        this.hasAny = !!(nb.length || nm.length || this.list.length);
+        this.fadeKey = this.fadeKey + 1;
+      } catch (e) {
+        this.errText = '加载失败：' + ((e && e.message) || e);
+      } finally {
+        this.loading = false;
+      }
+    },
+    // 只取数据，不碰视图（供原子提交用）
+    async fetchList(page) {
+      const gt = this.tab === 'pc' ? 'pc' : 'mobile';
+      const r = await loadGameList({ page: page || 0, perPage: 24, gameType: gt });
+      return { items: r.items || [], total: r.total || 0, gt: gt };
+    },
+    applyList(items, total, page) {
+      this.list = items || [];
+      this.total = total || 0;
+      this.page = page || 0;
+      const gt = this.tab === 'pc' ? 'pc' : 'mobile';
+      this.listTitle = gt === 'pc' ? '端游列表' : '手游列表';
+      this.moreText = this.list.length < this.total ? '加载更多' : '已经到底了';
+    },
+    // 一个 tab 的内容（banner/modules 清空的动作放在提交时刻，而不是点击时刻）
+    async loadTabList() {
+      try {
+        const r = await this.fetchList(0);
+        this.banners = [];
+        this.setNotice('');
+        this.modules = [];
+        this.applyList(r.items, r.total, 0);
+        this.hasAny = this.list.length > 0;
+        this.fadeKey = this.fadeKey + 1;
+      } catch (e) {
+        this.errText = '列表加载失败：' + ((e && e.message) || e);
+      } finally {
+        this.loading = false;
+      }
+    },
+    async loadList(page, reset) {
+      this.loadingText = '正在加载游戏列表…';
+      const keep = this.list.slice(0);
+      try {
+        const r = await this.fetchList(page);
+        // 分页：追加，绝不丢旧页
+        if (reset) this.list = r.items;
+        else this.list = keep.concat(r.items);
+        this.total = r.total;
+        this.page = page || 0;
+        this.listTitle = r.gt === 'pc' ? '端游列表' : '手游列表';
+        this.moreText = this.list.length < this.total ? '加载更多' : '已经到底了';
+      } catch (e) {
+        this.errText = '列表加载失败：' + ((e && e.message) || e);
+      } finally {
+        this.loading = false;
+      }
+    },
+    async setTab(id) {
+      if (this.swipeLock) return; // 刚滑动过，吞掉随之而来的 click
+      if (id === 'search') {
+        navTo('search', {});
+        return;
+      }
+      if (id === 'mine') {
+        navTo('mine', {});
+        return;
+      }
+      if (id === this.tab && this.hasAny) return; // 重复点当前 tab 不重刷
+      this.tab = id;
+      const names = { recommend: '推荐', mobile: '手游', pc: '端游', free: '限免' };
+      this.title = names[id] || '推荐';
+      // 关键：这里**不清空** banners/modules/list/notice。
+      // 旧帧一直显示，新数据到齐后在 loadHome/loadTabList 里一次性替换 +
+      // 一次性淡入，只有这样两条加载路径的入场才完全一致（原来的“部分滑入部分直接出现”
+      // 就是先清空再异步补数据造成的）。
+      this.errText = '';
+      this.loading = true;
+      this.loadingText = id === 'recommend' ? '正在加载推荐…' : '正在加载游戏列表…';
+      if (id === 'recommend') {
+        await this.loadHome();
+        return;
+      }
+      await this.loadTabList();
+    },
+    // ---- 上下滑动切 tab ----
+    stepTab(dir) {
+      let i = SWIPE_ORDER.indexOf(this.tab);
+      if (i < 0) i = 0;
+      let j = i + dir;
+      if (j < 0) j = 0;
+      if (j > SWIPE_ORDER.length - 1) j = SWIPE_ORDER.length - 1;
+      if (j === i) return;
+      this.setTab(SWIPE_ORDER[j]);
+    },
+    // 本机型只认 changedTouches；快速滑动时 touchmove 会丢，落点必须在 touchend 重取
+    onBarStart(e) {
+      this.barMoved = 0;
+      const ts = (e && e.changedTouches) || [];
+      if (!ts.length) { this.barY = -1; return; }
+      const y = Number(ts[0].pageY);
+      this.barY = isFinite(y) ? y : -1;
+    },
+    onBarMove(e) {
+      if (this.barY < 0) return;
+      const ts = (e && e.changedTouches) || [];
+      if (!ts.length) return;
+      const y = Number(ts[0].pageY);
+      if (isFinite(y)) this.barMoved = y - this.barY;
+    },
+    onBarEnd(e) {
+      const start = this.barY;
+      this.barY = -1;
+      if (start < 0) { this.barMoved = 0; return; }
+      const ts = (e && e.changedTouches) || [];
+      let end = null;
+      if (ts.length) {
+        const y = Number(ts[0].pageY);
+        if (isFinite(y)) end = y;
+      }
+      if (end === null) end = start + this.barMoved;
+      const dy = end - start;
+      this.barMoved = 0;
+      if (!isFinite(dy) || Math.abs(dy) < 40) return; // 小于阈值当点击
+      const self = this;
+      this.stepTab(dy < 0 ? 1 : -1); // 上滑 = 下一个，下滑 = 上一个
+      // 先切，再上锁：锁只用来吞掉滑动结束后系统补发的 click，不能挡住自己这次的 setTab
+      this.swipeLock = true;
+      setTimeout(function () { self.swipeLock = false; }, 400);
+    },
+    tabClass(t) {
+      let c = 'ih-tab';
+      if (t.jump) c = c + ' ih-tab-jump';
+      if (this.tab === t.id) c = c + ' ih-tab-on';
+      return c;
+    },
+    setNotice(text) {
+      this.notice = text || '';
+      this.noticeText = this.clipText(text, 58);
+    },
+    clipText(text, max) {
+      const s = String(text || '').replace(/\s+/g, ' ');
+      const n = max || 58;
+      return s.length > n ? s.slice(0, n) + '…' : s;
+    },
+    // 按张数平分整行：864 = 884 - 左12 - 右8，每张留 6px 间距
+    applyBannerWidth(n) {
+      const c = (n > 0 && n < 5) ? n : 3;
+      this.bannerW = Math.floor((864 - 6 * c) / c);
+      this.bannerCls = 'ih-bn' + c;
+      this.imgCls = 'ih-img' + c;
+    },
+    async loadMore() {
+      if (!this.list.length) return;
+      this.moreText = '加载中…';
+      await this.loadList(this.page + 1, false);
+    },
+    reload() {
+      this.loadHome();
+    },
+    goSearch() {
+      navTo('search', {});
+    },
+    goMine() {
+      navTo('mine', {});
+    },
+    openGame(g) {
+      navTo('detail', { code: g.code, name: g.name });
+    },
+    openBanner(b) {
+      if (b.gameCode) {
+        navTo('detail', { code: b.gameCode, name: b.gameName });
+        return;
+      }
+      navTo('search', { keyword: b.gameName });
+    }
+  }
+};
+</script>
+
+<style lang="less" scoped>
+@import "base.less";
+
+.topbar {
+  height: 38px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 12px;
+  padding-right: 10px;
+}
+
+.topbar-title {
+  font-size: 17px;
+  color: @text-color;
+  width: 78px;
+}
+
+.search-entry {
+  height: 26px;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  border-radius: 13px;
+  background-color: @card-background-color;
+  /* 右上角用户名移除后搜索框独占整行。Weex 默认 flex-direction 是 column，
+     不显式写 row 的话 justify-content 管的是纵向，文字仍会被横向居中。 */
+  flex-direction: row;
+  justify-content: flex-start;
+  align-items: center;
+  padding-left: 12px;
+}
+
+.search-hint {
+  font-size: 13px;
+  color: @text-color-dim;
+}
+
+.body {
+  flex-direction: column;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  padding-left: 12px;
+  padding-right: 8px;
+  padding-bottom: 6px;
+}
+
+.banner-row {
+  flex-direction: row;
+  height: 78px;
+}
+
+.banner {
+  width: 200px;
+  height: 76px;
+  margin-right: 6px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.banner-img {
+  width: 200px;
+  height: 76px;
+}
+
+.banner-mask {
+  height: 20px;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 6px;
+  background-color: rgba(0, 0, 0, 0.45);
+}
+
+.banner-name {
+  font-size: 11px;
+  color: @text-color-strong;
+}
+
+.notice-row {
+  height: 24px;
+  flex-direction: row;
+  align-items: center;
+  margin-top: 2px;
+}
+
+.notice-tag {
+  font-size: 11px;
+  color: #ffffff;
+  background-color: @accent;
+  border-radius: 3px;
+  padding-left: 4px;
+  padding-right: 4px;
+  margin-right: 6px;
+}
+
+.notice-text {
+  font-size: 12px;
+  color: @text-color-dim;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  lines: 1;
+}
+
+.mod {
+  flex-direction: column;
+  margin-top: 4px;
+}
+
+.mod-head {
+  height: 20px;
+  flex-direction: row;
+  align-items: center;
+}
+
+.mod-title {
+  font-size: 14px;
+  color: @text-color;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+}
+
+.mod-count {
+  font-size: 11px;
+  color: @text-color-dim;
+}
+
+.gcard:active {
+  background-color: @ctrl-background;
+}
+
+.mod-scroll {
+  height: 102px;
+}
+
+.mod-row {
+  flex-direction: row;
+}
+
+/* 卡片 74x98 = padding 4 + 图标 60 + 名字行 15 + 秒玩行 15 + 余 4
+   关键：<text> 在 Weex 里 height 常被内容行高顶掉，所以文字一律套一个
+   定高 + overflow:hidden 的 div 容器（.gcard-line），由容器裁掉溢出。 */
+.gcard {
+  width: 74px;
+  height: 100px;
+  margin-right: 6px;
+  border-radius: 8px;
+  background-color: @card-background-color;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 4px;
+  overflow: hidden;
+}
+
+.gcard-icon-wrap {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.gcard-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+}
+
+.gcard-line {
+  width: 70px;
+  height: 13px;
+  margin-top: 3px;
+  overflow: hidden;
+  justify-content: center;
+  align-items: center;
+}
+
+/* 说明：Weex 的 <text> 默认行高按字号 * 1.3~1.4 算，只给 height 会溢出到卡片外，
+   必须显式写 line-height 才能压住。窄卡（74px）中文名只能放 6 个字，靠 lines:1 截断。 */
+.gcard-name {
+  font-size: 10px;
+  line-height: 12px;
+  color: @text-color;
+  text-align: center;
+  lines: 1;
+}
+
+.gcard-btn {
+  font-size: 10px;
+  line-height: 12px;
+  color: @accent;
+  text-align: center;
+  lines: 1;
+}
+
+.grid {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.lcard {
+  width: 278px;
+  height: 64px;
+  margin-right: 6px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  background-color: @card-background-color;
+  flex-direction: row;
+  align-items: center;
+  padding-left: 6px;
+}
+
+.lcard-icon-wrap {
+  width: 56px;
+  height: 56px;
+}
+
+.lcard-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+}
+
+.lcard-info {
+  flex-direction: column;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  padding-left: 8px;
+  padding-right: 6px;
+}
+
+.lcard-name {
+  font-size: 13px;
+  color: @text-color;
+  lines: 1;
+}
+
+.lcard-sum {
+  font-size: 11px;
+  color: @text-color-dim;
+  lines: 1;
+}
+
+.more-row {
+  height: 30px;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+}
+
+.more-btn {
+  height: 26px;
+  padding-left: 16px;
+  padding-right: 16px;
+  border-radius: 13px;
+  background-color: @ctrl-background;
+  justify-content: center;
+  align-items: center;
+}
+
+.more-text {
+  font-size: 12px;
+  color: @text-color;
+}
+
+.state-row {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+}
+
+.state-text {
+  font-size: 14px;
+  color: @text-color-dim;
+}
+
+.retry-btn {
+  height: 26px;
+  margin-left: 10px;
+  padding-left: 14px;
+  padding-right: 14px;
+  border-radius: 13px;
+  background-color: @accent;
+  justify-content: center;
+  align-items: center;
+}
+
+.retry-text {
+  font-size: 12px;
+  color: #ffffff;
+}
+
+/* ================= 首页 UI 修复新增（ih- 前缀，避免与其它页全局合并时撞名） =================
+   Weex 只支持单类名选择器，所以下面全部是独立类名，靠模板里拼字符串叠加。
+   6 个 tab 原来的 h33+mt4 总高 276 会溢出 266 的栏（第 6 个被裁），改成 31+3 = 258。 */
+
+.ih-tab {
+  width: 64px;
+  height: 31px;
+  margin-top: 3px;
+  border-radius: 8px;
+  justify-content: center;
+  align-items: center;
+  background-color: @background-color;
+}
+
+/* 会跳页的两个（搜索/我的）用不同底色，语义上可预期 */
+.ih-tab-jump {
+  background-color: @ctrl-background;
+}
+
+.ih-tab-on {
+  background-color: @accent;
+}
+
+.ih-tab-inner {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+}
+
+.ih-tab-text {
+  font-size: 14px;
+  color: @text-color-dim;
+  text-align: center;
+}
+
+.ih-tab-text-on {
+  color: #FFFFFF;
+}
+
+.ih-tab-arrow {
+  font-size: 12px;
+  color: @text-color-dim;
+  margin-left: 2px;
+}
+
+/* 统一入场：每次内容整体替换时 :key 变化 → 重新挂载 → 动画重放一次。
+   两条加载路径（loadHome / loadTabList）都在提交后 fadeKey+1，所以入场完全一致。 */
+@keyframes ihFadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.ih-fade {
+  animation-name: ihFadeIn;
+  animation-duration: 220ms;
+  animation-timing-function: ease-out;
+  animation-fill-mode: forwards;
+}
+
+/* 有旧帧时不再整页替换，错误以小条形式浮在内容顶部 */
+.ih-err {
+  height: 24px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  background-color: @card-background-color;
+  border-radius: 6px;
+  margin-bottom: 4px;
+}
+
+/* ---------------- banner 平分整行 ---------------- */
+.ih-banner {
+  height: 76px;
+  margin-right: 6px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.ih-banner-img {
+  height: 76px;
+  border-radius: 8px;
+}
+
+.ih-bn1 { width: 858px; }
+.ih-bn2 { width: 426px; }
+.ih-bn3 { width: 282px; }
+.ih-bn4 { width: 210px; }
+
+.ih-img1 { width: 858px; }
+.ih-img2 { width: 426px; }
+.ih-img3 { width: 282px; }
+.ih-img4 { width: 210px; }
+
+/* ---------------- 公告条：定高 + overflow 裁切，文本已在 JS 里硬截断 ---------------- */
+.ih-notice-row {
+  height: 24px;
+  flex-direction: row;
+  align-items: center;
+  margin-top: 2px;
+}
+
+.ih-notice-tag {
+  font-size: 11px;
+  color: #FFFFFF;
+  background-color: @accent;
+  border-radius: 3px;
+  padding-left: 4px;
+  padding-right: 4px;
+  margin-right: 6px;
+}
+
+.ih-notice-box {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0;
+  height: 18px;
+  overflow: hidden;
+}
+
+.ih-notice-text {
+  font-size: 12px;
+  line-height: 18px;
+  color: @text-color-dim;
+}
+
+</style>

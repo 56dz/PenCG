@@ -1,0 +1,276 @@
+@import "var.less";
+
+// PenCG 主界面骨架（X6 Pro：逻辑画布 960x266，1:1 渲染，无缩放）
+//
+//   浏览态：左导航栏 76 + 内容区 884 = 960
+//   播放态：左列 213 + 中列 469（视频 469x240 + 进度条 469x26）+ 右列 278 = 960
+//
+// 为什么视频区高度是 240 而不是 266：X6 Pro 的视频走 KMS overlay 平面（plane-id 76，
+// zpos 2），**盖在 Falcon UI 之上**，UI 画不上去。所以进度条必须落在视频矩形之外。
+//
+// 铁律：每个 .vue 必须自带 <style lang="less" scoped> 并 @import 本文件——
+//       没有 style 块时样式规则不会进 bundle（2026-09-22 真机黑屏证据）。
+// 铁律：falcon 运行时 **`flex: 1` 简写无效**，必须写 flex-grow/flex-shrink/flex-basis 三连。
+// 铁律：`<text>` 的内容换行即不渲染，必须写在同一行。
+// 铁律：position:absolute 不可靠、无可用 z-index → 弹层用 v-if 整页替换。
+
+/* ---------- 根 ---------- */
+.page {
+  width: 960px;
+  height: 266px;
+  flex-direction: row;
+  background-color: @background-color;
+}
+
+/* 播放态整页：必须不透明，否则会透出上一页内容（实测拍到首页 banner）。
+   .stage 自身保持透明，KMS 视频平面才透得出来。 */
+.page-live {
+  background-color: @background-color;
+}
+
+/* ---------- 左侧栏 ---------- */
+.bar {
+  width: 76px;
+  height: 266px;
+  flex-direction: column;
+  padding-left: 6px;
+  padding-right: 6px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  background-color: @nav-background;
+}
+
+.brand {
+  height: 38px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+}
+
+.brand-mark {
+  width: 26px;
+  height: 26px;
+  border-radius: 13px;
+  background-color: @accent;
+  justify-content: center;
+  align-items: center;
+}
+
+.brand-mark-text {
+  font-size: 14px;
+  color: #FFFFFF;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* 软件图标 logo（src/assets/logo.png，128x128，由 app_icon.png 缩放而来）
+   替代原来的绿色圆底 + 字母 P。自身带 #304051 圆角方块背景，所以这里不再画底。 */
+.brand-logo {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background-color: transparent;
+}
+
+.bar-logo {
+  width: 26px;
+  height: 26px;
+  margin-left: 19px;
+  margin-bottom: 2px;
+}
+
+.tab {
+  width: 64px;
+  height: 33px;
+  margin-top: 4px;
+  border-radius: 8px;
+  justify-content: center;
+  align-items: center;
+  background-color: @background-color;
+}
+
+.tab-on {
+  background-color: @accent;
+}
+
+.tab-text {
+  font-size: 14px;
+  color: @text-color-dim;
+  text-align: center;
+}
+
+.tab-text-on {
+  color: #FFFFFF;
+}
+
+/* ---------- 内容区 ---------- */
+.content {
+  width: 884px;
+  height: 266px;
+  flex-direction: column;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+}
+
+/* ---------- 通用圆角卡片 ---------- */
+.card {
+  border-radius: 10px;
+  background-color: @card-background-color;
+}
+
+.card-lined {
+  border-radius: 10px;
+  background-color: @card-background-color;
+  border-width: 1px;
+  border-style: solid;
+  border-color: @card-border-color;
+}
+
+/* ---------- 通用按钮 ---------- */
+.btn {
+  height: 34px;
+  padding-left: 14px;
+  padding-right: 14px;
+  border-radius: 8px;
+  justify-content: center;
+  align-items: center;
+  background-color: @ctrl-background;
+}
+
+.btn-main {
+  background-color: @accent;
+}
+
+.btn-blue {
+  background-color: @accent-blue;
+}
+
+.btn-text {
+  font-size: 14px;
+  color: @text-color;
+}
+
+/* 绿底主按钮上的字必须是白（官网 .btn-main 一律 color:#fff;font-weight:700）
+   注意：Weex/aiot-vue 只支持单类名选择器，不能写 `.btn-main .btn-text`，
+   所以做成独立类名，按钮上用 `.btn-text-on` 叠加。 */
+.btn-text-on {
+  font-size: 14px;
+  color: @btn-text-on-accent;
+  font-weight: 700;
+}
+
+/* ---------- 官网风格小件 ---------- */
+/* 标题：官网标题用近白，比正文亮一档 */
+.title {
+  font-size: 16px;
+  color: @text-color-strong;
+  font-weight: 700;
+}
+
+.subtitle {
+  font-size: 13px;
+  color: @text-color-dim;
+}
+
+/* 绿底胶囊标签（官网「秒玩」「免费」那种） */
+.chip-green {
+  height: 18px;
+  padding-left: 7px;
+  padding-right: 7px;
+  border-radius: 9px;
+  background-color: @accent;
+  justify-content: center;
+  align-items: center;
+}
+
+.chip-green-text {
+  font-size: 11px;
+  color: @btn-text-on-accent;
+  font-weight: 700;
+}
+
+/* 深底描边标签（标签/元信息） */
+.chip {
+  height: 18px;
+  padding-left: 7px;
+  padding-right: 7px;
+  border-radius: 9px;
+  background-color: @ctrl-background;
+  justify-content: center;
+  align-items: center;
+}
+
+.chip-text {
+  font-size: 11px;
+  color: @text-color-dim;
+}
+
+/* 金色会员标 */
+.chip-gold {
+  height: 18px;
+  padding-left: 7px;
+  padding-right: 7px;
+  border-radius: 9px;
+  background-color: @gold;
+  justify-content: center;
+  align-items: center;
+}
+
+.chip-gold-text {
+  font-size: 11px;
+  color: #3A3320;
+  font-weight: 700;
+}
+
+/* 红底限时标 */
+.chip-red {
+  height: 18px;
+  padding-left: 7px;
+  padding-right: 7px;
+  border-radius: 9px;
+  background-color: @danger;
+  justify-content: center;
+  align-items: center;
+}
+
+.chip-red-text {
+  font-size: 11px;
+  color: #FFFFFF;
+  font-weight: 700;
+}
+
+/* 选中态描边（画质/分类选择器） */
+.sel-on {
+  border-width: 1px;
+  border-style: solid;
+  border-color: @accent;
+  background-color: @card-background-color;
+}
+
+.sel-off {
+  border-width: 1px;
+  border-style: solid;
+  border-color: @card-border-color;
+  background-color: @background-color;
+}
+
+/* ---------- 滚动容器 ---------- */
+.scroll-x {
+  flex-direction: row;
+  overflow: hidden;
+}
+
+.scroll-y {
+  flex-direction: column;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  overflow: hidden;
+}
+
+/* ---------- 分隔线 ---------- */
+.hr {
+  height: 1px;
+  background-color: @card-border-color;
+}

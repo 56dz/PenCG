@@ -1,0 +1,19 @@
+{
+  "pages": {
+    "index": "pages/index/index.js",
+    "detail": "pages/detail/detail.js",
+    "search": "pages/search/search.js",
+    "mine": "pages/mine/mine.js",
+    "login": "pages/login/login.js",
+    "play": "pages/play/play.js",
+    "queue": "pages/queue/queue.js",
+    "diag": "pages/diag/diag.js"
+  },
+  "options": {
+    "style": {
+      "lessPaths": ["styles"],
+      "theme": "theme-dark"
+    },
+    "alias": {}
+  }
+}
