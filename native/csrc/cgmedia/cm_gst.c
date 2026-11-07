@@ -502,7 +502,7 @@ static int bt_detect_pcm_bluez(char *out, int n) {
     fp = popen(cmd, "r");
     if (!fp) return -1;
     while (fgets(line, sizeof(line), fp) && n_mac < BT_MAX_DEVS) {
-        /* "Device B0:A3:F2:AD:7E:FA Redmi Buds 6" */
+        /* "Device B0:A3:F2:**:**:** <耳机名>" */
         char mac[24];
         if (strncmp(line, "Device ", 7) != 0) continue;
         if (sscanf(line + 7, "%23s", mac) != 1) continue;

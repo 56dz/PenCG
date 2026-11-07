@@ -116,7 +116,6 @@
 | webp 图标举证 | `shot_webp_final.png` | 198499 |
 | 详情 | `final_detail.png` | 128287 |
 | 搜索 | `final_search.png` | 71994 |
-| 登录 | `final_login.png` | 35347 |
 | 我的 | `final_mine.png` | 44048 |
 | 播放（旧两栏） | `final_play2.png` | 38166 |
 | 播放（新三栏） | `play_three_col.png` | 37745 |
