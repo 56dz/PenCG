@@ -58,6 +58,24 @@
 2. **`onTS` 里的 `var ts = (e && e.changedTouches) || [];` 不能删** —— 删了会抛 ReferenceError，
    表现是「画面在播但怎么点都没反应」，极像协议问题。
 
+### 待办：登录成功提示未真机验收
+
+`#4`（「登录成功，正在跳转…」）的代码已进包、字符串也在 `.falcon_/login.js.bin` 里验到，
+但**没有真机跑到那 600 ms 的窗口**：易盾风控把账号锁成 `1125`（正确密码也拒），
+主机侧 `POST api/v1/phone-captchas/86-****8726` 同样返 `1122`/`1125`。
+等冷却后做一次短信登录即可验收；跳转路径本身已验（登录后确实回到了 index 的「我的」）。
+
+### 设备端 preferences.json 的正确修改方式（我踩过一次）
+
+`/userdisk/miniapp/data/mini_app/pkg/8002026110200003/data/sharedpreferences/preferences.json`
+里的 `pencg_session` 是「JSON 字符串里再套一层 JSON」，值形如 `{\"token\":\"...\"}`。
+
+**绝对不要用** `sed 's/"pencg_session": "[^"]*"/.../'` —— `[^"]*` 会在第一个转义引号
+`\"` 处停下，只吃掉 `{\` 就把前半截截断，整个文件变成非法 JSON，
+`restoreSession()` 直接失败、用户表现为「登录态丢了」。
+正确做法：**pull 到主机用 python `json.loads` 校验后再 push 回去**（我在主机侧修复并
+重新 push，登录态已恢复、7 条历史与 VIP 资料都在）。
+
 ## 产物
 | 文件 | 大小 | 说明 |
 |---|---|---|
