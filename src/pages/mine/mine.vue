@@ -74,7 +74,7 @@ export default {
       } catch (e) {
         /* ignore */
       }
-      if (!navBack()) navTo('index', { tab: id });
+      if (!navBack('mine')) navTo('index', { tab: id });
     }
   }
 };

@@ -391,7 +391,7 @@ export default {
       return out;
     },
     goBack() {
-      navBack();
+      navBack('detail');
     },
     setTab(id) {
       if (id === 'search') {
@@ -401,11 +401,11 @@ export default {
       if (id === 'mine') {
         /* 同 search.vue：退回 index 再切栏目，避免压一层只有两项导航的薄壳页 */
         try { setPendingTab('mine'); } catch (e) {}
-        if (!navBack()) navTo('index', { tab: 'mine' });
+        if (!navBack('detail')) navTo('index', { tab: 'mine' });
         return;
       }
       // 其余分区回首页（首页自己管 tab 态）
-      navBack();
+      navBack('detail');
     },
     async pickQuality(id) {
       if (this.quality === id) return;

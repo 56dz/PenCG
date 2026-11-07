@@ -389,7 +389,7 @@ export default {
       this.runSearch(this.page + 1, false);
     },
     goBack() {
-      navBack();
+      navBack('search');
     },
     setTab(id) {
       if (id === 'search') return;
@@ -398,10 +398,10 @@ export default {
        * 正确做法是退回 index 再让它切到「我的」栏目。 */
       if (id === 'mine') {
         try { setPendingTab('mine'); } catch (e) {}
-        if (!navBack()) navTo('index', { tab: 'mine' });
+        if (!navBack('search')) navTo('index', { tab: 'mine' });
         return;
       }
-      navBack();
+      navBack('search');
     },
     openGame(g) {
       if (!g || !g.code) return;

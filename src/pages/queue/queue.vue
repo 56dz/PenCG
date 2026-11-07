@@ -326,7 +326,7 @@ export default {
         logWarn('[queue] stopGame fail（不影响本地返回）');
         return null;
       }).then(function () {
-        navBack();
+        navBack('queue');
         return null;
       });
     },

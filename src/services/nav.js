@@ -1,3 +1,5 @@
+import { logInfo, logWarn } from './log.js';
+
 // 页面导航 + 参数传递（$falcon.navTo 的薄封装）
 // 用法：navTo('detail', { code: 'mrfzzmd' })
 const PAGES = {
@@ -69,7 +71,35 @@ export function peekParams(name, options) {
   return p || {};
 }
 
-export function navBack() {
+/* 返回上一页。
+ *
+ * ★ 这台固件**没有 `$falcon.navBack`**（实测：`/etc/miniapp/resources/framework/*.bin`
+ *   里只有 `navTo` / `closeApp` / `closePageByName` / `closePageById`，
+ *   `grep -c navBack` 两个 bundle 都是 0）。原来这里 `typeof $falcon.navBack === 'function'`
+ *   恒假，于是每次都掉进兜底 `navTo('index')` —— 那是**新压一层 index**，
+ *   动画是 push（新页从右往左滑入），返回时看起来和「进入子页」一模一样，
+ *   用户报的「退出也是向左划入」就是这个 bug；顺带页面栈还会一层层变深。
+ *
+ * 正确做法是 `closePageByName(<当前页名>)`：关掉自己，露出下面那页，
+ * 动画是真正的 pop（当前页向右滑出）。
+ *
+ * @param {string} pageName 当前页在 app.json / navTo 里用的名字
+ * @returns {boolean} 是否已经发起关闭（false 时调用方可自行兜底） */
+export function navBack(pageName) {
+  const p = String(pageName || '');
+  if (p) {
+    try {
+      if (typeof $falcon !== 'undefined' && typeof $falcon.closePageByName === 'function') {
+        $falcon.closePageByName(p);
+        logInfo('[nav] closePageByName ' + p);
+        return true;
+      }
+      logWarn('[nav] $falcon.closePageByName 不存在');
+    } catch (e) {
+      logWarn('[nav] closePageByName 失败: ' + ((e && e.message) || e));
+    }
+  }
+  // 兼容别的固件：万一它们确实有 navBack
   try {
     if (typeof $falcon !== 'undefined' && typeof $falcon.navBack === 'function') {
       $falcon.navBack();
@@ -78,6 +108,6 @@ export function navBack() {
   } catch (e) {
     /* ignore */
   }
-  navTo('index', {});
+  logWarn('[nav] 无法关闭页面 name=' + p);
   return false;
 }

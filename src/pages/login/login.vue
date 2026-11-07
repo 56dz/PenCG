@@ -202,7 +202,7 @@ export default {
       this.errText = '';
     },
     goBack() {
-      navBack();
+      navBack('login');
     },
     goMine() {
       // 同 goBackToMine：顶栏「我的」也不能 navTo('mine')，
@@ -218,7 +218,7 @@ export default {
       } catch (e) {
         /* ignore */
       }
-      const ok = navBack();
+      const ok = navBack('login');
       if (!ok) navTo('index', { tab: 'mine' });
     },
     showToast(t) {
@@ -454,7 +454,7 @@ export default {
         setTimeout(function () {
           self.busy = false;
           /* 关键（用户反馈 2）：登录页是 navTo 进来的独立页，登录完必须
-           * navBack() 回到 index 原地栏目，而不是 navTo('mine') ——
+           * navBack('login') 回到 index 原地栏目，而不是 navTo('mine') ——
            * navTo('mine') 会再压一个新的 mine 薄壳页，它的顶栏只有
            * 「首页 / 我的」两项，用户就以为左侧导航塌了。
            * index 现在支持 tab 参数（见 index.vue 的 takeTabParam），

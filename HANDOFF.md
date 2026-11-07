@@ -76,6 +76,25 @@
 正确做法：**pull 到主机用 python `json.loads` 校验后再 push 回去**（我在主机侧修复并
 重新 push，登录态已恢复、7 条历史与 VIP 资料都在）。
 
+### 返回动画：`$falcon.navBack` 在本固件不存在（2026-11-07 21:20，用户 m14169）
+
+现象：进子页是「从右往左滑入」，返回**也**是从右往左滑入，应该向右滑出。
+
+真因：`/etc/miniapp/resources/framework/jsfm-nvue.js.bin` 与 `js-framework.min.bin`
+里 `grep -c navBack` **都是 0** —— 本固件只有 `navTo` / `closeApp` /
+`closePageByName` / `closePageById`。所以 `nav.js` 里
+`typeof $falcon.navBack === 'function'` 恒假，每次都掉进兜底 `navTo('index')`，
+那是**新压一层 index**（push 动画），页面栈还会一层层变深。
+
+修法：`navBack(pageName)` 改走 `$falcon.closePageByName(<当前页名>)`，
+各页面调用点补自己的名字（`navBack('search')` 等）。
+
+取证（`/usr/bin/miniapp_cli capture` 连拍，约 75ms/帧）：
+- 修前 `profiles/evidence/nav_back_push_bug.png`：搜索页停在 0..525 没动，
+  index 从右侧 540 压进来 → push。
+- 修后 `profiles/evidence/nav_back_pop_fixed.png`：index 已占 0..460，
+  搜索页整体右移到 460 之后继续滑出 → pop。
+
 ## 产物
 | 文件 | 大小 | 说明 |
 |---|---|---|
