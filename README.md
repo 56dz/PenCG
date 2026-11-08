@@ -201,6 +201,10 @@ Opus 帧    →  appsrc ! opusdec ! fdsink → aplay（扬声器 / bluealsa）
 | [docs/DEV.md](docs/DEV.md) | 构建 / 部署 / 看日志 / 截图 / adb 路径坑 |
 | [HANDOFF.md](HANDOFF.md) | 交接说明：当前状态、产物清单、必须记住的回归陷阱 |
 
+把这些经验抽成平台级、可复用的开发笔记（去掉本项目业务逻辑，只留"在 X6 Pro 上怎么把音视频/实时流跑起来"），已单独开源：
+**[56dz/haasui-falcon-app-x6pro-skill](https://github.com/56dz/haasui-falcon-app-x6pro-skill)**
+—— ICE/DTLS-SRTP、KMS 上屏、native JSAPI 交叉编译、Weex 方言、远端输入回传、服务逆向与发布自检。
+
 ## 项目状态
 
 全部能力均在真机（X6 Pro，`9D91…5171`）上验证过。
