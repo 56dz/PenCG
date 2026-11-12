@@ -18,6 +18,16 @@
 
 ---
 
+<div align="center">
+
+<img src="sponsor.png" width="360" alt="赞助码">
+
+**如果 PenCG 对你有用，欢迎扫码赞助 —— 你的赞助是我更新的动力**
+
+</div>
+
+---
+
 ## 这是什么
 
 PenCG 把[网易云游戏](https://cg.163.com/)搬到了**有道词典笔 X6 Pro**（RK3562 / aarch64 / Buildroot）上。
