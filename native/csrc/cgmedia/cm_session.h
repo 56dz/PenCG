@@ -56,6 +56,9 @@ typedef struct {
     char codec[32];
     int  log_level;
     int  audio_enabled;
+    /* 取证开关：置 1 时主循环跳过 PLI / NACK / RR 三种上行 RTCP，
+     * 用来二分「上行 RTCP 是否触发网关停推」。默认 0（正常发送）。 */
+    int  no_rtcp;
 } cm_cfg;
 
 /* ---------------- 事件（JSON 文本，poll 时拼数组） ---------------- */

@@ -5,8 +5,10 @@
 > 汇总截止：2026-11-13 22:20（北京时间）；**最后一次实质更新**：
 > ① bug6（新增）由 `restore-crtc=false` + `js_start()` 抢先收会话修复并真机 A/B 验证（§2.6）；
 > ② bug2 状态由「代码已改未验证」升为「✅ 已真机验证」（§2.3）；
-> ③ STALLGUARD 由「未验证」升为「✅ 已真机验证」（L2 重连成功，§2.2）。
-> 工作树状态：**22 个文件已修改 + 17 个文件新增，全部未 commit**（详见 §5；本轮工作树仍在被其他 agent 改动，数字以写定时为准）
+> ③ STALLGUARD 由「未验证」升为「✅ 已真机验证」（L2 重连成功，§2.2）；
+> ④ **2026-11-14 01:12–01:30 判据更正**：bug1 停推不是「起播后 4m18s」，而是「**每个 WS 会话 ≈250s**」（247/253/248s，每次 `wsOpen` 重新计时）—— 见 **`docs/BUGFIX-bug1-active-renew.md`**。
+> ⑤ **2026-11-14 02:09–02:19 策略更正（本文件已按此改写）**：`ACTIVE_RENEW` **已默认关闭**（`ACTIVE_RENEW_MS = 0`）—— 02:09–02:13 三次实测证明「换会话必然重拉对局容器 = 游戏从头开始、进度清零」，代价不可接受；同时把 `STALLGUARD` 阈值由 20s/5s 收紧为 **8s/3s**，02:19 实测「停推 → 完全恢复 ≈ 11 秒、进度不丢」。⇒ 现在 **STALLGUARD 是唯一生效路径**，`ACTIVE_RENEW` 只作为已关闭的方案存档。
+> 工作树状态：**22 个文件已修改 + 18 个文件新增，全部未 commit**（详见 §5；本轮工作树仍在被其他 agent 改动，数字以写定时为准）
 >
 > **本文的写作原则：只写有证据的事实。**
 > 「代码写了」「编译通过」「已装机」都不等于「真机验证通过」。
@@ -24,7 +26,7 @@
 | # | 用户现象 | 根因 | 修法 | 真机验证状态 |
 |---|---|---|---|---|
 | **bug1-A** | 游戏打开约四分钟后会停界面传输 应该是自动退出了（**屏幕变暗/断电这一半**） | 系统 `[Idle]` 270s 调暗 / 300s 断电熄屏 → App 收到 `onHide` → 旧代码无条件拆会话；且旧 `screen.js` 只支持一种亮度后端，保活恒失败 | `screen.js` 从 117 行重写到 589 行（多后端探测 + 20s `keep` + 亮度还原）；`app.js` 用 `isScreenNotOn()` 把「熄屏」和「真退后台」分开 | ✅ **已真机验证**（保活 9 分 20 秒不间断，见 §2.1） |
-| **bug1-B** | 同上（**画面不再更新这一半**） | 网关在起播后 **4m19s / 4m18s / 4m18s** 单方面停止推送 RTP，而我们从未发过官方 SDK 的 `RtcKeepPlaying(20015)` / `RtcKeepaliveCfg(20021)`（服务端挂机 kickout 定时器） | **根因未修**；只有 JS 侧 `STALLGUARD` 三级自愈（检测 `rx` 20s 不涨 → 补关键帧 → 重连 → 重新申请机位）治标 | ❌ **未修复**（根因在服务端；STALLGUARD 本身 ⚠️ 代码已改未验证） |
+| **bug1-B** | 同上（**画面不再更新这一半**） | 网关在**每一个 WS 会话建立后约 250 秒**单方面停止推送 RTP（2026-11-14 三局实测 247/253/248s，每次 `wsOpen` 重新计时；历史上记的「4m19s / 4m18s / 4m18s」是「250s + 40~60s 起播冷启动」叠加后的错觉）；我们从未发过官方 SDK 的 `RtcKeepPlaying(20015)` / `RtcKeepaliveCfg(20021)`，但那条路已被判死（见 §2.2） | **已用 `STALLGUARD` 三级自愈兜底**（检测 `rx` **8s** 不涨 → 补关键帧 → 3s 后 L2 复用网关重连 → L3 重新申请机位）。<br>`ACTIVE_RENEW`（230s 主动换会话）**已默认关闭**（`ACTIVE_RENEW_MS = 0`）：换会话必然重拉对局容器 = **游戏从头开始、进度清零**，代价不可接受（见 `docs/BUGFIX-bug1-active-renew.md` §9） | ⚠️ **黑屏已从 25s+ 压到约 11s、无人值守可恢复、进度不丢**（2026-11-14 02:19 实测）；根因（服务端计时器/协议）**未修** |
 | **bug2** | 登录界面登录成功后跳转回去显示"未登录"，只有点击左侧边栏首页再点回来才能加载出用户信息 | 登录页和 index 页是两份独立 QuickJS 上下文，`mine-body` 的 `refresh()` 只读本页模块级会话对象 → 恒读到空；`setPendingTab` 写的模块变量跨页也读不到 | `auth.js` 新增跨页会话版本号（`$falcon` + storage 双写）；`mine-body.vue` 的 `refresh()` 补 `await restoreSession()` + 2.5s 版本轮询；`index.vue` 加 `checkSeq()` + 误跳保护；`nav.js` 的 tab 标记改存 `$falcon` | ✅ **已真机验证【现场】**（2026-11-13 18:29 真机第 2 轮 PASS，见 §2.3） |
 | **bug3** | 用"原神"测试，进入游戏后游玩画面经常性出现上一帧的马赛克残留 | **定案：`kmssink sync=true`** —— `appsrc`（`format=time do-timestamp=true`）按到达时刻打的时间戳与 kmssink 的 running-time 基准错位后，buffer 被判「没到时刻/已过期」整体丢弃，平面绑着却一口不翻页，用户看到的就是上一帧，固化后变成「卡住不动」。此前归因的码流/硬解/DPB 均已被 AU dump 推翻 | **`cm_gst.c:253-255` 的 `KMS_SINK_PROPS`：`sync=true` → `sync=false`**（★真正修复）。RTP/出画那一批（AU 完整性闸门、`ignore-error=false`、`DELTA_UNIT`、flush 重协商）保留为加固，不是根因 | ✅ **已真机验证【现场】**：原神 + 终末地两个游戏**用户目视确认画面正常**；`fb` 由「恒 130」变为「127/130 交替」，三份日志见 §2.4.0 |
 | **bug4** | 用"明日方舟终末地"测试，建立连接后画面就存在马赛克和绿屏 | **同上，同一个根因**（`kmssink sync=true`）。**另外：绿屏是片头 IDR 到达之前的解码器输出**（DPB 空、无参考帧时的未初始化 NV12），IDR 一到就自愈 —— **这是正常现象，不是 bug**。真正「一直全黑 / 不动」才是 `sync=true` | 同上（`sync=false`）。`cm_rtp.c` 每局 `cm_rtp_reset()`、「首个完整 IDR 之前丢 P 帧」闸门、缓存参数集注入仍保留为加固 | ✅ **已真机验证【现场】**，同 bug3。**注意别把片头绿屏当成回归** |
@@ -96,13 +98,22 @@
 
 ---
 
-### 2.2 bug1-B：网关 4 分钟后停止推流 —— ❌ 未修复
+### 2.2 bug1-B：网关在每会话约 250 秒后停止推流 —— ⚠️ 已可规避，根因未修复
+
+> **2026-11-14 判据更正**：本文原写作「网关 4 分钟后停推」。真机三局实测（01:12–01:30，原神 yssy）把起点改对了：**不是「起播后 4m18s」，而是「每一个 WS 会话建立后约 250 秒」**（247s / 253s / 248s，每次 `wsOpen` 重新计时）。历史那个「4m18s 像定值」是「250s + 40~60s 起播冷启动」叠加的错觉。完整推导见 **`docs/BUGFIX-bug1-active-renew.md`**；下面 §2.2 正文中的「4m18s」表述按历史快照保留，读时请以本条为准。
+>
+> **2026-11-14 02:09–02:19 策略更正（最重要的一条）**：本节下文曾把「`ACTIVE_RENEW` 主动换会话」当作主方案、把 `STALLGUARD` 当兜底 —— **现在反了**。
+> - `ACTIVE_RENEW` **已默认关闭**（`ACTIVE_RENEW_MS = 0`，`PenCG/src/pages/play/play.vue:265`）。三次实测（02:10:37 / 02:11:49 / 02:13:01）证明它走 `onReapply()` 换机位会**重拉对局容器**：日志重打 `[play] 出画 1280x720 audio=0`、黑屏 9s / 8s / 7s、音频恢复 11s / 19s / 18s、**游戏进度全部丢失**。为了规避一个 250s 后才发生的停推而每 230s 打断一次对局，不可接受。
+> - 另一条路 `onReconnect()`（复用旧网关）也不可靠：01:51:37 那次 230s 续命后网关 5 秒就 `op=close data={"code":0,"reason":"normal"}` 关掉它。两条续命路径都走不通。
+> - 改用收紧后的 `STALLGUARD`：`STALL_RX_MS` 20s → **8s**、`STALL_L1_WAIT_MS` 5s → **3s**。02:19 实测：停推 → **完全恢复约 11 秒**（原来 25 秒以上），**进度不丢**，且这次 L2 复用旧网关**成功**了（说明「同机位二次连被踢」不是必然）。
+> - 所以现在的态势是：**根因仍未修，但用户可感知的黑屏已从 25s+ 压到约 11s，且无人值守可恢复**。
 
 **现象**：起播后 4 分多钟画面定格，音频同时停，**WebSocket 会话全程健康**（`ws=open` / `phase=playing`），网关不发任何 error/close，屏幕全亮、保活正常。
 
 **根因链**
 
 1. 实测三次独立复现，延迟分别是 **4m19s / 4m18s / 4m18s** —— 精度 ±1s，像服务端定时器，不像网络抖动。
+   > **2026-11-14 实测更正**：这不是「从起播算 4m18s」。改成从**每次 `wsOpen`** 起算后，三局分别是 **247s / 253s / 248s**（均值 249.3s、离散 ±3s）。历史那三次之所以稳定在 4m18s 附近，是因为起播冷启动恰好也在 40~60s 量级，两段叠加掩盖了抖动。见 `docs/BUGFIX-bug1-active-renew.md` §1–§2。
 2. 音视频**同时**停，且停在整包数（音频 11339 包 ÷ 50/s ≈ 227s）。
 3. 停推后 `rx` 冻结、`frames` 不涨，但 `PLI sent` 每 2s 照发、`op=input` 回显正常、`keep #N` 20s 一次 —— 会话层完全没坏。
 4. 官方 SDK（`.tmp/cgsdk/cg-sdk.891daeae.js`）里有 `RtcKeepPlaying.CmdId=20015`（字段 1 = `gameToken`）和 `RtcKeepaliveCfg.CmdId=20021`（字段 1 `kickoutDuration` ms / 字段 2 `tipsDuration` ms），`keepAlive.current` 默认 5 分钟 → `kickoutDuration=300000` / `tipsDuration=20000`。时间账：`300s − 42s（冷启动耗时估算）≈ 258s ≈ 4m18s`。
@@ -118,30 +129,32 @@
 
 | 常量 | 值 | 位置 |
 |---|---|---|
-| `STALL_RX_MS` | 20000 | `PenCG/src/pages/play/play.vue:206` |
-| `STALL_L1_WAIT_MS` | 5000 | `PenCG/src/pages/play/play.vue:209` |
-| `STALL_MAX_TRIES` | 3 | `PenCG/src/pages/play/play.vue:214` |
+| `STALL_RX_MS` | **8000**（曾 20000，2026-11-14 收紧） | `PenCG/src/pages/play/play.vue:213` |
+| `STALL_L1_WAIT_MS` | **3000**（曾 5000，2026-11-14 收紧） | `PenCG/src/pages/play/play.vue:218` |
+| `STALL_MAX_TRIES` | 3 | `PenCG/src/pages/play/play.vue:223` |
 
 - L1：`requestKeyFrameBurst(2, 500)` 补发关键帧（`PenCG/src/services/media.js:530`，`clearKfBurst()` 在 `:523`，`stopPlay()` 第一行 `:595`）
 - L2：`onReconnect()`（黑屏 1~3s）
 - L3：`onReapply()`（重新申请机位）
 - 放弃：`this.fail('画面已停止（网关停止推流），自动恢复失败，请点「重连」', 0)`
 - 判据刻意用 `rx`（`stats.rtp_rx`）而不是 `rxPkts` —— `rxPkts` 含 STUN/DTLS/RTCP，停推后 STUN 照样涨，用它永远判不出来（真机验证过）
-- 代码：`checkStall()`（`PenCG/src/pages/play/play.vue:1409`）、`stallReset()`（`:1384`）、`stallHealGiveUp()`（`:1578`）、`checkFreeze()`（`:1603`）
+- 代码：`checkStall()`（`PenCG/src/pages/play/play.vue:1570-1685`）、`stallWindowReset()`（`:1693`）、`stallHealL2()`（`:1700`）、`stallHealL3()`（`:1721`）、`checkFreeze()`（按符号 `checkFreeze` 检索 —— 该文件行号随多轮改动漂移，下面的行号只是写定时快照）
 
-**STALLGUARD 的验证状态：✅ 已真机验证（2026-11-13 18:34–18:35，终末地局，第 2 级自愈成功）。**
+**STALLGUARD 的验证状态：✅ 已真机验证（2026-11-13 18:34–18:35 终末地局，第 2 级自愈成功；2026-11-14 02:19 原神局按新阈值 8s/3s 再次验证，停推→恢复约 11 秒）。**
+
+下面这段是 **20s / 5s 时代的历史原文（保留不改）**，判读时把 `20s` 换成 `8s`、`25s` 换成 `11s`；8s/3s 的真机序列见 `docs/BUGFIX-bug1-stallguard.md` §5.6。
 
 真机原文（`[pencg]` 通道，日志 = miniapp 进程 stdout，实测 `P=$(pidof miniapp); readlink /proc/$P/fd/1` → `/userdata/applog/DictPen_20261113_*.log`）：
 ```
 18:34:51 [play] probe stage=live ... rx=29124 fps=0 silent=9s
-18:35:02 [play] stall detected: rx=29124 已 20s 未增长 → 尝试自愈（第 1 次：补发关键帧）
+18:35:02 [play] stall detected: rx=29124 已 20s 未增长 → 尝试自愈（第 1 次：补发关键帧）   ← 20s 判据时代；现在这里是「已 8s 未增长」
 18:35:07 [play] stall: rx=29124 已 25s 未增长 → L2 复用网关重连
 18:35:10 [play] stall: 媒体会话重启，rx 重新计数（29124 → 0），已用自愈 2 次
 18:35:12 [play] stall recovered: rx=230 已恢复（第 2 级自愈成功，停滞 5s）
 ```
 配套的 native 重建链也完整走通：`start #2 -> 125.39.94.177:38905 ufrag=...` → `udp bound` → `STUN Binding Success mapped=27.38.185.126:15709` → `ICE connected` → DTLS 7 帧 → `DTLS OK version=DTLSv1.2 cipher=ECDHE-RSA-CHACHA20-POLY1305 srtp=SRTP_AES128_CM_SHA1_80` → `srtp ready` → `kmssink rect` → `video pipeline PLAYING` → `#2 first video frame pushed`。
 **这是三级自愈机制的第一条真机实证**（L1 补关键帧 → L2 重连 → 成功），不过该局随后仍遇到 plane 问题（见 bug6），画面层面未由用户确认恢复。
-`BUGFIX-bug1-stallguard.md` §6.4 自己列了 5 条未验证项（`kickoutDuration=300s` 无网关实证、42s 是估算、L2 后是否重新计时未知、`onReapply` 机位能否拿回未知、20s 是否误触未测长稳）。
+`BUGFIX-bug1-stallguard.md` §6.4 自己列了 5 条未验证项（`kickoutDuration=300s` 无网关实证、42s 是估算、L2 后是否重新计时未知、`onReapply` 机位能否拿回未知、阈值是否误触未测长稳 —— **该条在 2026-11-14 收紧到 8s/3s 后风险更高，仍未测长稳**）。
 
 **一条重要的反证**：2026-11-13 17:57 在家里稳定网络下起播 **7 分钟，bug1 没有复现**。这可能说明它与网络条件相关（高铁/弱网才触发），也可能只是样本不足 —— **无法定论**。
 
@@ -159,6 +172,22 @@
 同一份研究还指出一个**必须纳入判断的新事实**：三次复现的现场采集（`.tmp/bug1-soak.log`，11-12 22:46:30–22:58:22）发生在 **RTCP RR 合入之前**（那份日志里 `RR sent` 计数为 0）；RR 合入后的 11-13 两局（17:58:04→18:25:15 `rx` 从 250 单调涨到 131099 `fps=29`、18:47:20→18:50:43 `rx=20359 fps=19`）跨越 4m18s / 8m / 16m 三个窗口**均无冻结**。⇒ **「RR 是我们自己发的」这件事可能与 bug1 不复发有关，但样本极少，不能当结论。**
 
 所以 bug1-B 的当前态势是：**根因假设指向的修复路径已被证明走不通**（`gameToken` 拿不到、通道接不上），可用的只有 Q3 的「提前主动重建」和已写好的 `STALLGUARD` 治标，**两者都还没在真机上验证过能否救回画面**。
+
+**2026-11-14 更新：Q3 的「提前主动重建」曾落地为 `ACTIVE_RENEW`，但 02:09 真机把它否掉了 —— 现已默认关闭**
+
+判据更正之后（每会话 ≈250s），Q3 曾从「退路」变成主方案，实现如下（**代码全部保留，只是默认不启用**）：
+
+| 项 | 值 | 位置 |
+|---|---|---|
+| `ACTIVE_RENEW_MS` | **`0`（默认关闭）**；改回 `230000` 即启用 | `PenCG/src/pages/play/play.vue:265` |
+| `ACTIVE_RENEW_GUARD_MS` | `60000`（两次续命最小间隔） | `PenCG/src/pages/play/play.vue:269` |
+| 判据 | 本次 `wsOpen` 起已存活 ≥ 230s | `checkRenew()` `play.vue:1521` |
+| 动作 | `[play] renew:` 日志 + `vizOn=false` + `stage='waiting'` + **`onReapply()`**（不是 `onReconnect()`） | `renewNow()` `play.vue:1538` |
+| 探针 | probe 行新增 `sess=Ns`（会话已存活）与 `renew=N`（本局续命次数） | `play.vue:1465-1466` |
+
+**为什么关闭**：02:09–02:13 把阈值临时降到 60s 连做三次，每次都准点触发、每次都走 `onReapply()` 重新申请机位 —— 而**换机位会重新拉起对局容器**（日志重打 `[play] 出画 1280x720 audio=0`），玩家看到的是**游戏从头开始**：黑屏 9s / 8s / 7s、音频恢复 11s / 19s / 18s、**进度全部丢失**。用「每 230s 打断一次对局」换「规避 250s 后的停推」，不划算。另一条路 `onReconnect()` 也被网关 5 秒 `op=close` 踢掉（01:51:37），两条续命路径都不通。
+
+与 `STALLGUARD` 的分工（**已反转**）：`STALLGUARD`（8s/3s，实测停推→恢复 ≈ 11 秒、进度不丢）是**现行唯一路径**；`ACTIVE_RENEW` 默认关闭，只作为方案存档（代价是游戏重开）。`renewNow()` 刻意**不写 `stallTries`**，不占用自愈额度。完整推导、三次实测、7+1 条未验证项见 **`docs/BUGFIX-bug1-active-renew.md`**（§9 为关闭结论）。
 
 **二期补充：弱网「出画冻结」判据（⚠️ 未验证）**
 
@@ -544,7 +573,7 @@ echo 0 > /sys/class/backlight/backlight/bl_power; hal-screen on; hal-screen keep
 
 | # | 未解决项 | 现状 | 影响 |
 |---|---|---|---|
-| 1 | **bug1 传输侧根因**（服务端 4m18s 停推） | 只有假设（`RtcKeepPlaying 20015` / `RtcKeepaliveCfg 20021` 从未发送），`gameToken` 来源未定位、通道能否复用未验证。STALLGUARD 只是治标 | 用户仍会看到「四分钟后停画面」，只是可能被自愈救回来（**自愈本身也未验证**） |
+| 1 | **bug1 传输侧根因**（服务端停推） | **判据已更正（2026-11-14）**：不是「起播后 4m18s」，而是「**每个 WS 会话 ≈250s**」（实测 247/253/248s，每次 `wsOpen` 重新计时）。根因侧仍只有假设（`RtcKeepPlaying 20015` / `RtcKeepaliveCfg 20021` 从未发送，且 `gameToken` 拿不到、通道接不上）。**规避手段已定案**：靠收紧后的 `STALLGUARD`（8s/3s）—— 停推 → 补关键帧 → 3s 后 L2 复用网关重连 → 约 11 秒恢复、进度不丢（2026-11-14 02:19 实测）；`ACTIVE_RENEW` 因「换会话=游戏重开」**已默认关闭** | 用户仍会每会话遇到一次约 11 秒的静止画面（不是「四分钟后再也不动」）；长跑稳定性（尤其弱网误触）尚未验证 |
 | 2 | ~~bug2 真机未验证~~ | **已于 2026-11-13 18:29 真机验证通过**（见 §2.3） | 关闭 |
 | 3 | ~~bug3/bug4 视觉效果未验证~~ **已定案关闭** | 根因是 `kmssink sync=true`，已改 `sync=false`（`cm_gst.c:253-255`）；原神 + 终末地两个游戏**用户目视确认画面正常**。`fb` 采样由「恒 130」变「127/130 交替」构成客观旁证 | 已不再是局限。**遗留的是取证手段**：仍然抓不到视频平面像素（`captureFB` 返回 `-1`、`kmsgrab` 超时、无 `/dev/fb*`），所以回归时只能用 `fb` 是否交替 + 用户目视，见 §2.4.4 |
 | 3b | **`cm_gst.c:1355` 的注释已过时** | 该处注释仍写「会动到 `sync=true` 的 kmssink 调度」，但 `KMS_SINK_PROPS` 已改 `sync=false` | 不影响运行，只影响读代码的人。属源码注释，本次不改（写域只有 docs） |
@@ -573,7 +602,7 @@ echo 0 > /sys/class/backlight/backlight/bl_power; hal-screen on; hal-screen keep
 
 ---
 
-## 5. 文件改动清单（`cd PenCG && git status --short`，22 M + 17 ??，全部未 commit）
+## 5. 文件改动清单（`cd PenCG && git status --short`，22 M + 18 ??，全部未 commit（含 2026-11-14 新增的 `docs/BUGFIX-bug1-active-renew.md`））
 
 > 合计 `22 files changed, 4656 insertions(+), 277 deletions(-)`（以 2026-11-13 20:45 的 `git diff --stat` 为准；工作树在本轮仍在被其他 agent 改动，数字可能继续增长 —— `docs/BUGFIX-bug2-verify.md`、`docs/BUG1-KEEPALIVE-PROTOCOL.md`、`docs/REVIEW-report.md`、`docs/BUGFIX-bug4-endfield-black.md` 都是在本文写作过程中陆续新出现的）。
 
@@ -617,11 +646,12 @@ echo 0 > /sys/class/backlight/backlight/bl_power; hal-screen on; hal-screen keep
 
 **所以上表三行的描述作为历史记录保留，但它们指向的结论已作废** —— 正确的说法是「落盘文件 = miniapp 进程 stdout，用 `readlink` 定，形如 `DictPen_YYYYMMDD_HHMMSS.log`」。相关文档已在 2026-11-14 一并更正（见 §3.1、§3.2）。
 
-### 5.2 新增（17）
+### 5.2 新增（18）
 
 | 文件 | 内容 |
 |---|---|
 | `docs/BUG1-KEEPALIVE-PROTOCOL.md` | bug1 传输侧的**可行性研究**（551 行，未改代码）：四个问题逐条判定 —— `gameToken` 只在 `paasDispatch` 响应里（我们走 `api/v2/tickets` 拿不到，死路）；官方 `sendProxy`（`/rtc-sdk` protobuf）与我们连的 `wss://.../ws` 是两套端点；「提前主动重建」可行（`startPlay()` 不碰 ticket/机位）；零代码实验该先做。结论已吸收进本文 §2.2 |
+| `docs/BUGFIX-bug1-active-renew.md` | **★ 2026-11-14 新增**：bug1 停推判据更正为「每个 WS 会话 ≈250s」（三局实测 247/253/248s），并落地 `ACTIVE_RENEW` 主动续命（`230s` 阈值 / `60s` 冷却 / 不占 STALLGUARD 额度）—— **后于 2026-11-14 02:09 真机改为默认关闭（`ACTIVE_RENEW_MS=0`），见该文 §9**。含推导、实现 file:line、与 STALLGUARD 的分工表、验证判据（看 `sess=` / `renew=`）、关闭方法与 7+1 条未验证项 |
 | `docs/BUGFIX-bug1-lifecycle.md` | bug1 生命周期：`[Idle]` 三条阈值、两条链时序、旧实现对拍、最小补丁、A1–A6 验收、adb 命令级验证步骤（含取证通道 §6.0） |
 | `docs/BUGFIX-bug1-rtcp-rr.md` | RTCP RR 的定位与实现，七条候选原因逐条判定，明确 **RR 不是 bug1 根因** |
 | `docs/BUGFIX-bug1-stallguard.md` | JS 侧收包停滞三级自愈：判据选择、三个坑、常量与 file:line、四条未验证项 |
@@ -664,5 +694,5 @@ echo 0 > /sys/class/backlight/backlight/bl_power; hal-screen on; hal-screen keep
 ## 附：一句话给作者
 
 - **真的修好并真机验证过的**：bug5（音量 + 退出残留声）**完全解决**；bug3 + bug4（马赛克残留 / 绿屏黑屏）**完全解决** —— 根因是 `kmssink sync=true`，已改 `sync=false`，原神与终末地两个游戏都由用户目视确认画面正常；bug1 的屏幕保活**机制成立**（9 分 20 秒不掉屏）。
-- **代码写完了但还没在真机上验过的**：bug2（登录刷新）、弱网 IDR 饥饿、STALLGUARD 自愈、弱网冻结判据（`checkFreeze`）。
-- **没有修的**：bug1 的真根因 —— 服务端 4 分 18 秒停推。
+- **代码写完了但还没在真机上验过的**：弱网 IDR 饥饿、弱网冻结判据（`checkFreeze`）、以及 STALLGUARD 在长跑/弱网下的误触风险（只测了约 5 分钟）。~~bug2~~ 已于 11-13 真机验证；~~STALLGUARD 自愈~~ 已两次真机验证（11-13 终末地 20s/5s、11-14 02:19 原神 8s/3s）。
+- **没有修的**：bug1 的真根因 —— 服务端计时器/协议层面单方面停推（**判据已从「4 分 18 秒」更正为「每个 WS 会话约 250 秒」**）。我们只是绕过了它：靠 `STALLGUARD` 在停推后约 **11 秒**自愈（进度不丢），而不是修掉停推本身。曾经想用的 `ACTIVE_RENEW` 主动换会话已因「游戏会从头开始」而**默认关闭**，见 `docs/BUGFIX-bug1-active-renew.md` §9。

@@ -57,6 +57,7 @@ int cm_cfg_parse(cm_cfg *cfg, const char *json) {
     cfg->audio_pt = cm_json_get_int(json, "audioPt", cfg->audio_pt);
     cfg->log_level = cm_json_get_int(json, "logLevel", cfg->log_level);
     cfg->audio_enabled = cm_json_get_int(json, "audio", 1) ? 1 : 0;
+    cfg->no_rtcp = cm_json_get_int(json, "noRtcp", 0) ? 1 : 0;
 
     v = cm_json_get_int(json, "videoSsrc", 0);
     cfg->video_ssrc = (uint32_t)v;

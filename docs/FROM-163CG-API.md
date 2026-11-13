@@ -129,6 +129,14 @@ commit("setGameCutTime", { total: 1000*(k.no_op_duration1 + k.no_op_duration2),
 `docs/BUGFIX-bug1-stallguard.md` 里「kickoutDuration 300 s − 冷启动 42 s ≈ 258 s」这个推断，
 与网页端实测不吻合，建议降级为「已排除」。
 
+> **2026-11-14 补充**：上面这条「建议降级为已排除」的判断，与 PenCG 侧最新的真机结论**方向一致** ——
+> 那个 `300 s − 42 s` 的算式确实不成立（PenCG 三局实测：把起点改成每次 `wsOpen` 后是 247/253/248 s，
+> 即「每个 WS 会话 ≈250 s」，不是「ticket + 300 s」）。两边的差别只在于是「没有固定计时器」
+> （网页端看起来是）还是「有计时器但绑定在会话上、时长约 250 s」（PenCG 实测看起来是）。
+> **网页端 258 s 时毫无异常这个事实，本身也可能只是网页端的会话在那之前已经被重建过**——
+> 这一点我没有网页端的 `wsOpen` 时间戳，无法判断，标为**待现场确认**。
+> 详见 `docs/BUGFIX-bug1-active-renew.md`。
+
 ### 真正的差异：SDP 与 getStats
 
 网页端一次完整的 SDP + 20×5 s `getStats()` 采样（2026-11-13）：
@@ -199,7 +207,7 @@ static void ice_consent_tick(void *arg) {
 - 响应 `0x0101` 媒体期可以丢弃，**但日志里要能看见它在回**（`rx_kept++`）——
   这是验证 patch 生效的最快信号。
 
-如果 4m18s 消失，bug1 就定案了。
+如果 4m18s 消失，bug1 就定案了。（**2026-11-14 更正**：按新判据应读作「如果 `wsOpen` + 250s 之后画面还在动」，见 `docs/BUGFIX-bug1-active-renew.md`）
 
 **② answer 回显 `a=extmap` / `a=rtcp-fb`**
 
@@ -237,6 +245,8 @@ transport-cc」，比完全静默好。
 按顺序：
 
 1. 只加 ①，跑满 10 分钟，看 4m18s 是否还在。
+   （**2026-11-14 更正**：按新判据应读作「看每个 WS 会话能否越过 ≈250 s」，
+   即 `wsOpen` 之后 250 s 处是否停推；见 `docs/BUGFIX-bug1-active-renew.md`。）
 2. 若还在 → 加 ②，再跑一次。
 3. 若还在 → 加 ③。
 4. 若还都在 → 那就是服务端按「客户端 IP + 会话时长」做的策略，需要对比

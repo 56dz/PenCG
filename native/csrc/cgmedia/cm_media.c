@@ -325,13 +325,15 @@ void cm_media_loop(cm_sess *s) {
          * 等重传补齐，到期必须有人把它放出来，否则画面停在这一帧。
          * 20ms 粒度足够（hold 窗口是几十 ms 量级）。 */
         cm_rtp_flush_held(s);
-        cm_kf_tick(s);
+        /* 取证开关 noRtcp=1 时三种上行 RTCP 全部不发明文/密文，用来二分
+         * 「网关是否因为我们的 PLI/NACK/RR 而停推」。正常路径恒为 0。 */
+        if (!s->cfg.no_rtcp) cm_kf_tick(s);
         /* RTCP Generic NACK（RFC 4585 §6.2.1）：把收包侧登记的缺口
          * 点名要回来。内部自带 30ms 限速与"缺口表空就不发"的短路，
          * 每轮调一次没有代价。★ 这是「弱网丢一包就整帧报废」的正面修复：
          * 没有它，一个 IDR 丢一片就永远等不到完整 IDR（真机 2026-11-13
          * 高铁实测：画面冻结 12 分钟以上、PLI 发 468 次无效）。 */
-        cm_nack_tick(s);
+        if (!s->cfg.no_rtcp) cm_nack_tick(s);
         /* RTCP Receiver Report（RFC 3550 §6.4.2）：每秒一个 RR，走 SRTCP。
          * 放在 cm_kf_tick 旁边是刻意的 —— 两者都是"我们主动对网关说的话"，
          * 一个说"缺关键帧"，一个说"我还在收、丢包率/抖动现在是这个数"。
@@ -340,7 +342,7 @@ void cm_media_loop(cm_sess *s) {
          * 现场证据（音视频同时停在 4m18s±1s、网关全程不回任何 RTCP、WS 会话
          * 健康）指向服务端挂机 kickout 定时器。理由与完整分析见
          * docs/BUGFIX-bug1-rtcp-rr.md 与 cm_cmd.c 的 RR 段注释。 */
-        cm_rtcp_tick(s);
+        if (!s->cfg.no_rtcp) cm_rtcp_tick(s);
         /* ICE consent refresh（RFC 8445 §11）：每 2.5s 发一次带认证的
          * Binding Request，证明「我们还在」。这是与官方客户端唯一的
          * 周期性双向报文差异 —— 网关是 ice-lite，它自己会问我们，但

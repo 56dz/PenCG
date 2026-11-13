@@ -188,8 +188,11 @@ var HIDE_GRACE_DARK_MS = 10000;
  *   / 4 result / 4 offer，没有 keep/kick/not_playing 这类东西）、
  *   native 侧同时刻只剩 `PLI sent (26 bytes, srtcp)`，pt histogram 也冻结。
  * ⇒ **会话没死，服务端单方面停推。** 官方 SDK 有 RtcKeepPlaying / RtcKeepaliveCfg
- * 这套「告诉网关我还在玩」的机制，我们从没实现；`kickoutDuration` 默认 300s、
- * 从 ticket 阶段起算，减去起播前容器冷启动 ~42s，正好落在 4m18s。
+ * 这套「告诉网关我还在玩」的机制，我们从没实现。最初按 `kickoutDuration`
+ * 默认 300s、减去起播前容器冷启动 ~42s 推出「4m18s」，**这个算法 2026-11-14
+ * 已被更精确的实测推翻**（见下面 ACTIVE_RENEW_MS 注释的三局 247/253/248s）：
+ * 计时器不是从 ticket 起算，而是**每个 WS 会话（每次 wsOpen）各自约 250 秒**。
+ * 这也解释了为什么 L2 重连之后又能再活四分钟 —— 新会话重新计时。
  * 根因在服务端，客户端改不掉它，**只能检测 + 自愈**。
  *
  * 判据为什么看 rx 而不是 fps/decoded：
@@ -199,19 +202,71 @@ var HIDE_GRACE_DARK_MS = 10000;
  *   注意不能用 rxPkts：那是 socket 上的 datagram 总数，含 STUN/DTLS，
  *   停推之后 ICE 保活的 STUN 照样在涨（真机验证过），拿它判停滞会永远判不出来。
  *
- * 20 秒这个阈值：正常播放时 rx 每秒涨几十上百，任何一次网络抖动都不会
- * 让计数冻结 20 秒；而 20s 又远小于 4m18s 的故障点，所以第一次自愈能在
- * 用户还没意识到「卡了」的时候就发起。取 10s 太容易被一次 GC 或换档毛刺误触，
- * 取 30s+ 则用户已经盯着静止画面等太久。 */
-var STALL_RX_MS = 20000;
+ * 8 秒这个阈值（2026-11-14 由 20s 收紧）：停推是**网关单方面停**，
+ * 判出来之后只能靠 L2 换会话救，所以「发现得越早，黑屏越短」。
+ * 真机实测正常播放时 rx 每 20s 稳定 +1600（≈80 包/秒，fps 29~30），
+ * 一次瞬间抖动最多让计数顿一两秒，8 秒仍留了 4 倍余量，误触风险很低。
+ * 收紧后的最坏恢复路径 ≈ 8s 发现 + 3s L1 等待 + L2 重连出画 ≈ 15s，
+ * 原来是 20s + 5s + 重连 ≈ 28s。
+ * 取 5s 以下会有风险：起播瞬间容器还在出静帧、或一次换档重建都可能让
+ * rx 停 5~6 秒，会被误判成停推而白白换掉一个好会话。 */
+var STALL_RX_MS = 8000;
 /* L1（补关键帧）之后等多久判定「还是没救回来」。PLI 是向网关要 IDR，
- * 网关处理 + 一帧编码回来通常 <1s，留 5s 是给丢包重发的余量。 */
-var STALL_L1_WAIT_MS = 5000;
+ * 网关处理 + 一帧编码回来通常 <1s，留 3s 是给丢包重发的余量。
+ * 3s（2026-11-14 由 5s 收紧）：停推场景下网关根本不看 PLI，L1 注定无效，
+ * 早点判定失败能早 2 秒升到 L2 换会话。 */
+var STALL_L1_WAIT_MS = 3000;
 /* 一次故障最多自动恢复 3 次（L1 补帧 / L2 复用网关重连 / L3 重新申请机位）。
  * 上限存在的意义：这个故障每次都在 4 分钟出头出现，若网关/账号侧真有硬限制，
  * 无限重连只会把用户剩下的免费时长（和机位）在几秒内烧光，还不如老实告诉他
  * 手动点「重连」。 */
 var STALL_MAX_TRIES = 3;
+
+/* ============ 第三条防线：会话寿命预警（主动续命，不让用户看到卡顿）============
+ *
+ * 真机三局实测（2026-11-14 01:12–01:30，原神 yssy，同一台 X6 Pro）：
+ *   A  01:12:52 wsOpen → 01:16:59 停推 = 247s
+ *   B  01:17:24 wsOpen → 01:21:37 停推 = 253s   （L2 重连后的新会话）
+ *   D  01:25:09 wsOpen → 01:29:17 停推 = 248s   （手动重新申请机位后的新会话）
+ * 均值 249.3s，离散度 ±3s —— 这不是"从 ticket 算 300s"，而是
+ * **每一个 WS 会话（每次 wsOpen 重新计时）都只有约 250 秒寿命**。
+ * 历史上"4 分 18 秒"之所以看起来像固定值，是因为起播冷启动恰好也在
+ * 40~60 秒量级，两个数加起来的抖动被掩盖了。
+ *
+ * 结论：最初的想法是「与其等它停了、再靠 STALLGUARD 补救（用户会看到十几秒
+ * 静止画面），不如在寿命到期**之前**主动换一个新会话」——230s 留 20s 余量、
+ * 换会话只要 2~4 秒、画面由新 IDR 重建，理论上几乎无感。
+ *
+ * **但这条路真机走不通**（见下方 ★★ 默认关闭 ★★）：换会话必然换机位、
+ * 必然重拉对局容器，用户看到的是游戏从头开始。所以现在默认关闭。
+ * 下面这些 230s/245s 的推导保留，是为了以后拿到「不重开容器」的续命手段时
+ * 能直接复用。
+ *
+ * ★ 换会话必须"换机位"，不能"复用旧网关"（2026-11-14 01:51 真机教训）：
+ *   第一版 renewNow 调的是 onReconnect()（复用同一个 gatewayUrl 重新连），
+ *   230s 准点触发、日志全对，但网关 5 秒后就 op=close 把新会话关掉 ——
+ *   同一机位短时间内第二次连会被当成重复连接踢掉。结果用户看到
+ *   "230s 黑 3 秒 → 被踢 → 再等 40 秒靠 L3 重新申请才恢复"，比不续命更差
+ *   （不续命是 250s 停推后约 25 秒恢复）。
+ *   现在改为 onReapply()（重新申请机位，实测会从 -06 换到 -02），代价 ~7 秒，
+ *   换来的是一条不会撞上"重复连接"的干净会话。
+ *
+ * ★★ 默认关闭（=0），原因：换机位会让对局重启（2026-11-14 02:09~02:13 真机）★★
+ *   把阈值临时降到 60s 连做三次，每次都准点触发，但每次重新申请机位都会
+ *   **重新拉起一个对局容器**：日志里 `出画 1280x720 audio=0` 会重新打一次，
+ *   玩家看到的是「游戏从头开始」，不是无缝切换。三次实测黑屏 9s / 8s / 7s，
+ *   恢复音频 11s / 19s / 18s，且游戏进度全部丢失。
+ *   ⇒ 为了规避一个 250s 后才发生的停推，每 230s 打断一次对局，是不可接受的取舍。
+ *   所以策略改为：**不主动续命，靠收紧后的 STALLGUARD（8s + 3s）兜底**，
+ *   单次代价从「游戏重开」降到「黑屏约 15 秒、进度不丢」。
+ *   实现与十二条门全部保留，把这里改成 230000 即可随时重新开启。
+ *   若以后确认网关对频繁换机位没有惩罚、且能拿到「不重开容器」的续命手段
+ *   （例如 RtcKeepPlaying + gameToken），第一个要改的就是这个值。 */
+var ACTIVE_RENEW_MS = 0;
+/* 主动重连后至少等这么久才允许再次主动重连，防止「换完会话立刻又到期」
+ * 导致的连环重连把机位烧光。取 60s 是因为正常换会话 2~4 秒就出画了，
+ * 若 60s 还没恢复，说明网关侧有问题，该交给 STALLGUARD 处理而不是再换一次。 */
+var ACTIVE_RENEW_GUARD_MS = 60000;
 
 /* ================= 第二条判据：弱网冻结（rx 在涨但画面不动） =================
  *
@@ -220,7 +275,7 @@ var STALL_MAX_TRIES = 3;
  *          rx=73867 fps=0 kf=6 silent=3s tries=0 keep=on
  *   native: still no IDR (rx=74418 kfReq=468 gateDrop=15511 auDrop=401)
  *
- * rx 从 194 一路涨到 73867，收包停滞判据（看 rx 冻结 20s）**永远不会触发**；
+ * rx 从 194 一路涨到 73867，收包停滞判据（看 rx 冻结 STALL_RX_MS）**永远不会触发**；
  * 而 fps 自 16:30:30 起连续 12 分钟为 0，tries 一直是 0 —— 一次自愈都没发起。
  * 原因是：弱网下网关照推、包照收，但每个 AU 都被丢包打碎，native 的
  * 「首个完整 IDR 之前丢 P 帧」闸门把 15000+ 个 P 帧全丢了（gateDrop 持续增长）。
@@ -321,6 +376,13 @@ export default {
       probeAt: 0, /* 上次打 [play] probe 存活探针的时间（20s 一次，bug1 排查用） */
       /* ---- STALLGUARD：网关停推检测 + 三级自愈（见文件头 STALL_RX_MS 注释） ---- */
       stallLastRx: 0,  /* 上次看到的 rx（native stats.rtp_rx）。变大就刷新 stallSince */
+      /* ---- 第三条防线：会话寿命预警（见文件头 ACTIVE_RENEW_MS 注释） ----
+       * wsOpenAt 在**每一次** wsOpen 事件里刷新，而不是只在首播时设一次：
+       * 主动重连连出来的新会话，同样有 250s 寿命，同样需要在 230s 时再换一次。
+       * renewAt 记录本次主动重连的时刻，配合 ACTIVE_RENEW_GUARD_MS 防连环重连。 */
+      wsOpenAt: 0,     /* 本次 WS 会话建立的时刻（Date.now()）。0=还没连上 */
+      renewAt: 0,      /* 上一次「主动续命」重连的时刻。0=本局还没主动重连过 */
+      renewCount: 0,   /* 本局主动续命次数（仅用于日志与探针） */
       stallSince: 0,   /* rx 最后一次增长的时刻。0=还没收到过任何包（尚未进入判据） */
       stallTries: 0,   /* 本次故障已用掉的自动恢复次数（L1/L2/L3 各加一） */
       /* 这条故障是「哪条判据」发起的：'rx'=收包停滞 / 'freeze'=弱网冻结 / ''=无。
@@ -687,6 +749,10 @@ export default {
       if (p.ticketTtl) self.ticketTtl = Number(p.ticketTtl) || 0;
       if (p.regionName) self.regionName = p.regionName;
       logInfo('[play] boot code=' + self.code + ' q=' + self.quality + ' gw=' + (self.gatewayUrl ? 1 : 0));
+      /* 主动续命的计数只在本局有效：进了新一局（哪怕同 code）就从头算。 */
+      self.wsOpenAt = 0;
+      self.renewAt = 0;
+      self.renewCount = 0;
       self.startTimers();
       self.booted = true;
       if (!self.code) {
@@ -890,6 +956,10 @@ export default {
       if (t === 'ws') {
         if (ev.state) this.wsState = ev.state;
         if (ev.state === 'open') {
+          /* ★ 会话寿命从这一刻起算（见 ACTIVE_RENEW_MS 注释）。
+           * 必须在**每次** open 时刷新：L2 自愈 / 主动续命 / 用户点重连
+           * 都会产生新会话，每个新会话都只有约 250s 寿命。 */
+          this.wsOpenAt = Date.now();
           if (s === 'connecting' && !this.vizOn) this.stage = 'waiting';
           if (!this.vizOn) this.tip = '已连接网关，正在鉴权…';
           /* 官方原文 "25 "+(s?"keymouse":"tochscreen")（tochscreen 少一个 u 是官方拼写）。
@@ -1357,6 +1427,14 @@ export default {
       } catch (e) {
         logWarn('[play] checkStall 异常');
       }
+      /* ★ 主动续命：赶在网关停推之前换会话（见 ACTIVE_RENEW_MS 注释）。
+         必须放在 checkStall 之后：若某一局真的提前停推、STALLGUARD 已经在自愈，
+         renewNow 的门会拦掉这次主动重连（busy / stallTries>0），不会打架。 */
+      try {
+        this.checkRenew(now, s);
+      } catch (e) {
+        logWarn('[play] checkRenew 异常');
+      }
       /* ★ 第二条判据：弱网冻结（rx 在涨但画面不动，见 FREEZE_GATE_MS 注释）。
          必须放在 checkStall 之后：checkStall 会维护 stallLastRx 基准，
          freeze 依赖「rx 在涨」这个结论；反过来跑会让基准慢半拍。 */
@@ -1384,12 +1462,14 @@ export default {
           ' silent=' + (this.stallSince ? Math.round((now - this.stallSince) / 1000) + 's' : '0s') +
           ' frozen=' + (this.freezeFpsZeroSince ? Math.round((now - this.freezeFpsZeroSince) / 1000) + 's' : '0s') +
           ' tries=' + this.stallTries + (this.stallOwner ? '(' + this.stallOwner + ')' : '') +
+          ' sess=' + (this.wsOpenAt ? Math.round((now - this.wsOpenAt) / 1000) + 's' : '-') +
+          ' renew=' + this.renewCount +
           ' keep=' + (this.hiddenSince ? 'hidden' + Math.round((now - this.hiddenSince) / 1000) + 's' : 'on'));
       }
     },
     /* ============ STALLGUARD：网关停推检测 + 三级自愈 ============
-       设计依据见文件头 STALL_RX_MS 注释（真机 4m18s 网关静默停推）。
-       判据只看两件事：stage==='live' 且 rx 连续 20s 没涨。 */
+       设计依据见文件头 STALL_RX_MS 注释（网关每会话约 250s 静默停推）。
+       判据只看两件事：stage==='live' 且 rx 连续 STALL_RX_MS（8s）没涨。 */
 
     /* 把所有停滞状态清干净（含 L1 的复查定时器）。停/恢复/销毁路径都要调，
        否则退出后残留的 setTimeout 会对着死页面继续自愈。 */
@@ -1417,6 +1497,75 @@ export default {
       this.freezeZeroAt = 0;
       this.stallOwner = '';
     },
+    /* ============ ACTIVE RENEW：会话寿命预警，主动换会话 ============
+     * 判据只有一条：本次 WS 会话已存活 ≥ ACTIVE_RENEW_MS。
+     * 依据与阈值推导见文件头 ACTIVE_RENEW_MS 注释（三局实测 247/253/248s）。
+     *
+     * ★ 默认关闭（ACTIVE_RENEW_MS = 0）：真机验证发现"换会话"必然换机位、
+     *   必然重拉对局容器 = 游戏从头开始，代价远大于收益。整段实现保留，
+     *   把常量改成 230000 即可重新启用。关闭后由 STALLGUARD 独立兜底。
+     *
+     * 设计初衷（2026-11-14 01:47 之前的思路，留档）：不等停推再救 ——
+     * STALLGUARD 的判据是「rx 冻结 8s」，L1+L2 全成功也要用户盯着静止画面
+     * 十几秒。主动续命本想把这段空窗压到 2~4 秒，但实测那 2~4 秒里
+     * 换来的是游戏重开，所以放弃。
+     *
+     * 与 STALLGUARD 的互斥（顺序都写在这里，改的时候别漏）：
+     *   - stallTries > 0  → 已经在自愈，让 STALLGUARD 走完，这次不抢；
+     *   - busy            → 重连/申请/退出正在进行；
+     *   - stallL1Timer    → L1 已发，正等 5s 复查；
+     *   - !vizOn          → 画面本来就没出来（还在等首帧），此时重连毫无意义；
+     *   - stage !== live  → 同上，只在真正出画stable态下才续命。
+     * 这些门与 checkStall 顶部的门刻意保持一致 —— 两条防线不许同时动作，
+     * 否则会互相把对方刚设的 stallTries / 计时基准改掉（这是本项目已经踩过的坑）。 */
+    checkRenew: function (now, s) {
+      if (this.dead) return;
+      if (!ACTIVE_RENEW_MS) return;      /* 开关：置 0 即关闭主动续命 */
+      if (!this.wsOpenAt) return;        /* 还没连上过网关 */
+      if (this.hiddenSince) return;      /* 退后台不续命（同 checkStall 的理由） */
+      if (this.busy) return;
+      if (this.stallTries > 0) return;   /* STALLGUARD 正在自愈，让它走完 */
+      if (this.stallL1Timer) return;
+      if (!this.vizOn) return;           /* 没出画就别换会话 */
+      if (s !== 'live') return;
+      if (this.wsState !== 'open') return;
+      /* 刚换过会话：给新会话留出出画时间，避免连环重连。 */
+      if (this.renewAt && now - this.renewAt < ACTIVE_RENEW_GUARD_MS) return;
+      var age = now - this.wsOpenAt;
+      if (age < ACTIVE_RENEW_MS) return;
+      this.renewNow(now, age);
+    },
+    renewNow: function (now, age) {
+      var self = this;
+      this.renewAt = now;
+      this.renewCount++;
+      this.wsOpenAt = now;   /* 立刻重置基准：若重连失败，下一轮 230s 后才会再试 */
+      /* 和 stallHealL2/L3 一样重开时间窗：换机位要 5~10s，期间 checkStall 的
+         silent 计时会一直走，不重置的话新会话刚回来就可能被上一轮计时误判。 */
+      this.stallWindowReset(now);
+      logWarn('[play] renew: 会话已存活 ' + Math.round(age / 1000) +
+        's（阈值 ' + Math.round(ACTIVE_RENEW_MS / 1000) +
+        's）→ 主动换会话（第 ' + this.renewCount + ' 次），避免网关停推');
+      /* 与 stallHealL2 同样的动作序列，但**不写 stallTries**：
+       * 主动续命是我们计划内的行为，不该占用 STALLGUARD 的自愈额度，
+       * 否则真正遇到弱网停推时用户只剩 2 次机会。 */
+      this.vizOn = false;
+      this.stage = 'waiting';
+      this.tip = '正在切换画面通道…';
+      /* ★ 这里必须走 onReapply（重新申请机位），不能用 onReconnect（复用旧网关）。
+       * 2026-11-14 01:51:37 真机实测：230s 准点触发后复用同一个 gatewayUrl 重连，
+       * 网关 5 秒后直接 op=close 把新会话关掉（旧的仍在推流的会话被当成重复连接），
+       * 于是用户看到「230s 黑 3s → 被踢 → 再等 40s 靠 L3 救回」，
+       * 比不续命（250s 停推后 ~25s 恢复）更差。
+       * 换机位是让服务端重新分配一个 gateway（实测 -06 → -02），代价 ~7s 重建，
+       * 但不会撞上「同一机位重复连被踢」。 */
+      try {
+        var p = this.onReapply();
+        if (p && p.catch) p.catch(function () {});
+      } catch (e) {
+        logWarn('[play] renew onReapply 异常');
+      }
+    },
     /* 每 500ms 由 tick() 调一次。刻意很轻：只比较一个整数。 */
     checkStall: function (now, s) {
       if (this.dead) return;
@@ -1442,7 +1591,7 @@ export default {
       /* ① 先把「rx 变化」判掉，**不分 stage**。
          这一条必须排在 stage 判断之前：L2 重连成功后 stage 会依次经过
          connecting → waiting → live，若只在 live 才承认「恢复了」，
-         重连真的救回来时 stallTries 清不掉，20 秒后会被误判成第二级停滞。 */
+         重连真的救回来时 stallTries 清不掉，一个 STALL_RX_MS 后会被误判成第二级停滞。 */
       if (this.rx > this.stallLastRx) {
         this.stallLastRx = this.rx;
         this.stallSince = now;
@@ -1538,7 +1687,7 @@ export default {
      * tag='stall' = 收包停滞（rx 冻结）；tag='freeze' = 弱网冻结（rx 涨但画面不动）。
      * 抽出来是为了保证两条判据**升级到同一级时动作完全一致**，而不是各写一份、
      * 日后改一处忘另一处。 */
-    /* 升级到下一级前统一重开时间窗：收包停滞的 20s 窗口 + 冻结判据的 gate 窗口
+    /* 升级到下一级前统一重开时间窗：收包停滞的 STALL_RX_MS（8s）窗口 + 冻结判据的 gate 窗口
        都要重置，否则重连刚回来还没等到第一个 stat，就会被上一轮的计时立刻判成
        下一级。 */
     stallWindowReset: function (now) {

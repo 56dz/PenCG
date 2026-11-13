@@ -47,3 +47,15 @@ export const DEV_AUTOLOGIN = null;
  * 用法：DEV_LOGOUT = { delay: 3000 }（delay 要留够首页 boot 与本页 restore 完成）
  * ★ 取证结束必须改回 null。★ */
 export const DEV_LOGOUT = null;
+
+/* ★ 仅取证用（bug1 二分定位专用）★
+ *
+ * 上行 RTCP 对比实验：Chrome 在整段会话里 pliCount=0 / nackCount=0 /
+ * remote-inbound-rtp 全程缺失（即**一个上行 RTCP 都不发**），而 PenCG
+ * 1Hz RR + 2s PLI + 按缺口 NACK。
+ *
+ * 置 true 时 `src/services/media.js` 的 cfgObj 会带 `noRtcp:1`，native
+ * 主循环跳过 cm_kf_tick / cm_nack_tick / cm_rtcp_tick（ICE consent 仍发）。
+ *
+ * ★ 取证结束必须改回 false。★ */
+export const DEV_NO_RTCP = false;

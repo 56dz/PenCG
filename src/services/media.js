@@ -4,6 +4,7 @@
 import { loadNative, loadMedia, callJSON } from './native.js';
 import { encodeBody, decodeBody, currentOffset, currentToken, currentUserId } from './cg.js';
 import { logInfo, logWarn, logError } from './log.js';
+import { DEV_NO_RTCP } from '../dev-autostart.js';
 
 const S = {
   wsId: 0,
@@ -476,6 +477,16 @@ function onWsMessage(raw) {
     notify({ t: 'gamestop', code });
   } else if (op === 'close') {
     S.phase = 'closed';
+    /* 网关主动关会话时必须把 data 原样落日志：本地实测「复用旧网关重连」偶尔
+     * 5 秒内就被 op=close 关掉，而 close 的 data 里带 code/reason，是判断
+     * 「同一机位重复连被踢」还是「服务端计时到点」的唯一线索。 */
+    logWarn('[media] op=close data=' + (function () {
+      try {
+        return JSON.stringify(j.data || {});
+      } catch (e) {
+        return '?';
+      }
+    })());
     notify({ t: 'wsclose', msg: 'server close' });
   } else {
     notify({ t: 'ws', state: op || 'unknown', msg: text.slice(0, 120) });
@@ -556,7 +567,11 @@ export async function startMedia() {
     videoSsrc: S.remote.videoSsrc,
     audioSsrc: S.remote.audioSsrc,
     rect: S.rect || { x: 0, y: 0, w: 960, h: 266 },
-    codec: 'h264'
+    codec: 'h264',
+    // ★ 取证开关（对比实验用）：DEV_NO_RTCP=1 时 native 不发任何上行 RTCP
+    // （PLI/NACK/RR），用于二分「网关是否因为我们的上行 RTCP 而停推」。
+    // 量产/默认恒为 0。来源：src/dev-autostart.js 的 DEV_NO_RTCP。
+    noRtcp: DEV_NO_RTCP ? 1 : 0
   };
   const r = callJSON(mm, 'start', [JSON.stringify(cfgObj)]);
   if (!r || !r.id) throw new Error('cgmedia start 失败: ' + JSON.stringify(r));

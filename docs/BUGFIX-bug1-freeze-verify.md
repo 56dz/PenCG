@@ -278,7 +278,7 @@ $D/env/adb/adb.exe -s 9D91500007505171 shell \
 | **情况乙 + 判据生效但救不回** | `freeze: ... → L2 复用网关重连` → 可能 `L3` → `三级自愈全部失败，交给用户` | relax 持续在打 | ✅ 链走完了；但说明弱网下自愈能力有限（见 §9） |
 | **情况乙但判据完全没反应** | `frozen=` 一直在涨（>20s）但**没有** `[play] freeze:` 行 | 有 relax + 持续 `packet loss seen` | ❌ **漏报**。先看 §6.1 正对照：若正对照也没触发 → 代码/构建问题；若正对照能触发 → 说明 `frozenMs` 或 E 条件的语义与预期不符，回来读 `PenCG/src/pages/play/play.vue:1629-1690` |
 | **`frozen=` 一直是 `0s`，但画面上确实冻住了** | probe 里 `fps` 也许还在涨 | — | ⚠️ 说明不是"出画冻结"而是别的问题（平面被摘/熄屏/管线停）。查 `videoHidden`、`screen=`、DRI 平面 |
-| **断网测试** | `[play] stall detected: rx=... 已 20s 未增长`（一期判据） | `packet loss seen` 后 `rx` 冻结 | ✅ 正常。**二期的 E 条件刻意让路**，这是设计而非 bug |
+| **断网测试** | `[play] stall detected: rx=... 已 8s 未增长`（一期判据；2026-11-14 由 20s 收紧为 8s，旧包可能仍写 20s） | `packet loss seen` 后 `rx` 冻结 | ✅ 正常。**二期的 E 条件刻意让路**，这是设计而非 bug |
 
 ---
 

@@ -157,12 +157,13 @@ socketSend(e, t, i, n) {
   （载荷每字节 **+0x20** 解密后是 `{"m":"dataChannelReady","pkg":"com.hypergryph.endfield ..."}`）；
 - PenCG 从不响应，只是丢弃；
 - 而 PenCG 有个未解 bug：**游戏约 4 分 18 秒后网关静默停止推流**（`rx` 冻结，WS 仍 open）。
+  （**2026-11-14 更正**：实测判据应为「**每一个 WS 会话约 250 秒**，每次 `wsOpen` 重新计时」，247/253/248s；「4m18s」是「250s + 40~60s 起播冷启动」的口径。见 `docs/BUGFIX-bug1-active-renew.md`。）
   官方客户端的挂机保活（`RtcKeepPlaying` CmdId=20015 / `RtcKeepaliveCfg` CmdId=20021）
   走的是 protobuf 二进制信令，PenCG 拿不到 `gameToken`，所以这条路是死的。
 
 **所以要你验证的是**：DataChannel 建起来之后，
 1. 服务端推的 `9` 消息是不是就停了 / 变成真正的数据？
-2. **不建 DataChannel 会不会导致服务端判超时停推？**（就 PenCG 那个 4m18s）
+2. **不建 DataChannel 会不会导致服务端判超时停推？**（就 PenCG 那个 4m18s；2026-11-14 更正：实测是「每个 WS 会话约 250 秒」）
 3. `common_setting.data_channel_params` 里这几个字段的实际行为：
 
 ```json
@@ -213,6 +214,9 @@ socketSend(e, t, i, n) {
 ```
 
 **这正是 PenCG 那个 4m18s 停推的用户可见文案**。要你查清楚：
+
+> **2026-11-14 更正**：「4m18s」已更正为「每个 WS 会话约 250 秒」（每次 `wsOpen` 重新计时，三局实测 247/253/248 s）。下面四个问题的方向不变，但「超时时长」要按 250 s 去对。
+详见 `docs/BUGFIX-bug1-active-renew.md`。
 
 1. 这句话在前端 bundle 里**什么条件下**弹？（grep 这句话的字面量，看它的调用点）
 2. 服务端是通过**哪个 op** 通知的？（`op=error` 带什么 errcode？还是 `op=game_stop`？还是静默停流？）
@@ -367,7 +371,7 @@ X6 Pro 客户端**，自研了整条 WebRTC 协议栈（ICE + DTLS-SRTP + RTP �
 | 传输 | 浏览器原生 WebRTC | 自研 ICE/DTLS-SRTP/RTP 栈 |
 | WS op | 明文 JSON + `offsetEn` | 同样 JSON + offset，已对齐 |
 | DataChannel | **没实装**（网页端默认也不用） | **没实装**（网关每秒催） |
-| 4m18s 停推 | 网页端**正常长玩**，为什么？ ← **这就是要你查的** | 待解 |
+| 4m18s 停推 | 网页端**正常长玩**，为什么？ ← **这就是要你查的** | 待解（**2026-11-14：PenCG 侧判据已更正为「每会话 ≈250s」，并已用 `ACTIVE_RENEW` 主动换会话规避；「网页端为什么能长玩」仍未答**） |
 
 > ★ **最有价值的交付不是多列 10 个接口，而是回答「网页端凭什么能长玩」**。
 > 如果你查清了网页端的续命机制，PenCG 那个卡了很久的掉线 bug 就能直接修掉。

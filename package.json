@@ -2,7 +2,7 @@
   "name": "pencg-app",
   "appName": "PenCG",
   "appid": "8002026110200003",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "icon": "app_icon.png",
   "description": "PenCG（有道 X6 Pro）：网易云游戏 cg.163.com 客户端 —— 首页推荐 / 搜索 / 游戏详情 / 云游玩（自建 WebRTC：ICE+DTLS-SRTP+H.264 硬解）/ 我的",
   "quickjs": {

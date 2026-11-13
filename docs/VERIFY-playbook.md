@@ -113,7 +113,13 @@ $ADB shell "grep -a -c 'pencg' $L"
 
 ## 1. bug 1 —— 熄屏被判成退后台，游戏会话被拆（lifecycle）
 
-对应 `BUGFIX-bug1-lifecycle.md`（§5 断言 V1–V5、§6 步骤、§6.5 验收 A1–A6）。
+对应 `BUGFIX-bug1-lifecycle.md`（§5 断言 V1–V5、§6 步骤、§6.5 验收 A1–A6）与 `BUGFIX-bug1-active-renew.md`（传输侧主动续命）。
+
+> **bug1 有两半，别只测一半**（另有第三半：传输侧停推后的自愈时效 —— 2026-11-14 已把 `STALL_RX_MS` 收紧到 8s，并关闭主动续命，见本节末两行）：
+> - **屏幕这一半**（本节大部分条目）：`[Idle]` 熄屏 → `onHide` → 拆会话。判据是 `[screen] keep #N` 与 probe 的 `screen=`。
+> - **传输这一半**（本节最后一条 + 失败指纹最后两条）：网关在**每个 WS 会话约 250s** 后停推（2026-11-14 三局实测 247/253/248s）。判据是 probe 的 `sess=` / `renew=` 与 `[play] renew:` 行。
+>
+> 两半互相独立：屏幕全亮、保活正常、`ws=open`，画面照样会在 ~250s 停更。
 
 ### 前置条件
 
@@ -135,6 +141,8 @@ $ADB shell "grep -a -c 'pencg' $L"
 | 连玩 8 分钟不碰屏 | `[screen] keep #N` 涨到 ~24（8min/20s），`state=0(ON)`；`[play] probe` 不断 | 验收 A1/A2 |
 | 玩到 15 分钟以上 | `$ADB shell pidof miniapp` 仍非空 | 没被 900s `system_sleep_wakeup` 杀（验收 A5） |
 | 长按退出 / 正常结束 | `stage=end`、`[screen] 保活停止 ticks=N（定时器已清，后台不再保活）` | 机位已释放（验收 A6） |
+| **连玩 6 分钟以上，只看传输侧** | probe 行里的 `sess=`（会话寿命秒数）；停推后应出现整条自愈序列：`[play] stall detected: rx=N 已 8s 未增长 → 尝试自愈（第 1 次：补发关键帧）` → `[play] stall: rx=N 已 11s 未增长 → L2 复用网关重连` → `[media] wsOpen id=2` → `[play] reconnect ok（复用旧网关）` → `[play] stall: 媒体会话重启，rx 重新计数（N → 0），已用自愈 2 次，继续观察` → `[play] 出画 1280x720 audio=1` → `[play] stall recovered: rx=M 已恢复（第 2 级自愈成功，停滞 Ns）` | **健康态**：`sess=` 每局从 0 涨到约 250s；停推后 **`rx` 冻结满 8s** 触发 L1，**约 11 秒内** `rx` 重新增长、`stall recovered` 出现、画面回。用户看到约 11 秒静止画面，**游戏进度不丢**。判据来源见 `docs/BUGFIX-bug1-stallguard.md` §5.6 |
+| 同上，确认主动续命已关闭 | probe 行里的 `renew=` | **`renew=` 恒为 0 是正确的**（`ACTIVE_RENEW_MS = 0`，2026-11-14 起默认关闭：换会话会让游戏重开，见 `docs/BUGFIX-bug1-active-renew.md` §9）。若看到 `[play] renew:` 行，说明这版包把开关改回了非 0 —— 那不是回归，是配置被改 |
 
 ### 失败时看什么（三条链的现场指纹）
 
@@ -146,6 +154,11 @@ $ADB shell "grep -a -c 'pencg' $L"
 | `[play] probe` 一直在刷，`rx` 在涨，`screen=3/1`，`Esmart1 ACTIVE` | 只是屏黑了，**画面其实还在** = 纯保活问题（最理想结果） |
 | `$ADB shell pidof miniapp` 为空 | 进程被杀（900s 唤醒或 OOM），是另一条链 |
 | `#N JS silent %llu ms but stream alive (rx=%llu bytes)` | JS 静默但码流还在 → 看门狗判定为"流活着"，不会拆 |
+| `sess=` 涨过 260s 后出现 `[play] stall detected` | **正常**（每会话约 250s 必停推，这是服务端行为，根因未修）。只要后面跟着 `stall recovered`，就是兜底成功 |
+| `stall detected: rx=N 已 20s 未增长`（注意是 20s 不是 8s） | 装的是**旧包**：`STALL_RX_MS` 已于 2026-11-14 收紧到 8s。先确认 `.amr` 版本再判故障 |
+| `stall detected` 之后 30 秒仍**没有** `stall recovered`，也没走到 L3 | L2 没救回来。看 `[media] wsOpen id=` 是否出现、`[play] reconnect ok` 是否有、`出画` 是否重打；再看是否被 `op=close` 踢（`grep 'op=close'`） |
+| `[play] stall recovered` 出现但 `停滞 5s` 这类数字远大于 11s | 恢复得慢：看是不是走到 L3（`→ L3 重新申请机位`）。L3 会重拉对局容器 = **游戏从头开始**，这是最坏路径 |
+| `renew=` 不为 0 且画面每约 230s 重开一次游戏 | 主动续命被重新启用（`ACTIVE_RENEW_MS` 非 0）。这是已知不可接受的行为，应改回 0，见 `docs/BUGFIX-bug1-active-renew.md` §9 |
 
 辅助读数（都只读）：
 
@@ -158,7 +171,7 @@ $ADB shell "pidof miniapp"; $ADB shell "pidof aplay"
 
 ### 仍未证实的点（待现场确认）
 
-- **V3**：20s 保活是否真的拦住了 270s（靠 A1/A2 判定）。
+- **V3**：20s 保活是否真的拦住了 270s（靠 A1/A2 判定）。（注意这里的 20s 是**保活间隔** `KEEP_INTERVAL_MS`，与 STALLGUARD 的 `STALL_RX_MS` 是两回事，不要混）
 - **V4**：熄屏瞬间 Falcon 到底调不调 App `onHide`。
 - **V5**：熄屏后 QuickJS 定时器是否真的停摆（决定链 B 是否真实存在）。
 - `screenSt == null`（读不到状态）时按"没熄"走保守拆管线，这是**有意的取舍**，不是 bug。
