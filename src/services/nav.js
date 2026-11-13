@@ -23,19 +23,66 @@ let pending = null;
  *
  * 所以这里单独存一个「下一次 index 显示时要落在哪个栏目」的标记，
  * index.vue 的 onShow 用 takeTabParam() 取一次即销。
- * 加 30s 过期：防止标记残留到很久以后一次莫名其妙的跳转。 */
+ * 加 30s 过期：防止标记残留到很久以后一次莫名其妙的跳转。
+ *
+ * ★ bug2：标记必须存在 $falcon 上，不能只存在模块级变量里。
+ * 登录页和 index 页是两份独立的 JS 上下文，模块级 pendingTab 写在一份里、
+ * 另一份读不到（HANDOFF.md「跨页面不共享模块状态」踩过同一个坑）。
+ * 之前只有模块变量，于是 setPendingTab('mine') 大概率等于没写，
+ * index.onShow 的 takeTabParam() 拿到空串，整条刷新通道就断了。
+ * 模块变量保留作为兜底（万一 $falcon 不可写）。 */
+const TAB_KEY = '__pencgPendingTab';
 let pendingTab = null;
 
+function hostGlobal() {
+  try {
+    if (typeof $falcon !== 'undefined' && $falcon) return $falcon;
+  } catch (e) {
+    /* ignore */
+  }
+  return null;
+}
+
 export function setPendingTab(tab) {
-  pendingTab = { tab: String(tab || ''), at: Date.now() };
+  const v = { tab: String(tab || ''), at: Date.now() };
+  pendingTab = v;
+  const g = hostGlobal();
+  if (g) {
+    try {
+      g[TAB_KEY] = v;
+    } catch (e) {
+      /* ignore */
+    }
+  }
 }
 
 export function takeTabParam() {
-  if (!pendingTab) return '';
-  const t = pendingTab.tab;
-  const stale = Date.now() - pendingTab.at > 30000;
+  /* bug2 复核改：两条通道各取一份，取「更新的那条」再用，而不是「$falcon 有就无条件
+   * 用 $falcon」。原来 $falcon 一旦读到值就盖过模块变量，若模块变量里是更晚写下的
+   * 标记（例如本页自己 goTab 刚写），会被旧标记顶替。两条同时置空即可 —— 取用本身
+   * 是同步的，单页面内不会和别的调用交错。 */
+  let a = null;
+  const g = hostGlobal();
+  if (g) {
+    try {
+      a = g[TAB_KEY] || null;
+    } catch (e) {
+      a = null;
+    }
+  }
+  let v = a;
+  if (pendingTab && (!a || (Number(pendingTab.at) || 0) > (Number(a.at) || 0))) v = pendingTab;
+  if (a) {
+    try {
+      g[TAB_KEY] = null;
+    } catch (e) {
+      /* ignore */
+    }
+  }
   pendingTab = null;
-  return stale ? '' : t;
+  if (!v || !v.tab) return '';
+  const stale = Date.now() - (Number(v.at) || 0) > 30000;
+  return stale ? '' : v.tab;
 }
 
 export function navTo(name, params) {

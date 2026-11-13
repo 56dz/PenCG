@@ -104,6 +104,8 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static cm_sess *g_sessions = NULL;
 static int g_next_id = 1;
 
+static void sess_free(cm_sess *s);
+
 static cm_sess *sess_find(int id) {
     cm_sess *s;
     pthread_mutex_lock(&g_mu);
@@ -143,6 +145,56 @@ static void sess_unlink(cm_sess *s) {
     }
     pthread_mutex_unlock(&g_mu);
     s->next = NULL;
+}
+
+/* 把已存在的会话完整收掉（摘表 → 置取消 → join 收包线程 → 拆 GStreamer → 释放）。
+ * 返回 1 表示真的收掉了一个，0 表示表里没有。
+ *
+ * 为什么需要它：Falcon 每个页面有独立 JS 上下文，两个 play 页同时 start 是**真实
+ * 可达**的（宿主重载 index、或 play 页被销毁时 beforeDestroy 里的 stop 没能跑完）。
+ * 两路会话会各自建一条 `kmssink plane-id=76` 的管线去抢同一个硬件平面，行为未定义，
+ * 真机上表现为 `crtc[68] plane_mask` 掉到 0、整屏黑且 weston 的 UI 面也被解绑。
+ * JS 侧看不见彼此，只有 native 能拦，所以新会话 start 前先把旧的视频会话收干净。
+ *
+ * 注意调用时机：本函数会 pthread_join，**不能在持有 g_mu 时调用**（js_start 里就是
+ * 在锁外调的）。它只从 JS 主线程（js_start）调用，收包线程自己不会走这条路。 */
+static int sess_kill(int id) {
+    cm_sess *s = sess_find(id);
+    if (!s) return 0;
+    sess_unlink(s); /* 立刻摘表：之后 poll/cmd 拿不到，stop 也不会重入 */
+    s->cancelled = 1;
+    s->rx_quit = 1;
+    if (s->rx_started) {
+        pthread_join(s->rx_thread, NULL);
+        s->rx_started = 0;
+    }
+    cm_box_destroy(s->vbox);
+    s->vbox = NULL;
+    cm_box_destroy(s->abox);
+    s->abox = NULL;
+    cm_srtp_close(s);
+    if (s->sock >= 0) { cm_udp_close(s->sock); s->sock = -1; }
+    CM_LOGI("stop #%d (pre-empted by a new start)", id);
+    sess_free(s);
+    return 1;
+}
+
+/* 找出所有「视频会话」的 id 并逐个收掉，返回收掉的个数。
+ * 判据用 cfg.video_pt != 0：那正是建 vbox 的前提（cm_media.c:212 附近），
+ * 纯音频会话不占 plane，没有互斥的必要。 */
+static int sess_kill_all_video(void) {
+    int ids[16];
+    int n = 0, i, killed = 0;
+    pthread_mutex_lock(&g_mu);
+    {
+        cm_sess *s;
+        for (s = g_sessions; s && n < (int)(sizeof(ids) / sizeof(ids[0])); s = s->next) {
+            if (s->cfg.video_pt) ids[n++] = s->id;
+        }
+    }
+    pthread_mutex_unlock(&g_mu);
+    for (i = 0; i < n; i++) killed += sess_kill(ids[i]);
+    return killed;
 }
 
 static void sess_free(cm_sess *s) {
@@ -224,6 +276,17 @@ static JSValue js_start(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     if (argc < 1) return JS_NewString(ctx, "{\"error\":\"cfgJson required\"}");
     json = JS_ToCString(ctx, argv[0]);
     if (!json) return JS_NewString(ctx, "{\"error\":\"cfgJson not a string\"}");
+
+    /* 【bug6 修复】先把表里已有的视频会话收干净，再建新会话。
+     * 否则两路会话会各建一条 kmssink plane-id=76 的管线抢同一硬件平面，
+     * 真机表现为 plane_mask 掉 0、整屏黑、weston UI 面被连带解绑（只能重启恢复）。
+     * 详见 sess_kill_all_video() 的注释。必须在 sess_alloc() 之前做：
+     * 收会话时会 pthread_join，放在 alloc 之后会让新会话短暂持着空 vbox。 */
+    {
+        int killed = sess_kill_all_video();
+        if (killed > 0)
+            CM_LOGW("start: pre-empted %d stale video session(s) to free plane 76", killed);
+    }
 
     s = sess_alloc();
     if (!s) { JS_FreeCString(ctx, json); return JS_NewString(ctx, "{\"error\":\"nomem\"}"); }

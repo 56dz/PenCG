@@ -1,0 +1,245 @@
+================================================================================
+PenCG Bug5 音频排查 —— 真机基准读数（X6 Pro / RK3562 / 设备 9D91500007505171）
+采集时间：2026-11-12 17:35 ~ 18:10（本地）
+采集条件：设备空闲，**PenCG 没有在跑**，没有任何 aplay 子进程
+采集方式：adb shell 只读命令；为取证临时改过 mixer 的地方都已复原并在文末记录
+adb：./env/adb/adb.exe（工作目录 haas-x6pro/）
+================================================================================
+
+--------------------------------------------------------------------------------
+1. 声卡枚举
+--------------------------------------------------------------------------------
+$ adb shell cat /proc/asound/cards
+ 0 [rockchiprk817  ]: rockchip-rk817 - rockchip-rk817
+ 1 [rockchipaw883xx]: rockchip-aw883x - rockchip-aw883xx
+
+  card0 = rk817 codec（模拟 codec，有 Playback Path 路由枚举）
+  card1 = aw883xx 智能功放（SmartPA，音量就是它的 Master Playback Volume）
+
+--------------------------------------------------------------------------------
+2. card0（rk817）关键控制
+--------------------------------------------------------------------------------
+$ amixer -c 0 cget name='Playback Path'
+numid=45,iface=MIXER,name='Playback Path'
+  ; type=ENUMERATED,access=rw------,values=1,items=11
+  ; Item #0 'OFF'
+  ; Item #1 'RCV'
+  ; Item #2 'SPK'
+  ; Item #3 'HP'
+  ; Item #4 'HP_NO_MIC'
+  ; Item #5 'BT'
+  ; Item #6 'SPK_HP'
+  ; Item #7 'RING_SPK'
+  ; Item #8 'RING_HP'
+  ; Item #9 'RING_HP_NO_MIC'
+  ; Item #10 'RING_SPK_HP'
+  : values=0                      <-- 0 = OFF（空闲态）
+
+$ amixer -c 0 cget numid=51
+numid=51,iface=MIXER,name='Master Playback Volume'
+  : values=225,225                <-- min=0 max=255，dBscale-min=-46.08dB step=0.18dB
+
+$ amixer -c 0 cget numid=47   -> Headphone Switch : values=on
+$ amixer -c 0 cget numid=48   -> Speaker Switch   : values=on
+$ amixer -c 0 cget numid=46   -> Capture MIC Path : values=0 (MIC OFF)
+
+--------------------------------------------------------------------------------
+3. card1（aw883xx）关键控制 —— ★ 这就是「系统音量」
+--------------------------------------------------------------------------------
+$ amixer -c 1 cget numid=54
+numid=54,iface=MIXER,name='Master Playback Volume'
+  ; type=INTEGER,access=rw------,values=2,min=0,max=255,step=1
+  : values=0,0                    <-- 空闲态 = 0（用户此时系统音量就是 0）
+
+$ amixer -c 1 cget numid=19   -> Master / Slave Mode Select : values=1 (Master)
+$ amixer -c 1 cget numid=47   -> Headphone Switch           : values=on
+
+★ 解析注意：cget 输出里有两行带 "values="。
+    `; type=INTEGER,...,values=2,...` 里的 2 是**声道数**，
+    `: values=0,0` 才是**当前值**。
+  只匹配 "values=" 会把音量读成 2。必须匹配行首带冒号的 ": values="。
+
+--------------------------------------------------------------------------------
+4. 为什么 card1 numid=54 就是「系统音量」—— 三条独立证据
+--------------------------------------------------------------------------------
+证据 A：/etc/asound.conf 的软音量绑在 card1 上
+  pcm.!default  = asym，playback.pcm = "speaker"
+  pcm.speaker   = plug -> spk_softvol
+  pcm.spk_softvol = softvol {
+        control { name "Master Playback Volume" card 1 device 0 }
+        min_dB -46.08  max_dB -0.18  resolution 256
+        slave.pcm "resample_spk"   -> hw:1,0, rate 48000, 2ch
+  }
+  => /bin/aplay 不带 -D 时走 !default，**音量环节是 card1 的 softvol**，
+     最终直接写 hw:1,0。声音根本不经过 rk817 的模拟输出级。
+
+证据 B：hal-audio 的配置里写死了 numid
+  $ /bin/hal-audio -l  (youdao_hal_config_get)
+    speaker_card_id=1
+    speaker_subdevice_id=0
+    speaker_vol_ctl_numid=54        <-- 系统音量控件 = card1 numid 54
+    mic_card_id=0
+    analog_*_hs_vol_ctl_numid=51
+    digital_hs_card_id=2
+    enable_rk_aac=true
+
+证据 C：改系统音量只动这一个控件（diff 实验）
+  $ hal-audio -s 50
+  $ (改前/改后各抓一次 `amixer -c 0 contents` + `amixer -c 1 contents`，全量 diff)
+  => 只有 card1 numid=54 变化：values=0,0 -> values=176,176
+     card0 的所有控件（含 Playback Path / Master / Speaker Switch）**一个都没变**
+
+  映射实测（非线性）：
+    hal-audio -s 0   -> card1#54 = 0,0
+    hal-audio -s 30  -> card1#54 = 128,128
+    hal-audio -s 50  -> card1#54 = 176,176
+    hal-audio -s 100 -> card1#54 = 255,255
+
+  ★ hal-audio -g 是坏接口，不能用来判音量：
+      mixer 是 176,176 时 `-g` 返回 0；mixer 是 0,0 时 `-g` 也返回 0。
+      判音量只能 `amixer -c 1 cget numid=54`。`-s` 本身是可靠的。
+
+--------------------------------------------------------------------------------
+5. 声学 2×2 矩阵 —— 证明「响度只由 card1 决定，Playback Path 无关」
+--------------------------------------------------------------------------------
+方法：`aplay -q -t raw -f S16_LE -r 48000 -c 2 - < /dev/urandom` 播放 2 秒，
+      同时 `arecord -q -D hw:0,0 -t raw -f S16_LE -r 48000 -c 2 -d 2` 录音，
+      再用 od + awk 算 16bit 采样的绝对值均值 / 峰值。
+前置：录音要先拨 `amixer -c 0 cset name="Capture MIC Path" "Main Mic"`（numid=46 0->1）。
+
+  quiet（完全不放音）                  avg=83    max=240     <- 本底噪声
+  Playback Path=OFF, amp=0,0           avg=90    max=553     <- 静音
+  Playback Path=OFF, amp=200,200       avg=9339  max=32768   <- 大声 ★
+  Playback Path=SPK, amp=0,0           avg=102   max=605     <- 静音
+  Playback Path=SPK, amp=200,200       avg=9366  max=32768   <- 大声
+
+结论：
+  * OFF 与 SPK 对「是否出声」**没有任何差别**（90 vs 102，都在本底噪声量级）。
+  * 唯一的开关是 card1 numid=54：0,0 -> 静音（90/102）；200,200 -> 满响度（9339/9366）。
+  * 旧代码在系统音量为 0 时做的正是 `values=0,0 -> cset 200,200`，
+    也就是把第 2 行变成第 3 行 —— **这就是用户听到的那声不该有的声音**。
+
+--------------------------------------------------------------------------------
+6. 谁在管 Playback Path —— 没有系统守护进程
+--------------------------------------------------------------------------------
+对设备上所有可能碰音频的二进制做 `strings | grep -c "Playback Path"`：
+  /bin/hal-audio                          -> 0
+  /usr/bin/miniapp                        -> 0
+  /usr/bin/weston                         -> 0
+  /usr/bin/runSoundPlayer                 -> 0
+  /oem/YoudaoDictPen/output/SoundPlayer   -> 0
+  /oem/YoudaoDictPen/output/SoundRecord   -> 0
+  /data/local/bluealsa_custom/bluealsa_orig -> 0
+
+=> 没有别的进程会替我们拨/还原这个控件。我们改的，只有我们还原。
+
+`/usr/lib/libydhal_devices.so` 里有音量子系统（set_volume_lock / volume_ctrl /
+_volume_control_work / load_volume_from_sysconf / get_volume_numid_by_device_type_id），
+映射它的进程：ResourceManager(1244)、SoundPlayer(1279)、SoundRecord(1316)、
+input_subsytem_monitor(1365)、CaptureFrame(1504)、ota_mgr(1524)、miniapp(968)。
+=> 音量键走 input_subsytem_monitor -> libydhal_devices -> hal-audio -s -> card1#54。
+
+--------------------------------------------------------------------------------
+7. aplay / 进程 / 声卡占用
+--------------------------------------------------------------------------------
+$ adb shell pidof aplay
+（空，无输出）                     <-- 空闲态没有 aplay
+
+$ adb shell ps | grep -iE 'miniapp|bluealsa|Sound'
+  miniapp(968)  bluealsa(1716)  SoundPlayer(1279)  SoundRecord(1316)
+  bluealsa 命令行：
+    /data/local/bluealsa_custom/bluealsa_orig --profile=a2dp-source
+      --profile=hfp-ag --a2dp-volume --sbc-quality=0
+
+$ cat /proc/asound/card0/pcm0p/sub0/status   -> closed
+$ cat /proc/asound/card1/pcm0p/sub0/status   -> closed
+（aplay 真正播放时实测：card0 = closed，card1 = RUNNING，停止后回 closed
+  => 发声只经 card1，进一步印证第 4、5 节）
+
+$ adb shell cat /proc/968/status | grep -E 'SigBlk|SigIgn|SigCgt'
+  SigBlk: 0
+  SigIgn: 0000000000011006        <-- bit16 = SIGCHLD 被忽略
+  SigCgt: 00000001000064f8
+=> 宿主进程（miniapp）把 SIGCHLD 设成 SIG_IGN，所以 waitpid 会返回 ECHILD。
+   子进程仍由内核自动回收（不会有僵尸），但「它到底有没有真的退出」
+   只能用 kill(pid, 0) 探活。
+
+--------------------------------------------------------------------------------
+8. 配置与开机脚本
+--------------------------------------------------------------------------------
+$ grep -i volume /data/cfg/sys_config.conf
+  spk_volume=0                    <-- 与 card1#54=0,0 一致
+  ahs_volume=80
+  dhs_volume=80
+  bt_volume=80
+
+$ adb shell settings list system | grep -i vol   -> 空（没有 Android 音量键）
+
+/etc/init.d/S50-app-launcher 按 pcba_version 分支；本机
+  /proc/device-tree/model = "Rockchip RK3562 MELON LP4 V10 Board"
+所以走 audio_params_init_on_melon()：
+  alsactl restore -f /etc/asound.state.melon
+  mount --bind /etc/asound.conf.VMelon /etc/asound.conf
+  写 smartpa cali（/sys/bus/i2c/drivers/aw883xx_smartpa/3-0035/cali_re，默认 7000）
+  hal-audio -D 0 -s ${spk_volume}
+  hal-audio -D 2 -s ${ahs_volume}
+/etc/asound.state.melon 里 DAC Playback Path 是 OFF（和空闲态 values=0 一致）。
+/var/lib/alsa 为空 => 没有 alsactl 常驻保存，mixer 值掉电不保留。
+
+--------------------------------------------------------------------------------
+9. 设备上的可用工具（排查时别猜）
+--------------------------------------------------------------------------------
+有：/bin/amixer、/bin/aplay、/bin/arecord、/bin/hal-audio、/usr/bin/gst-inspect-1.0
+没有：tinyplay、tinycap、logcat
+     （JS 日志只有 console.error 会落 /userdata/applog/loli_s6_dev.txt；
+       console.warn / console.log 不落盘，详见 docs/VERIFY-playbook.md §0）
+
+gst-inspect-1.0 fdsink（GStreamer 1.22.0）属性全集：
+  async / blocksize / enable-last-sample / fd / last-sample / max-bitrate /
+  max-lateness / name / parent / processing-deadline / qos / render-delay /
+  stats / sync / throttle-time / ts-offset
+=> **没有 close-fd 属性**，fdsink 不会替我们关管道写端，必须自己 close()。
+
+arecord 可用参数：-D hw:0,0 -t raw -f S16_LE -r 48000 -c 2
+  （-c 1 会报 "Channels count non available"）
+awk 没有 math 支持（"Math support is not compiled in"），不能用它生成正弦波。
+
+--------------------------------------------------------------------------------
+10. 历史日志（上一次运行留下）
+--------------------------------------------------------------------------------
+/userdisk/miniapp/data/cg_aplay.log（19350 B，376 行，Nov 12 12:42）
+  走的是蓝牙路径：
+    bluealsa-pcm.c:895: Getting BlueALSA PCM: PLAYBACK B0:A3:F2:AD:7E:FA a2dp
+    S16_LE / 48000 / Stereo / SBC
+    HW buffer 5 x 5760 = 28800 B
+  反复出现：
+    underrun!!! (at least 232650.770 ms long)
+    underrun!!! (at least 14376.547 ms long)
+    underrun!!! (at least 7408.337 ms long)
+    underrun!!! (at least 3300.751 ms long)
+    state : XRUN
+  => 蓝牙分支的 -B 150000 -F 30000 缓冲太大，配合 fdsink sync=false 很容易 XRUN。
+     这是独立的音频质量问题，不是 Bug5 的静音问题，但同一个 aplay 收尾逻辑。
+
+设备当前蓝牙耳机 MAC：B0:A3:F2:AD:7E:FA
+
+--------------------------------------------------------------------------------
+11. 取证期间的临时改动与复原记录（全部已复原）
+--------------------------------------------------------------------------------
+1) hal-audio -s 50 / -s 30 / -s 100  用于 diff 定位音量控件
+   复原：hal-audio -s 0         => card1#54 回到 0,0
+2) amixer -c 0 cset name='Playback Path' 在 OFF/SPK 之间来回
+   复原：values=0 (OFF)
+3) amixer -c 1 cset numid=54 0,0 / 176,176 / 200,200（声学矩阵）
+   复原：最终 0,0
+4) amixer -c 0 cset name='Capture MIC Path' 'Main Mic'（录音）
+   复原：'MIC OFF'（values=0）
+
+最终状态复核（2026-11-12 18:10）：
+  Playback Path : values=0  (OFF)
+  card1 numid=54: values=0,0
+  card0 numid=51: values=225,225
+  Capture MIC Path: MIC OFF
+  pidof aplay   : 空
+  card0/card1 pcm status: closed / closed
+================================================================================

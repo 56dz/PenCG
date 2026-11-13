@@ -15,7 +15,7 @@ export function normalizeTextEditValue(v) {
 
 function imLog(msg) {
   try {
-    console.warn('[im] ' + msg);
+    console.error('[im] ' + msg);
   } catch (e) {
     // 忽略日志失败
   }

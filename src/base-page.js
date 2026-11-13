@@ -85,13 +85,13 @@ export class BasePage extends ResourcePage {
   // 转发给 vue，谁先到就用谁（play 页两者都拆管线，靠 dead 幂等）。
   onStart() {
     if (super.onStart) super.onStart();
-    try { console.warn('[pencg][life] page onStart'); } catch (e) {}
+    try { console.error('[pencg][life] page onStart'); } catch (e) {}
     if (this.$root && this.$root.onStart) this.$root.onStart();
   }
 
   onStop() {
     if (super.onStop) super.onStop();
-    try { console.warn('[pencg][life] page onStop'); } catch (e) {}
+    try { console.error('[pencg][life] page onStop'); } catch (e) {}
     if (this.$root && this.$root.onStop) this.$root.onStop();
   }
 

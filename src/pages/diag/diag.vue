@@ -64,7 +64,7 @@ export default {
       } catch (e) { out.push('call throw:' + (e && e.message)); }
       try { out.push('\$appid=' + String(globalThis.$appid)); } catch (e) {}
       try { out.push('\$getTopApp=' + (typeof globalThis.$getTopApp)); } catch (e) {}
-      for (var i = 0; i < out.length; i++) console.warn('[pencg][diag] TOPAPP ' + out[i]);
+      for (var i = 0; i < out.length; i++) console.error('[pencg][diag] TOPAPP ' + out[i]);
     },
     // 记账式自检：只有 PASS/FAIL 计入汇总
     say(ok, name, detail, side) {
@@ -73,14 +73,14 @@ export default {
       if (ok) this.passN++;
       else this.failN++;
       try {
-        console.warn('[pencg][diag] ' + tag + ' ' + name + ' ' + (detail || ''));
+        console.error('[pencg][diag] ' + tag + ' ' + name + ' ' + (detail || ''));
       } catch (e) {}
     },
     // 仅显示、不计分（别的模块的自检用这个，避免污染本模块汇总）
     info(ok, name, detail, side) {
       this.push((ok ? 'PASS' : 'FAIL') + ' ' + name + (detail ? ' | ' + detail : ''), side);
       try {
-        console.warn('[pencg][diag] INFO ' + (ok ? 'PASS ' : 'FAIL ') + name + ' ' + (detail || ''));
+        console.error('[pencg][diag] INFO ' + (ok ? 'PASS ' : 'FAIL ') + name + ' ' + (detail || ''));
       } catch (e) {}
     },
     push(line, side) {
@@ -636,7 +636,7 @@ export default {
       this.summary =
         this.failN === 0 ? 'ALL PASS ' + this.passN : 'FAIL x' + this.failN + ' / pass ' + this.passN;
       try {
-        console.warn('[pencg][diag] ' + this.summary);
+        console.error('[pencg][diag] ' + this.summary);
       } catch (e) {}
     }
   }

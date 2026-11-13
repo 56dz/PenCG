@@ -385,7 +385,7 @@ function onWsMessage(raw) {
   try {
     p.mlines.forEach(function (m) {
       if (m.kind === 'audio' || m.kind === 'video') {
-        console.warn('[media] SDP ' + m.kind + ' pts=' + JSON.stringify(m.pts || []) +
+        console.error('[media] SDP ' + m.kind + ' pts=' + JSON.stringify(m.pts || []) +
           ' rtpmap=' + JSON.stringify(m.rtpmap || {}) +
           ' fmtp=' + JSON.stringify(m.fmtp || {}));
       }
@@ -433,7 +433,25 @@ export async function startPlay(cfg) {
   S.ourUfrag = '';
   S.ourPwd = '';
   S.ourFp = '';
+  /* 旧会话必须先**真正停掉**再归零，不能只是把 id 忘了：
+   * 重复 start / 快速重进对局时，上一轮的 native 会话可能还活着（vbox 还挂在
+   * KMS 上、还在收 RTP）。过去这里只写 S.mediaId = 0，那条会话就再也没人
+   * 停它、也没人给它 js_poll 心跳 → 平面一直盖着 UI，只能等 180s 看门狗
+   * 兜底拆（这期间界面是"卡住的"）。stopPlay() 的前几步全是同步的。 */
+  const oldMediaId = S.mediaId;
+  const oldWsId = S.wsId;
+  if (oldMediaId || oldWsId) {
+    logWarn('[media] startPlay 前清理上一轮会话 mediaId=' + oldMediaId + ' wsId=' + oldWsId);
+    try {
+      clearKfBurst();
+      if (oldMediaId && globalThis.__cgMedia) globalThis.__cgMedia.stop(oldMediaId);
+      if (oldWsId && globalThis.__cgNet) globalThis.__cgNet.wsClose(oldWsId);
+    } catch (e) {
+      logWarn('[media] 清理上一轮会话失败: ' + ((e && e.message) || e));
+    }
+  }
   S.mediaId = 0;
+  S.wsId = 0;
   S.vizOn = false;
   S.wsState = '';      // 必须清：否则新连接同为 'open' 时检测不到状态变化
   if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = 0; }
@@ -509,6 +527,40 @@ export function requestKeyFrame() {
   }
 }
 
+/* 连发 N 个 PLI（默认由 STALLGUARD 用：2 发、间隔 500ms）。
+ *
+ * 为什么要「连发」而不是发一次：网关对 PLI 的处理是「下次关键帧时顺带响应」，
+ * 而它在某些时刻会把单个 PLI 吞掉（真机 2026-11-13：停推后单发 PLI 完全没反应，
+ * 而会话其实还活着）。两发跨 500ms 能跨过它的处理窗口。
+ *
+ * 定时器必须由本模块持有并在 stopPlay() 里清掉：play.vue 的页面销毁路径
+ * 只保证调 stopPlay()，不会替 media 层清定时器；残留的 setTimeout 会在
+ * 几秒后对着已经关掉的 mediaId 发 cmd（native 侧拒绝，日志里多一条噪音）。 */
+let kfBurst = [];
+
+function clearKfBurst() {
+  for (let i = 0; i < kfBurst.length; i++) {
+    try { clearTimeout(kfBurst[i]); } catch (e) { /* ignore */ }
+  }
+  kfBurst.length = 0;
+}
+
+export function requestKeyFrameBurst(count, gapMs) {
+  const n = Math.min(5, Math.max(1, (count | 0) || 1));
+  const gap = Math.max(0, gapMs | 0);
+  clearKfBurst();
+  requestKeyFrame();
+  if (n === 1 || gap <= 0) return;
+  for (let i = 1; i < n; i++) {
+    const h = setTimeout(function () {
+      /* 先把自己从表里摘掉，否则长会话里这个数组只增不减。 */
+      kfBurst = kfBurst.filter(function (x) { return x !== h; });
+      requestKeyFrame();
+    }, gap * i);
+    kfBurst.push(h);
+  }
+}
+
 export function setRect(rect) {
   S.rect = rect;
   if (S.mediaId && globalThis.__cgMedia) {
@@ -555,6 +607,10 @@ export function currentGameCode() {
 }
 
 export async function stopPlay() {
+  /* 先清 PLI 连发定时器：它们会在几百毫秒后对 S.mediaId 发 cmd，
+     而下面几行立刻就把 mediaId 归零、native 会话销毁，留着只会在日志里
+     多几条 "cmd 失败" 噪音，还会和重连抢同一个 id。 */
+  clearKfBurst();
   if (S.pollTimer) {
     clearInterval(S.pollTimer);
     S.pollTimer = 0;

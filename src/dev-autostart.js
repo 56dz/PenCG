@@ -1,0 +1,49 @@
+/* ★ 仅取证用（不要随生产构建发布）★
+ *
+ * 为什么要这个文件：本机 `/dev/input/event1` 被 weston/seatd 独占，
+ * `send_event touch press/release` 只对 `scroller` 之外的元素生效
+ * （左侧竖导航栏能点动，卡片/banner 全部点不动）。所以真机 UI 流程
+ * 无法靠 adb 注入走通，只能让首页 boot 完之后自己跳一次。
+ *
+ * 用法：把 DEV_AUTOSTART 改成下面任一形态，重新构建 + 装机即可。
+ * 取证结束必须把它改回 null（或在最终交付前整文件删除）。
+ *
+ *   { page: 'play',   delay: 3000, params: { code:'yssy', name:'原神-7.2版本',
+ *                                           quality:'low', gameType:'mobile' } }
+ *   { page: 'detail', delay: 2000, params: { code:'mrfzzmd', name:'明日方舟：终末地（官服）' } }
+ *   { page: 'login',  delay: 2000, params: {} }
+ *   { page: 'mine',   delay: 2000, params: {} }
+ */
+export const DEV_AUTOSTART = null;
+
+/* ★ 仅取证用（bug2 真机验证专用，方案见 docs/BUGFIX-bug2-verify.md）★
+ *
+ * 为什么还需要这一个：`DEV_AUTOSTART` 只能把 app 推到某一页，**推不动登录表单**。
+ * 登录页的手机号/密码框是自绘软键盘（div 网格），而本机 `/dev/input/event1` 被
+ * weston 独占，`send_event` / `slip` 对这类元素基本无效 —— 也就是说「人工完成一次
+ * 登录」在不改代码的前提下无法用 adb 复现。
+ *
+ * 所以给登录页留一个可选的自动填充 + 自动提交开关：把下面的 null 换成一个对象，
+ * `PenCG/src/pages/login/login.vue` 的 mounted() 会在 boot 完成后自动填表并提交，
+ * 之后走的是**和生产完全一样的** submit() → loginByPassword() → 600ms →
+ * goBackToMine() 这条链路，不绕过任何被测逻辑。
+ *
+ * 用法（两处必须一起改）：
+ *   DEV_AUTOSTART  = { page: 'login', delay: 2000, params: {} }
+ *   DEV_AUTOLOGIN  = { phone: '<YOUR_PHONE>', pwd: '<YOUR_PASSWORD>', cc: '86', delay: 1200 }
+ *
+ * ★ 取证结束必须同时把两处改回 null，否则包里带着明文密码。★ */
+export const DEV_AUTOLOGIN = null;
+
+/* ★ 仅取证用（bug2 真机验证专用）★
+ *
+ * 让 app 启动后自己走一次生产 `logout()`（= `clearSession()` 清本页 G +
+ * 删盘上 `pencg_session` + `bumpSessionVersion()`），把设备退回「未登录」初态。
+ *
+ * 为什么不用 adb 改 preferences.json：那个键是「JSON 字符串里再套一层 JSON」，
+ * 外部改完 app 内存里还留着旧 session，必须再重启 miniapp 才干净；而走
+ * `logout()` 是本进程内一致的，且它顺便把版本号推进一格 —— 正好也是要测的路径。
+ *
+ * 用法：DEV_LOGOUT = { delay: 3000 }（delay 要留够首页 boot 与本页 restore 完成）
+ * ★ 取证结束必须改回 null。★ */
+export const DEV_LOGOUT = null;

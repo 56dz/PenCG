@@ -34,6 +34,23 @@
       <div class="mb-guest-btn" @click="goLogin"><text class="mb-guest-btn-text">去登录</text></div>
     </div>
 
+    <!-- 赞助页：和 confirmMode 一样整块替换内容区。
+         本运行时禁用绝对定位（见文件末尾 .mb-modal 上方注释），所以不能做浮层。
+         注意分支顺序：v-if(confirm) → v-else-if(!booted) → v-else-if(!logged)
+         → v-else-if(sponsor) → v-else(scroller)。赞助放在 scroller 之前，
+         这样点「赞助作者」时整块内容被替换成赞赏码而不是叠在上面。 -->
+    <div v-else-if="sponsorOn" class="mb-spon">
+      <image class="mb-spon-img" :src="sponsorImg" :width="180" :height="180"></image>
+      <div class="mb-spon-side">
+        <text class="mb-spon-title">如果 PenCG 对你有用</text>
+        <text class="mb-spon-desc">欢迎扫码赞助 —— 你的赞助是我更新的动力</text>
+        <text class="mb-spon-hint">用微信扫左侧赞赏码</text>
+        <div class="mb-spon-btn" @click="closeSponsor">
+          <text class="mb-spon-btn-text">返回</text>
+        </div>
+      </div>
+    </div>
+
     <scroller v-else class="mb-body">
      <div class="mb-inner">
       <div class="mb-row">
@@ -106,7 +123,8 @@
 </template>
 
 <script>
-import { restoreSession, currentSession, logout, updateProfile } from '../services/auth.js';
+import sponsorImg from '../assets/sponsor.png';
+import { restoreSession, currentSession, logout, updateProfile, sessionVersionAsync } from '../services/auth.js';
 import { v2Get } from '../services/cg.js';
 import { listPlays, clearPlays } from '../services/history.js';
 import { loadSettings, saveSettings } from '../services/settings.js';
@@ -156,7 +174,27 @@ export default {
       confirmMode: '',
       confirmTitle: '',
       confirmDesc: '',
-      iconFixLock: false
+      iconFixLock: false,
+      /* bug2：跨页会话版本号（见 methods.startVersionWatch 的说明） */
+      seq: 0,
+      verTimer: null,
+      verStopped: false,
+      /* bug2 复核加：「版本号已消费但会话仍为空」的补试预算。
+       * 见 methods.retryUnlogged 的注释 —— 没有这两个字段的话，一次 storage
+       * 瞬时超时就会让界面永久停在「未登录」（版本号已经前进，再也不会重试）。 */
+      seqPending: 0,
+      seqTry: 0,
+      /* bug2：refresh() 防重入。登录成功后同一瞬间会有三条路径同时叫 refresh()
+       * （index.onShow 的 refreshMineBody、index.checkSeq、本组件的版本轮询），
+       * 不加锁会并发跑多次 reloadLocal()/refreshProfile()，后完成的那次用的是
+       * 更早的 currentSession() 快照，可能把界面覆盖回旧状态。 */
+      refreshing: false,
+      refreshAgain: false,
+      /* 赞助弹层开关。默认关；点「赞助作者」才打开。
+       * 图片走 assets 的 import（构建时会拷进 images/ 并改写路径），不能写死
+       * 相对路径 —— 本运行时没有静态目录概念。 */
+      sponsorOn: false,
+      sponsorImg: sponsorImg
     };
   },
   computed: {
@@ -295,6 +333,7 @@ export default {
         { id: 'quality', label: '画质设置', desc: '当前 ' + qLabel },
         { id: 'history', label: '清除历史', desc: '清空游玩记录' },
         { id: 'about', label: '关于 PenCG', desc: '版本 ' + APP_VERSION },
+        { id: 'sponsor', label: '赞助作者', desc: '请作者喝杯奶茶' },
         { id: 'logout', label: '退出登录', desc: '清除本地会话' }
       ];
     }
@@ -308,8 +347,10 @@ export default {
       /* ignore */
     }
     this.boot();
+    this.startVersionWatch();
   },
   beforeDestroy() {
+    this.stopVersionWatch();
     try {
       if (this.$root && this.$root.__mineBody === this) this.$root.__mineBody = null;
     } catch (e) {
@@ -335,6 +376,12 @@ export default {
         return '玩过';
       }
     },
+    closeSponsor() {
+      this.sponsorOn = false;
+    },
+    noop() {
+      /* 弹层内部点击不该穿透到遮罩（遮罩绑了 closeSponsor） */
+    },
     showToast(t) {
       this.toast = t;
       const self = this;
@@ -342,30 +389,179 @@ export default {
         self.toast = '';
       }, 2000);
     },
+    /* ── 会话版本号监看（bug2 修复的兜底通道）──────────────────────────
+     * 本运行时没有可用的跨页 Vue 事件总线（全仓没有 $emit 跨页、没有 $falcon.on
+     * 的自定义事件），而 watch 只能监听本组件自己的响应式字段 —— 登录页改的
+     * 是 $falcon 上的一个普通属性，watch 看不见。所以这里用轮询。
+     *
+     * 为什么用递增整数：cg.js 的 session() 每次 Object.assign 出新对象，
+     * 引用比较在 QuickJS 下恒不相等，靠引用判断「变没变」要么永远触发要么
+     * 永远不触发，都不对。
+     *
+     * 2.5s 一次、只读一个数字，开销可忽略；页面销毁时停掉。
+     */
+    startVersionWatch() {
+      const self = this;
+      this.stopVersionWatch();
+      this.verStopped = false;
+      // 基线也走异步通道，和轮询比对口径一致。
+      sessionVersionAsync()
+        .then(function (v) {
+          if (!self.verStopped) self.seq = v;
+        })
+        .catch(function () {
+          /* ignore */
+        });
+      const tick = function () {
+        if (self.verStopped) return;
+        const again = function () {
+          if (!self.verStopped) self.verTimer = setTimeout(tick, 2500);
+        };
+        sessionVersionAsync()
+          .then(function (v) {
+            if (self.verStopped) return;
+            if (v && v !== self.seq) {
+              const from = self.seq;
+              self.seq = v;
+              self.seqTry = 0; // 新版本 → 重置补试预算
+              logInfo('[mine] session 版本变化 ' + from + ' -> ' + v + '，重载');
+              self.fireRefresh();
+              return;
+            }
+            /* ★ bug2 复核加：版本号没再变，但会话还是空的。
+             * 上面这条分支只在「版本号变化」时触发一次，版本号一旦被消费掉，
+             * 如果那次 refresh() 里的 restoreSession() 恰好读盘失败（storage.js:46
+             * 3s 超时回落 MEMORY、或登录页 setStorage 还没落盘），界面就会**永久**
+             * 停在「还没有登录网易云游戏」——没有任何东西会再试第二次。
+             * 所以补一条有界的补偿：登录态为空且版本号 > 0 时，再做最多 2 次重试。 */
+            self.retryUnlogged(v);
+          })
+          .catch(function () {
+            /* ignore */
+          })
+          .then(again);
+      };
+      this.verTimer = setTimeout(tick, 2500);
+    },
+    stopVersionWatch() {
+      this.verStopped = true;
+      if (this.verTimer) {
+        try {
+          clearTimeout(this.verTimer);
+        } catch (e) {
+          /* ignore */
+        }
+        this.verTimer = null;
+      }
+    },
+    /* ★ bug2 复核加：内部自发调用 refresh() 一律走这里。
+     * refresh() 是 async，任何未捕获的 rejection 在 QuickJS 里可能打断调用链，
+     * 让版本轮询（startVersionWatch 的 setTimeout 递归）就此停摆 —— 而它正是
+     * 「onShow 不回调」时的唯一兜底通道。这里统一吞掉异常并留一行日志。 */
+    fireRefresh() {
+      const p = this.refresh();
+      if (p && typeof p.catch === 'function') {
+        p.catch(function (e) {
+          logWarn('[mine] refresh 未捕获异常 ' + ((e && e.message) || e));
+        });
+      }
+      return p;
+    },
+    /* ★ bug2 复核加：版本号没变但会话仍是空时的有界补偿（见 startVersionWatch）。
+     * 为什么需要：`if (v && v !== self.seq)` 这条只在版本号**变化**的那一次触发。
+     * 那一轮 refresh() 里若 restoreSession() 读盘失败（storage.js:46 —— getStorage
+     * 3s 超时或抛错时回落 MEMORY，而本页 MEMORY 里可能没有这个键），界面就会永久
+     * 停在「还没有登录网易云游戏」：版本号已经消费掉，再也不会触发。
+     * 上限 2 次（seqTry <= 2），成功登录后自动归零，不会无限刷。 */
+    retryUnlogged(v) {
+      if (this.logged || this.refreshing) return;
+      if (!v || v <= 0) return; // 版本号 0 = 从来没人登录过，别瞎试
+      if (this.seqPending === v && this.seqTry >= 2) return;
+      if (this.seqPending !== v) {
+        this.seqPending = v;
+        this.seqTry = 0;
+      }
+      this.seqTry++;
+      logWarn('[mine] 版本号已到 ' + v + ' 但会话为空，补试第 ' + this.seqTry + ' 次');
+      this.fireRefresh();
+    },
     async boot() {
-      try {
-        await restoreSession();
-      } catch (e) {
-        logWarn('[mine] restore fail ' + ((e && e.message) || e));
+      // 与 refresh() 共用同一把重入锁（bug2 复核加）：boot() 里 `await restoreSession()`
+      // 期间，index.onShow / checkSeq / 版本轮询都可能叫到 refresh()。两边并发跑
+      // reloadLocal() 时，先发起后完成的那一轮会用更旧的 currentSession() 快照
+      // 把界面写回去，所以 boot 期间到达的 refresh 一律合并到 boot 结束后补跑一次。
+      if (this.refreshing) {
+        this.refreshAgain = true;
+        return;
       }
+      this.refreshing = true;
       try {
-        this.settings = await loadSettings();
-      } catch (e2) {
-        this.settings = null;
+        try {
+          await restoreSession();
+        } catch (e) {
+          logWarn('[mine] restore fail ' + ((e && e.message) || e));
+        }
+        try {
+          this.settings = await loadSettings();
+        } catch (e2) {
+          this.settings = null;
+        }
+        await this.reloadLocal();
+        // 会话已恢复完，这时才算「确定」了登录态，可以安全地显示真实内容
+        this.booted = true;
+        logInfo('[mine] boot logged=' + this.logged);
+        if (this.logged) await this.refreshProfile();
+      } finally {
+        this.refreshing = false;
+        if (this.refreshAgain) {
+          this.refreshAgain = false;
+          this.fireRefresh();
+        }
       }
-      await this.reloadLocal();
-      // 会话已恢复完，这时才算「确定」了登录态，可以安全地显示真实内容
-      this.booted = true;
-      logInfo('[mine] boot logged=' + this.logged);
-      if (this.logged) this.refreshProfile();
     },
     // 外层（index.vue 内嵌、mine.vue 薄壳的 onShow）统一调它
     async refresh() {
-      await this.reloadLocal();
-      // 诊断用：用户 m13280 第 2 条「登录后跳过来还显示未登录」，需要区分
-      // 是 refresh 根本没被调用，还是调用了但读到的会话仍是空。
-      logInfo('[mine] refresh logged=' + this.logged + ' booted=' + this.booted);
-      if (this.logged) await this.refreshProfile();
+      // ★ 防重入（bug2 复核加）：登录成功那一刻有三条路径同时叫 refresh() ——
+      // index.onShow 的 refreshMineBody()、index.checkSeq()、本组件的版本轮询。
+      // 不锁的话会并发跑两三遍 reloadLocal()/refreshProfile()，每次都在 await
+      // 之后拿一份新的 currentSession() 快照写回 this.logged，虽然值相同但
+      // refreshProfile() 内部的 busy 互斥会让后到的那次提前 return，
+      // 表现为「刷新按钮偶发没反应」。并发时只让第一轮跑，其余合并成一轮重跑。
+      if (this.refreshing) {
+        this.refreshAgain = true;
+        return;
+      }
+      this.refreshing = true;
+      try {
+        for (let round = 0; round < 2; round++) {
+          this.refreshAgain = false;
+          // ★ bug2 根因修复：reloadLocal() 只读本页 cg.js 里的 G 快照，**不重新读盘**。
+          // 登录页在另一份 JS 上下文里写盘 + 写它自己的 G，index 这份上下文的 G
+          // 从头到尾没被 applyLogin 碰过，所以 refresh() 再怎么调都还是 logged=false。
+          // 必须像 boot() 一样先 restoreSession() 把盘上的会话灌进本上下文的 G。
+          // 顺序是硬要求：restoreSession() 必须在 reloadLocal() 之前 await 完成，
+          // 否则 reloadLocal() 里的 currentSession() 仍然读到旧的空 G。
+          try {
+            await restoreSession();
+          } catch (e) {
+            logWarn('[mine] refresh restore fail ' + ((e && e.message) || e));
+          }
+          await this.reloadLocal();
+          // 会话真的读到了就清掉补偿预算，避免登录后还留着「补试」状态
+          if (this.logged) {
+            this.seqTry = 0;
+            this.seqPending = 0;
+          }
+          // 诊断用：用户 m13280 第 2 条「登录后跳过来还显示未登录」，需要区分
+          // 是 refresh 根本没被调用，还是调用了但读到的会话仍是空。
+          logInfo('[mine] refresh logged=' + this.logged + ' booted=' + this.booted);
+          if (this.logged) await this.refreshProfile();
+          if (!this.refreshAgain) break;
+        }
+      } finally {
+        this.refreshing = false;
+        this.refreshAgain = false;
+      }
     },
     async reloadLocal() {
       const s = currentSession();
@@ -500,8 +696,7 @@ export default {
       await this.reloadLocal();
       this.showToast('已退出登录');
     },
-    async runFunc(id) {
-      if (id === 'quality') {
+    async runFunc(id) {      if (id === 'quality') {
         const cur = (this.settings && this.settings.quality) || 'low';
         let i = QUALITY_ORDER.indexOf(cur);
         if (i < 0) i = 0;
@@ -516,6 +711,11 @@ export default {
       }
       if (id === 'about') {
         this.showToast('PenCG ' + APP_VERSION + ' · 非官方客户端');
+        return;
+      }
+      if (id === 'sponsor') {
+        this.sponsorOn = true;
+        logInfo('[mine] 打开赞助码');
         return;
       }
       if (id === 'logout') {
@@ -1016,5 +1216,68 @@ export default {
 .mb-modal-ok-text {
   font-size: 13px;
   color: #FFFFFF;
+}
+
+/* ---- 赞助页 ----
+   屏幕只有 960x266，原图 1125x1125 塞不下，所以 assets 里的图已缩到 320x320，
+   这里再按 180x180 显示（留余量给圆角与边框）。
+   横向排布：左图右字，避免竖排时高度超过 266。
+
+   ★ 不要加 position:absolute / z-index —— 本运行时禁用绝对定位，
+   浮层会退化成"插在文档流里的一块"，把下面的内容顶开。这是既有约定，
+   见 .mb-modal 上方的注释与 confirmMode 的实现方式。 */
+.mb-spon {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+}
+
+.mb-spon-img {
+  width: 180px;
+  height: 180px;
+  border-radius: 8px;
+  background-color: #FFFFFF;
+}
+
+.mb-spon-side {
+  flex-direction: column;
+  justify-content: center;
+  margin-left: 20px;
+  width: 260px;
+}
+
+.mb-spon-title {
+  font-size: 14px;
+  color: @text-color;
+}
+
+.mb-spon-desc {
+  font-size: 11px;
+  color: @text-color-dim;
+  margin-top: 8px;
+}
+
+.mb-spon-hint {
+  font-size: 10px;
+  color: @accent-blue;
+  margin-top: 10px;
+}
+
+.mb-spon-btn {
+  width: 96px;
+  height: 34px;
+  border-radius: 8px;
+  background-color: @ctrl-background;
+  justify-content: center;
+  align-items: center;
+  margin-top: 16px;
+}
+
+.mb-spon-btn-text {
+  font-size: 13px;
+  color: @text-color;
 }
 </style>

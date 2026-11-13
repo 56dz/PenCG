@@ -103,12 +103,19 @@
 </template>
 
 <script>
-import { loadHomeTabs, loadBanners, loadNotices, loadRecommendations, loadGameList } from '../../services/catalog.js';
-import { restoreSession } from '../../services/auth.js';
+import {
+  loadHomeTabs,
+  loadBanners,
+  loadNotices,
+  loadRecommendations,
+  loadGameList
+} from '../../services/catalog.js';
+import { restoreSession, isLoggedIn, sessionVersionAsync, sessionAge, logout } from '../../services/auth.js';
 import { navTo, takeTabParam } from '../../services/nav.js';
 import { logInfo, logWarn } from '../../services/log.js';
 import logoImg from '../../assets/logo.png';
 import MineBody from '../../components/mine-body.vue';
+import { DEV_AUTOSTART, DEV_LOGOUT } from '../../dev-autostart.js';
 
 // 所有栏目都是「原地换内容」，不再有跳页的 tab。
 // 「搜索」入口已移除：每个栏目顶部都有搜索框，不需要重复一个搜索 tab。
@@ -154,11 +161,22 @@ export default {
       noticeText: '',     // JS 硬截断后的公告
       barY: -1,           // 手势起点 pageY
       barMoved: 0,
-      swipeLock: false
+      swipeLock: false,
+      /* bug2：跨页会话版本号。登录页登录成功会把 $falcon 上的版本 +1，
+       * 本页在 onShow 里比一次就知道「会话变了」，不依赖 nav 的 pending 标记。 */
+      sessionSeq: 0,
+      seqTimer: null,
+      seqStopped: false,
+      seqReady: false,
+      seqChecking: false
     };
   },
   mounted() {
     this.boot();
+    this.startSeqWatch();
+  },
+  beforeDestroy() {
+    this.stopSeqWatch();
   },
   /* 用户反馈 2 的另一半：登录成功后是 navBack() 回到本页的（不是重新
    * navTo 一个 mine 页），而 navBack 没法带参数，所以登录页先用
@@ -173,6 +191,17 @@ export default {
     } catch (e) {
       t = '';
     }
+    /* ★ bug2 第二道防线：会话版本号。
+     * takeTabParam() 依赖登录页写下的标记；标记若因跨页不共享/过期/被别处
+     * 取走而拿不到，下面的分支就什么也不做。这里再异步比一次版本号 ——
+     * 登录页登录成功会把版本 +1，本页发现版本变了就强制落到「我的」并刷新。
+     * 用版本号而不是会话对象引用：cg.js 的 session() 每次返回新对象。
+     * 异步读（sessionVersionAsync）是为了在 $falcon 不可写时还能从盘上看见。
+     *
+     * 放在最前面（bug2 复核改）：原来这一句在 if 分支的 return 之后，
+     * 于是「登录成功 → 带 pending 标记回来」这条最需要它的路径反而永远
+     * 走不到它。它是纯异步的，先发出去不影响下面 setTab 的同步顺序。 */
+    this.checkSeq();
     if (t && t !== this.tab) {
       this.setTab(t);
       // ★ 不能 return。之前这里直接 return，导致「登录成功 → navBack 回首页 →
@@ -189,6 +218,87 @@ export default {
     if (this.tab === 'mine') this.refreshMineBody();
   },
   methods: {
+    /* 比对会话版本号，变了就刷新 mine-body；只有「本页的登录态从来登录
+     * 变成已登录」时才额外强行落到「我的」。
+     *
+     * 为什么不在版本变化时就无条件跳栏：版本号是持久化的，冷启动时若首次
+     * 读盘失败会读到 0，随后读到历史版本号 N 就会被误判成「刚登录」，
+     * 于是用户一进软件就被强制拽到「我的」——这是不能接受的。
+     * 用 isLoggedIn() 的前后翻转做二次确认：冷启动时本页 boot() 已经
+     * restoreSession() 过，本来就在登录态，翻转不成立，不会误跳；
+     * 真登录时本页之前是未登录，翻转成立。 */
+    checkSeq() {
+      const self = this;
+      if (self.seqChecking) return;
+      /* ★ 必须等 boot() 把基线读回来才能比对（bug2 复核改）。
+       * boot() 里 `sessionSeq = await sessionVersionAsync()` 是异步的，而 onShow
+       * 可能在它完成之前就触发。那时 sessionSeq 还是初值 0，任何非 0 的历史
+       * 版本号都会被当成「刚变化」，再叠加 isLoggedIn() 在 restoreSession()
+       * 之前恒 false，就会误判成「刚登录」→ 冷启动直接被拽到「我的」。
+       * 轮询那条通道（:startSeqWatch）本来就门控了 seqReady，这里补上。 */
+      if (!self.seqReady) return;
+      self.seqChecking = true;
+      sessionVersionAsync()
+        .then(function (v) {
+          if (!v || v === self.sessionSeq) {
+            self.seqChecking = false;
+            return;
+          }
+          const from = self.sessionSeq;
+          self.sessionSeq = v;
+          const was = isLoggedIn();
+          return restoreSession()
+            .catch(function () {
+              return false;
+            })
+            .then(function () {
+              self.seqChecking = false;
+              const now = isLoggedIn();
+              /* ★ bug2 复核改：跳栏条件加「会话刚写下」这一道。
+               * 只看 `!was && now` 有一个冷启动误判窗口：本页 boot() 里的
+               * restoreSession() 和 sessionVersionAsync() 都要读盘，storage.js:41
+               * 的 getString() 有 3000ms 超时且超时后回落 MEMORY（本页为空的
+               * MEMORY），所以两次都可能失败 → was=false；随后 2.5s 轮询里读盘
+               * 恢复成功 → now=true，翻转成立 → 老用户一开软件就被拽到「我的」。
+               * 用 sessionAge()（loginAt 距今毫秒）挡：只有 10 分钟内写下的会话
+               * 才可能是用户刚刚在登录页登录的那一次。读不到 loginAt 时它返回 -1，
+               * 一律不跳栏（宁可不动，也不要误跳）。 */
+              return sessionAge()
+                .catch(function () {
+                  return -1;
+                })
+                .then(function (age) {
+                  const fresh = age >= 0 && age < 10 * 60 * 1000;
+                  const loggedIn = !was && !!now && fresh;
+                  logInfo(
+                    '[index] 会话版本 ' +
+                      from +
+                      ' -> ' +
+                      v +
+                      ' 本地登录态 ' +
+                      was +
+                      ' -> ' +
+                      now +
+                      ' 会话年龄 ' +
+                      age +
+                      'ms'
+                  );
+                  if (loggedIn && self.tab !== 'mine') {
+                    try {
+                      self.setTab('mine');
+                    } catch (e) {
+                      self.tab = 'mine';
+                      self.title = '我的';
+                    }
+                  }
+                  if (self.tab === 'mine' || loggedIn) self.refreshMineBody();
+                });
+            });
+        })
+        .catch(function () {
+          self.seqChecking = false;
+        });
+    },
     /* 拿 mine-body 组件实例并让它重新读一次会话。
      * 三条回退路径都不能省：$refs 在本运行时实测常常拿不到（Weex 渲染树
      * 和 Vue 实例树不是一一对应），组件自己在 mounted 里挂了 this.$root.__mineBody。 */
@@ -197,7 +307,11 @@ export default {
       const pick = function () {
         return (self.$refs && self.$refs.body) || (self.$root && self.$root.__mineBody) || self.__mineBody;
       };
-      const run = function () {
+      // 尝试序列：立即、120ms、260ms。刚被 v-if 挂上去时 Vue 还没渲染，
+      // 立刻取实例必然拿不到，所以要重试；但**只在全部失败后才打日志**，
+      // 否则每次登录都会在日志里留一行假的「实例未就绪」，掩盖真问题。
+      const delays = [0, 120, 260];
+      const attempt = function (i) {
         const b = pick();
         if (b && b.refresh) {
           try {
@@ -205,15 +319,17 @@ export default {
           } catch (e) {
             /* ignore */
           }
-          return true;
+          return;
         }
-        logWarn('[index] mine-body 实例未就绪，重试');
-        return false;
+        if (i + 1 < delays.length) {
+          setTimeout(function () {
+            attempt(i + 1);
+          }, delays[i + 1]);
+          return;
+        }
+        logWarn('[index] mine-body 实例未就绪（已重试 ' + (delays.length - 1) + ' 次）');
       };
-      if (run()) return;
-      // 组件可能刚被 v-if 挂上去，实例还没就绪；重试两轮就够（总约 260ms）
-      setTimeout(run, 120);
-      setTimeout(run, 260);
+      attempt(0);
     },
     // Weex 的 lines:1 在本机型上不可靠（实测中文长名会换行并溢出卡片），
     // 所以按字符数硬截断。74px 宽的卡片用 10px 字只能放 6 个汉字。
@@ -222,6 +338,38 @@ export default {
       const n = max || 6;
       return s.length > n ? s.slice(0, n) + '…' : s;
     },
+    /* ── 会话版本号兜底轮询（bug2 修复的第三道防线）───────────────────
+     * 前两道（nav 的 pending 标记、onShow 里的版本比对）都依赖一件事：
+     * closePageByName('login') 之后本页的 onShow 真的会被调用。
+     * 真机上这一条恰恰不保证 —— 登录页是 navTo push 上来的，本页一直没被
+     * 销毁，宿主可能不重跑 onShow。所以再加一条与 onShow 无关的通道：
+     * 自己定时比一次版本号。2.5s 一次、只读一个数字 + 一次本地读盘，可忽略。
+     * 用 setTimeout 递归而不是 setInterval：PLATFORM.md 只保证有 setTimeout。
+     * 判定逻辑全在 checkSeq() 里，和 onShow 那条路径共用同一套（含误跳保护）。 */
+    startSeqWatch() {
+      const self = this;
+      this.stopSeqWatch();
+      this.seqStopped = false;
+      const tick = function () {
+        if (self.seqStopped) return;
+        // boot() 还没把基线版本号读回来时不要比对，否则会把「历史版本号」
+        // 误判成「刚登录」而强行跳到「我的」。
+        if (self.seqReady) self.checkSeq();
+        self.seqTimer = setTimeout(tick, 2500);
+      };
+      this.seqTimer = setTimeout(tick, 2500);
+    },
+    stopSeqWatch() {
+      this.seqStopped = true;
+      if (this.seqTimer) {
+        try {
+          clearTimeout(this.seqTimer);
+        } catch (e) {
+          /* ignore */
+        }
+        this.seqTimer = null;
+      }
+    },
     async boot() {
       try {
         // 右上角用户名已移除，这里仍恢复会话，避免影响后续详情/队列页的登录态
@@ -229,7 +377,69 @@ export default {
       } catch (e) {
         /* ignore */
       }
+      // 记下当前版本号作为基线：本页启动时就已经存在的会话不算「刚变化」，
+      // 否则每次 onShow 都会误判成「刚登录」并强制跳到「我的」。
+      // 用异步通道取值，和 onShow/轮询里的比对口径保持一致。
+      try {
+        this.sessionSeq = await sessionVersionAsync();
+      } catch (e) {
+        /* ignore */
+      }
+      // 基线拿到了，轮询才可以开始比对（否则 boot 未完成时轮询会把
+      // 「历史版本号」误当成「刚登录」而强行跳到「我的」）。
+      this.seqReady = true;
       await this.loadHome();
+      this.devLogout();
+      this.devAutostart();
+    },
+    /* ★ 仅取证用（见 src/dev-autostart.js 的 DEV_LOGOUT 说明）：
+     * 让 app 自己在启动后走一次生产 logout()（清 cg.js 的 G + 删盘上
+     * pencg_session + bump 版本号），用来把设备退回「未登录」初态。
+     * 这样就不必 adb 去改 preferences.json（那份文件是「JSON 字符串里再套
+     * 一层 JSON」，外面改完 app 内存里还留着旧 session，很容易自欺欺人）。
+     * DEV_LOGOUT 为 null 时本方法是空操作。 */
+    devLogout() {
+      const d = DEV_LOGOUT;
+      if (!d) return;
+      const delay = Number(d.delay) || 3000;
+      logWarn('[dev] autologout → in ' + delay + 'ms');
+      const self = this;
+      setTimeout(function () {
+        logout()
+          .then(function () {
+            logWarn('[dev] autologout 完成（盘上 pencg_session 已删）');
+            return self.refreshMineBody();
+          })
+          .catch(function (e) {
+            logWarn('[dev] autologout 失败 ' + ((e && e.message) || e));
+          });
+      }, delay);
+    },
+    /* ★ 仅取证用：见 src/dev-autostart.js 顶部说明。DEV_AUTOSTART 为 null 时
+     * 本方法是空操作，生产构建不产生任何跳转。
+     * 额外支持一个 tab 字段：先切到该栏目再跳页，用来复现用户真实路径
+     * 「在『我的』栏目里点『去登录』」—— 从别的栏目进登录页，回去时要靠
+     * setPendingTab 才能落回「我的」，是两条不同的代码路径，都要能测。 */
+    devAutostart() {
+      const d = DEV_AUTOSTART;
+      if (!d || !d.page) return;
+      const delay = Number(d.delay) || 2000;
+      logWarn('[dev] autostart → ' + d.page + ' in ' + delay + 'ms' + (d.tab ? ' tab=' + d.tab : ''));
+      const self = this;
+      setTimeout(function () {
+        if (d.tab) {
+          try {
+            self.setTab(d.tab);
+            logWarn('[dev] autostart 先切栏目 tab=' + d.tab);
+          } catch (e) {
+            logWarn('[dev] autostart 切栏目失败 ' + ((e && e.message) || e));
+          }
+        }
+        setTimeout(function () {
+          logWarn('[dev] autostart fire → ' + d.page);
+          navTo(d.page, d.params || {});
+        }, d.tab ? 600 : 0);
+      }, delay);
     },
     async prepareTabs() {
       if (this.tabIds) return this.tabIds;

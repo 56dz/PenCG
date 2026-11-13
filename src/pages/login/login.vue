@@ -93,6 +93,7 @@ import { navTo, navBack, setPendingTab } from '../../services/nav.js';
 import logoImg from '../../assets/logo.png';
 import { ImSession } from '../../services/im.js';
 import { logInfo, logWarn } from '../../services/log.js';
+import { DEV_AUTOLOGIN } from '../../dev-autostart.js';
 
 const LAST_PHONE_KEY = 'pencg_login_phone';
 
@@ -182,6 +183,45 @@ export default {
       if (last) this.phone = digits(last, 11);
       await this.refreshStatus();
       logInfo('[login] ready phone=' + (this.phone ? this.phone.slice(0, 3) + '****' : '(空)'));
+      this.devAutoLogin();
+    },
+    /* ★ 仅取证用（见 src/dev-autostart.js 的 DEV_AUTOLOGIN 说明）：
+     * 自动填表 + 提交，走的仍是 submit() → loginByPassword() → goBackToMine()
+     * 那条生产链路，不绕过任何被测逻辑。DEV_AUTOLOGIN 为 null 时本方法直接返回，
+     * 生产构建里等同一个空函数。 */
+    devAutoLogin() {
+      const d = DEV_AUTOLOGIN;
+      if (!d || !d.phone) return;
+      if (this.busy) {
+        logWarn('[dev] autologin 跳过：busy');
+        return;
+      }
+      // 已经登录就不要再提交一次（会白白消耗一次会话校验）
+      if (this.statusText && this.statusText.indexOf('未登录') < 0) {
+        logWarn('[dev] autologin 跳过：已有会话 status=' + this.statusText);
+        return;
+      }
+      const self = this;
+      const wait = Number(d.delay) > 0 ? Number(d.delay) : 1200;
+      logWarn('[dev] autologin 将在 ' + wait + 'ms 后提交 phone=' + String(d.phone).slice(0, 3) + '****');
+      setTimeout(function () {
+        if (self.busy) {
+          logWarn('[dev] autologin 触发时 busy，放弃');
+          return;
+        }
+        self.mode = 'pwd';
+        self.cc = d.cc ? String(d.cc) : '86';
+        self.phone = digits(d.phone, 11);
+        self.pwd = String(d.pwd || '');
+        self.errText = '';
+        logWarn('[dev] autologin fire → submit()');
+        const p = self.submit();
+        if (p && typeof p.catch === 'function') {
+          p.catch(function (e) {
+            logWarn('[dev] autologin submit 未捕获异常 ' + ((e && e.message) || e));
+          });
+        }
+      }, wait);
     },
     async refreshStatus() {
       try {

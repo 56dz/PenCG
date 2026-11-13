@@ -15,6 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -77,6 +78,45 @@ extern int gst_util_set_object_arg(void *object, const char *name, const char *v
 extern GstBuffer *gst_buffer_new_allocate(void *allocator, size_t size, void *params);
 extern size_t gst_buffer_fill(GstBuffer *buffer, size_t offset, const void *src, size_t size);
 extern void gst_buffer_unref(GstBuffer *buf);
+/* ---- buffer 标志位（bug3/bug4：给非关键帧打 DELTA_UNIT）----
+ * 为什么用函数而不是 GST_BUFFER_FLAGS()/GST_BUFFER_PTS() 宏：那两个宏是
+ * gstbuffer.h 里的**结构体字段**宏，本进程没有 GStreamer 头文件（本文件全部
+ * 手写声明，见文件头注释），宏无法展开。而 `gst_buffer_get_pts/set_pts` 在
+ * 真机 libgstreamer-1.0.so.0 (1.22.0) 与本地 stub 里**都没有导出符号**
+ * （逐个 parse .dynsym 核实过），一经调用就是 dlopen 期未解析符号、整个 .so
+ * 加载失败。所以时间戳（PTS/DTS）这一半**不做**，只做可靠的标志位这一半，
+ * 详见 docs/BUGFIX-bug3-bug4-gst.md「hunk 2 的降级」。 */
+extern unsigned int gst_buffer_get_flags(GstBuffer *buf);
+extern int gst_buffer_set_flags(GstBuffer *buf, unsigned int flags);
+/* ⚠ GST_BUFFER_FLAG_DELTA_UNIT 的**真实数值**（别照抄 (1u<<4)，那是 LIVE）：
+ *
+ * GStreamer 1.22.0 的 gstbuffer.h 原文：
+ *     GST_BUFFER_FLAG_LIVE       = (GST_MINI_OBJECT_FLAG_LAST << 0)
+ *     GST_BUFFER_FLAG_DECODE_ONLY= (GST_MINI_OBJECT_FLAG_LAST << 1)
+ *     GST_BUFFER_FLAG_DISCONT    = (GST_MINI_OBJECT_FLAG_LAST << 2)
+ *     ... (RESYNC<<3, CORRUPTED<<4, MARKER<<5, HEADER<<6, GAP<<7,
+ *          DROPPABLE<<8)
+ *     GST_BUFFER_FLAG_DELTA_UNIT = (GST_MINI_OBJECT_FLAG_LAST << 9)   <-- 这个
+ * 而 GST_MINI_OBJECT_FLAG_LAST = (1 << 4) = 16，所以
+ *     DELTA_UNIT = 16 << 9 = 8192 = (1u << 13)
+ *     LIVE       = 16 << 0 =   16 = (1u << 4)     <-- 写错一位就变成这个
+ * 曾有交接文档误写 (1u<<4)，那会把每个 P 帧标成 LIVE（"PAUSED 时应丢弃的
+ * 直播数据"），语义完全相反：画面在 PAUSED 下被丢、QoS 行为也会变。 */
+#define GST_BUFFER_FLAG_DELTA_UNIT (1u << 13)
+
+/* ---- flush 事件（bug3/bug4：SPS/分辨率变化时逼下游重新协商）----
+ * 真机与 stub 均确认导出：gst_event_new_flush_start / _flush_stop /
+ * gst_event_unref / gst_pad_push_event / gst_element_get_static_pad。
+ * 只用 gst_pad_push_event 发事件，**不用 gst_element_send_event**：
+ * 后者对 event 的所有权在文档里是 transfer-none（调用方要自己 unref），
+ * 但元素实现里又可能把 event 转交 sink pad 消费，语义容易踩双 free 或泄漏；
+ * gst_pad_push_event 明确是 transfer-full（吃掉引用），边界干净。 */
+typedef struct _GstEvent GstEvent;
+extern GstEvent *gst_event_new_flush_start(void);
+extern GstEvent *gst_event_new_flush_stop(int reset_time);
+extern void gst_event_unref(GstEvent *event);
+extern int gst_pad_push_event(GstPad *pad, GstEvent *event);
+extern GstPad *gst_element_get_static_pad(GstElement *element, const char *name);
 
 extern void gst_app_src_set_caps(GstAppSrc *appsrc, GstCaps *caps);
 extern GstFlowReturn gst_app_src_push_buffer(GstAppSrc *appsrc, GstBuffer *buffer);
@@ -144,6 +184,10 @@ struct cm_box {
     /* 实际选中的 aplay 输出设备（"" = 不带 -D，走 /etc/asound.conf 默认 speaker）。
      * 真机排查就靠它 + cg_aplay.log 的头几行。 */
     char  audio_dev[128];
+    /* 归属会话：销毁音频盒时要按会话上的快照还原全局 mixer。
+     * cm_box_destroy 的签名被 cm_media.c / cgmedia.c 三处调用（那些文件不归
+     * 本单元改），所以只能把会话指针存进盒子，而不是改签名。 */
+    cm_sess *sess;
 };
 
 /* gst_init 只做一次 */
@@ -171,10 +215,61 @@ static int gst_ensure(void) {
  *                        zpos 高于 UI，硬件叠加。
  *  driver-name=rockchip —— 配合 plane-id 定位设备。
  *  force-aspect-ratio=false —— 否则 kmssink 在矩形内做信箱缩放，画面缩成一条。
- *  can-scale=true     —— 允许 RGA 硬件缩放，1280x720 直接缩到目标矩形。 */
+ *  can-scale=true     —— 允许 RGA 硬件缩放，1280x720 直接缩到目标矩形。
+ *
+ * ★ sync=false 是 bug3/bug4「终末地黑屏 / 画面卡住不动」的真正修复，别改回 true ★
+ *
+ * 症状（用户报的 bug4）：明日方舟：终末地在 App 里建连成功、`first video frame
+ * pushed` 有输出、probe 的 rx/fps 都正常，但屏幕上整块视频区是深灰（透出 Play 页
+ * 底色 `#1E2831`），或者只显示一帧就永久静止。
+ *
+ * 定位过程（每一层都被独立验证过，所以结论是收敛的）：
+ *   1) 码流没问题 —— 把 App 实际推给 appsrc 的字节 dump 成 au.h264，
+ *      本地 ffmpeg 解出 233 帧，后 110 帧是完整清晰的游戏画面（不花不绿）。
+ *   2) 硬解没问题 —— `gst-launch-1.0 filesrc ! h264parse ! mppvideodec` 的输出
+ *      帧数与软解完全一致（954368 = 233*4096）。
+ *   3) plane76 硬件通道没问题 —— `videotestsrc ! kmssink plane-id=76` 全屏彩条
+ *      用户肉眼确认能看到。
+ *   4) 同一条管线换数据源就好了 ——
+ *      `multifilesrc ... loop=true ! h264parse ! mppvideodec rotation=270 !
+ *       videoconvert ! kmssink plane-id=76 ... sync=true render-rectangle=<小窗>`
+ *      用户肉眼确认「能看到终末地，一开始全绿过一会正常」。
+ *   也就是说 **管线、旋转、缩放、plane 绑定全都对**，唯一变量是喂数据的元件。
+ *
+ * 根因：`sync=true` 让 kmssink 按 **buffer 的 PTS** 决定何时显示。我们的 appsrc 是
+ * `format=time do-timestamp=true`，由 appsrc 在 **到达时刻** 给每帧打一个绝对
+ * 单调时钟戳。这套时间戳与 kmssink 的 running-time 基准之间一旦错位（首次缓冲、
+ * 重连、或片头 I 帧被丢弃后 PTS 出现跳变），kmssink 就会判定后续 buffer「还没到
+ * 显示时刻」或「已过期」而整体丢弃 —— 表现正是**平面绑着却一口不更新**
+ * （真机实测：`plane[76] crtc=video_port0 fb=130`，20 秒采样 fb 编号一次不变，
+ * 而 `AU push` 涨了 77 帧；用户同时确认「有画面但完全静止」）。
+ * 改成 `sync=false` 后同样的采样里 fb 在 127/130 之间持续交替，用户确认
+ * 「画面在动了，能正常玩」，原神同时回归正常。
+ *
+ * 代价：kmssink 不再按 PTS 节流，而是「有空就显示最新一帧」。对本机场景（云游戏
+ * 实时流、拒绝累积延迟、720p 单路）这是想要的语义；丢帧由 RTP 层的 IDR/NACK 逻辑
+ * 负责，不靠 sink 的时钟。若将来要接本地文件播放（需要严格按时间轴出帧），应当
+ * 另建一条 `sync=true` 的管线，而不是把这里改回去。
+ *
+ * ★ restore-crtc=false 是 bug6「整屏黑、左右两栏消失、触摸失效」的修复，别删 ★
+ *
+ * 症状：play 页被销毁（重复 `miniapp_cli start`、或宿主重载页面）之后，
+ * `crtc[68] plane_mask` 从 3 掉到 0 —— 不只我们的视频面（76），连 weston 的 UI 面
+ * （54）也被解绑，整屏黑、触摸无响应，且只能重启设备才恢复。
+ *
+ * 根因：kmssink 的 `restore-crtc` 默认 true，语义是「CRTC 曾被设过新 mode，
+ * 就在 NULL 时把 CRTC 恢复成旧 mode」。它在收尾时会 `drmModeSetCrtc(crtc, 0, ...)`
+ * 这类「不带 fb 的 CRTC 恢复」，内核对一个 crtc 做 disable/restore 时会把挂在上面的
+ * **所有** plane 的 mask 清掉 —— 于是 weston 辛苦挂的 54 也被一起清掉，而 weston
+ * 不知道发生了什么、不会主动重挂（除非被唤醒重新 commit）。
+ * 我们只申请了 plane 76，没有资格去动 CRTC 的 mode。`restore-crtc=false` 让
+ * kmssink 收尾时只 disable 自己那条 plane，不碰 CRTC → weston 的 54 保持绑定
+ * （真机验证：拆除后 `plane_mask` 稳定为 1，即只剩 weston）。
+ *
+ * 注：`gst-inspect-1.0 kmssink` 真机核实存在该属性，Default: true。 */
 #define KMS_SINK_PROPS \
     " ! kmssink name=vsink plane-id=76 driver-name=rockchip " \
-    "force-aspect-ratio=false can-scale=true sync=true"
+    "force-aspect-ratio=false can-scale=true sync=false restore-crtc=false"
 
 static const char *video_pipeline_fmt(void) {
     /* rect 不在这里拼；由 apply_rect() 用 gst_util_set_object_arg 单独设 */
@@ -186,9 +281,24 @@ static const char *video_pipeline_fmt(void) {
      * 竖的（1600x900 -> 900x1600），下游 render-rectangle 的 266x473 才是对的。
      * 270 这个值是与本机同面板、同 PANEL_X_OFFSET 的 PenBili 真机 A/B 结论
      * （PenBili/native/csrc/player.c:539-548：rotation=90 会整体倒置，270 正确）。 */
+    /* 【bug3/bug4 修复：解码器错误策略】真机 gst-inspect-1.0 mppvideodec 核实：
+     *   ignore-error  布尔, Default: true   —— 解码出错时是「只 warn 继续」还是「上报致命错误」
+     *   max-errors    整数, Range -1..2^31-1, Default: -1 —— -1 = 不限次数
+     * 两个属性都存在且可设。这里显式写死，不依赖插件默认值。
+     * 为什么要 ignore-error=false（视频 teammate 的真机结论，见
+     * docs/BUGFIX-bug3-bug4-video.md §hunk 1）：默认 true 是「解坏了也不报错、
+     * 把坏帧直接吐出去上屏」，现象就是花屏且日志里一条都没有。RTP 层已经拦住
+     * 了残帧（bug3/bug4 的第一道防线），这里是**第二道**：让网关侧编码器自身
+     * 出错这类我们识别不出的坏帧变成 GST_MSG_ERROR，被 cm_box_drain_bus 抓进
+     * 日志，而不是悄悄糊在屏幕上。max-errors=16 是连续错误上限 —— 连续错 16 次
+     * 才让解码器吐 flow error，偶发单帧坏不会立刻停摆。
+     * ⚠ 真机若看到「画面卡住 + 日志有 mpp 解码错误」，就是这道防线在生效
+     *   （16 次连续错误后 flow error）；回退只需去掉这两个属性恢复插件默认值，
+     *   详见 docs/BUGFIX-bug3-bug4-gst.md「hunk 1」。 */
     return "appsrc name=vsrc is-live=true format=time do-timestamp=true "
            "caps=video/x-h264,stream-format=byte-stream,alignment=au "
-           "! h264parse ! mppvideodec rotation=270 ! videoconvert" KMS_SINK_PROPS;
+           "! h264parse ! mppvideodec rotation=270 ignore-error=false max-errors=16 "
+           "! videoconvert" KMS_SINK_PROPS;
 }
 
 static const char *video_pipeline_soft(void) {
@@ -201,22 +311,64 @@ static const char *video_pipeline_soft(void) {
            "! h264parse ! avdec_h264 ! videoflip method=counterclockwise ! videoconvert" KMS_SINK_PROPS;
 }
 
-/* ---------------- X6 Pro 音频路由（照抄 PenBili player.c v2.3.0/v2.3.2 语义） ----------------
- * 症状：alsasink 正常 PLAYING、`/proc/asound/card1/.../status = RUNNING`，
- * 但扬声器完全无声。根因：rk817 codec 混音控件 `Playback Path`（card0 numid=45）
- * 开机默认 OFF —— 功放通路根本没接上：
- *     amixer -c 0 cget name='Playback Path'  ->  values=0 (OFF)
- *     amixer -c 0 cset name='Playback Path' 'SPK'  ->  values=2，立刻出声
- * X5 上有系统音频守护进程做这件事；X6 Pro 没人做，必须自己拨。
- * 设计：仅当当前值是 OFF 才写 SPK（用户选了 HP/BT 就不动）；
+/* ---------------- X6 Pro 音频路由：尊重系统音量 + 完整还原 ----------------
+ *
+ * 【这条单元的来历，别删注释就改代码】
+ * 早期症状：alsasink 正常 PLAYING、`/proc/asound/card1/.../status = RUNNING`，
+ * 但扬声器完全无声。当时的结论是 card0（rk817）的 `Playback Path`（numid=45）
+ * 开机默认 OFF —— 功放通路没接上，于是每次开播前把 OFF 拨成 SPK，并且
+ * 「card1 功放音量如果是 0,0 就抬到 200,200」。X5 上有系统音频守护进程做这件事，
+ * X6 Pro 没人做。
+ *
+ * 【Bug5 真机重测：那个 200,200 是错的方向，必须去掉】
+ * 用户反馈「系统音量拖到 0，进游戏还是有声；退出后连有道查词都有声」。真机取证：
+ *
+ * ① 系统音量 0 落在哪：**card1（aw883xx smart PA）numid=54
+ *    `Master Playback Volume` = 0,0**，和 card0 的任何控件都无关。
+ *    证据：`hal-audio -s 0|30|50|100` 前后的 `amixer -c 0 contents` +
+ *    `amixer -c 1 contents` 全量 diff，**只有 numid=54 变化**
+ *    （0,0 / 128,128 / 176,176 / 255,255），card0 一个字节没动；
+ *    `/etc/asound.conf` 的 `spk_softvol` 也把 softvol 绑在
+ *    `control { name "Master Playback Volume" card 1 device 0 }`。
+ *    所以 card1 numid=54 **就是系统音量本体**，读到 0,0 的正确语义是
+ *    「用户把音量调到了 0」，而不是「寄存器没初始化」。
+ *
+ * ② 声学矩阵（`aplay 播 /dev/urandom` + `arecord -D hw:0,0` 同时录音，
+ *    数值是 16bit 采样绝对值均值/峰值）：
+ *      quiet                      avg=83   max=240
+ *      Playback Path=OFF amp=0,0  avg=90   max=553    <- 静音
+ *      Playback Path=OFF amp=200  avg=9339 max=32768  <- 大声（旧代码干的事）
+ *      Playback Path=SPK amp=0,0  avg=102  max=605    <- 静音
+ *      Playback Path=SPK amp=200  avg=9366 max=32768  <- 大声
+ *    两条结论：(a) 响度**只由 card1 amp 决定**，OFF/SPK 对是否出声没有区别
+ *    —— 因为 aplay 走 /etc/asound.conf 的默认 `speaker`，最终 slave 是
+ *    `hw:1,0`，声音根本不经过 rk817 的模拟输出级；
+ *    (b) 把 0,0 抬到 200,200 正是用户听到的那声「不该有的声音」。
+ *
+ * ③ 由此，旧代码同时制造了两条用户可见故障：
+ *    起播时把系统音量 0 抬成 200（音量条是 0，却有声）；
+ *    退出时既不还原 amp，也不还原 Playback Path（改成 SPK 后再没人改回去），
+ *    于是退出游戏后系统音量被永久留在 200/255，有道查词随口一播就出声。
+ *
+ * 【现行策略】
+ *   - card1 numid=54 **一个字节都不写**。它就是系统音量，写它等于替用户调音量。
+ *     只读，用于快照和退出时的「我们有没有动过」自证。
+ *   - card0 Playback Path 仍按历史语义「仅 OFF 时拨到 SPK」（这条路径在本机
+ *     声学上无差别，但保留它不影响任何机型，且它确实是历史无声问题的修复），
+ *     但**必须先快照、事后无条件还原**，且只还原「确实是我们写下去的那个值」。
+ *   - 快照/还原放在 cm_sess（不是 cm_box）：盒子创建可能失败、销毁可能先于
+ *     会话结束，还原必须能在任何一条拆管线路径上幂等地跑一次。
+ *
  * 解析必须两步（先建 Item #n -> 名字表，再读 `: values=n` 定位）：
  * 首行 `name='Playback Path'` 也是单引号包的，取「第一对单引号」会拿到控件名本身
- * （PenBili v2.3.2 的教训）；而取「第一个 Item 行」会永远读到 OFF（我第一版踩的坑）。
- * 顺带：card1（aw883xx smart PA）的 `Master Playback Volume` 默认 0,0，
- * 仅当为 0 时设 200,200。mixer 值掉电不保留，每次建音频盒都要 ensure。 */
+ * （PenBili v2.3.2 的教训）；而取「第一个 Item 行」会永远读到 OFF（我第一版踩的坑）。 */
 #define AUDIO_AMIXER_PATH "/bin/amixer"
 #define AUDIO_AMIXER_CTL  "Playback Path"
 #define AUDIO_SPK_VALUE   "SPK"
+/* card1 = aw883xx smart PA；numid=54 = Master Playback Volume = 系统音量本体。
+ * 只读。永远不要对这里 cset（见上面的声学矩阵）。 */
+#define AUDIO_AMP_CARD    "-c 1"
+#define AUDIO_AMP_CTL     "numid=54"
 
 /* 读当前路由枚举名（"OFF"/"SPK"/"HP"/"BT"...）。0 = 读到了。
  *
@@ -287,33 +439,123 @@ static int audio_mixer_set_path(const char *value) {
     return (system(cmd) == 0) ? 0 : -1;
 }
 
-/* 仅当 card1 功放音量为 0 时抬到 200（用户/系统调过就尊重）。 */
-static void audio_amp_volume_ensure(void) {
-    char cmd[192];
+/* 读 card1 功放（= 系统音量本体）当前值，规范成 "0,0" / "176,176" 这种原文。
+ * ★ 只读。这是**系统音量**，不是我们的音量：写它等于替用户拖音量条
+ *   （Bug5 的根因就是把 0,0 写成 200,200）。
+ * 解析：`amixer -c 1 cget numid=54` 输出里有两行带 values ——
+ *   `  ; type=INTEGER,access=rw------,values=2,min=0,max=255,step=1`
+ *   `  : values=0,0`
+ * 只有后者是当前值。区别在行首字符（';' vs ':'），所以必须匹配 ": values="，
+ * 匹配 "values=" 会把 `values=2`（声道数）当成音量读成 2（本轮实测踩过）。 */
+static int audio_amp_read(char *out, int n) {
     FILE *fp;
-    fp = popen(AUDIO_AMIXER_PATH " -c 1 cget numid=54 2>/dev/null", "r");
-    if (!fp) return;
+    int rc = -1;
+    if (!out || n <= 0) return -1;
+    out[0] = 0;
+    fp = popen(AUDIO_AMIXER_PATH " " AUDIO_AMP_CARD " cget " AUDIO_AMP_CTL
+               " 2>/dev/null", "r");
+    if (!fp) return -1;
     {
         char line[256];
-        int zero = 0;
         while (fgets(line, sizeof(line), fp)) {
             char *v = strstr(line, ": values=");
-            if (v) { zero = (strncmp(v, ": values=0,0", 12) == 0); break; }
+            if (v) {
+                int i = 0, ln;
+                v += 9;
+                ln = (int)strlen(v);
+                while (ln > 0 && (v[ln - 1] == '\n' || v[ln - 1] == '\r' ||
+                                  v[ln - 1] == ' '))
+                    ln--;
+                if (ln > n - 1) ln = n - 1;
+                for (i = 0; i < ln; i++) out[i] = v[i];
+                out[ln] = 0;
+                rc = ln > 0 ? 0 : -1;
+                break;
+            }
         }
-        pclose(fp);
-        if (zero) {
-            snprintf(cmd, sizeof(cmd),
-                     AUDIO_AMIXER_PATH " -c 1 cset numid=54 200,200 >/dev/null 2>&1");
-            (void)system(cmd);   /* 同样不能信返回值（SIGCHLD=SIG_IGN） */
-            CM_LOGI("audio amp volume 0 -> 200");
+    }
+    pclose(fp);   /* SIGCHLD=SIG_IGN 下返回值不可信，但子进程确实执行了 */
+    return rc;
+}
+
+/* 开播前快照我们**将要动**的全局 mixer 状态。只做一次，幂等。
+ * 快照放在 cm_sess 而不是 cm_box：盒子可能创建失败、也可能先于会话结束被销毁，
+ * 而还原必须在任何一条拆管线路径上都能跑（见 cm_audio_route_restore）。 */
+static void audio_snapshot(cm_sess *s) {
+    char cur[64];
+    if (!s || s->audio_snap_done) return;
+    s->audio_snap_done = 1;
+    s->audio_path_wrote[0] = 0;
+    s->audio_path_snap[0] = 0;
+    s->audio_amp_snap[0] = 0;
+    s->audio_amp_after[0] = 0;
+    if (audio_mixer_get_path(cur, sizeof(cur)) == 0) {
+        strncpy(s->audio_path_snap, cur, sizeof(s->audio_path_snap) - 1);
+        s->audio_path_snap[sizeof(s->audio_path_snap) - 1] = 0;
+    }
+    if (audio_amp_read(s->audio_amp_snap, (int)sizeof(s->audio_amp_snap)) != 0)
+        s->audio_amp_snap[0] = 0;
+    CM_LOGI("#%d audio snapshot: Playback Path=%s amp(card1#54)=%s",
+            s->id,
+            s->audio_path_snap[0] ? s->audio_path_snap : "?",
+            s->audio_amp_snap[0] ? s->audio_amp_snap : "?");
+}
+
+/* 把我们在 audio_route_ensure 里改过的全局 mixer 状态还原。**幂等**。
+ *
+ * 三条路径都会走到这里（cm_media 看门狗退出 / cgmedia sess_free / cgmedia
+ * js_stop / cm_cmd setAudio 0），实际挂在 cm_box_destroy 的音频分支上 ——
+ * 上述四条路径最终都调它，所以只需要一处实现。
+ *
+ * 还原规则（只还原「确实是我们改的」）：
+ *   1. Playback Path：只有 audio_path_wrote 非空（我们真的写过）才还原；
+ *      并且**只在当前值仍等于我们写下去的那个值**时才写回 ——
+ *      用户在我们运行期间插了耳机 / 连了蓝牙，属于他的选择，不许覆盖。
+ *   2. card1 numid=54：我们从头到尾没写过，只回读一次打进日志当自证
+ *      （退出后它应该和快照一模一样；不一样说明是系统音量服务改的）。
+ */
+void cm_audio_route_restore(cm_sess *s) {
+    char cur[64];
+    char after[64];
+    if (!s || !s->audio_snap_done) return;   /* 没快照过 = 没改过 = 无事可做 */
+    s->audio_snap_done = 0;                  /* 先置位，保证重入时直接返回 */
+
+    if (s->audio_path_wrote[0]) {
+        if (audio_mixer_get_path(cur, sizeof(cur)) == 0 &&
+            strcmp(cur, s->audio_path_wrote) == 0) {
+            (void)audio_mixer_set_path(s->audio_path_snap);
+            if (audio_mixer_get_path(after, sizeof(after)) == 0)
+                CM_LOGI("#%d audio restore: Playback Path %s -> %s (back to %s)",
+                        s->id, s->audio_path_wrote, after, s->audio_path_snap);
+            else
+                CM_LOGI("#%d audio restore: Playback Path %s -> %s (readback failed)",
+                        s->id, s->audio_path_wrote, s->audio_path_snap);
+        } else {
+            /* 当前值已经不是我们写的那个：用户自己改过路由，尊重他。 */
+            CM_LOGI("#%d audio restore: Playback Path now %s (not ours %s), leave it",
+                    s->id, cur[0] ? cur : "?", s->audio_path_wrote);
         }
+        s->audio_path_wrote[0] = 0;
+    }
+
+    /* 自证：把退出时的系统音量打进日志，和开播前快照对照。 */
+    if (s->audio_amp_snap[0] &&
+        audio_amp_read(s->audio_amp_after, (int)sizeof(s->audio_amp_after)) == 0) {
+        if (strcmp(s->audio_amp_snap, s->audio_amp_after) == 0)
+            CM_LOGI("#%d audio restore: amp(card1#54) %s unchanged (we never write it)",
+                    s->id, s->audio_amp_after);
+        else
+            CM_LOGI("#%d audio restore: amp(card1#54) %s -> %s (changed by system, not us)",
+                    s->id, s->audio_amp_snap, s->audio_amp_after);
     }
 }
 
-/* 建音频盒（或每次开播）前调用。失败全部静音处理（别的机型没有该控件）。 */
-static void audio_route_ensure(void) {
+/* 建音频盒前调用：快照 →（仅当 Playback Path 为 OFF 时）拨到 SPK。
+ * ★ 绝不再碰 card1 音量。失败全部静音处理（别的机型没有该控件）。 */
+static void audio_route_ensure(cm_sess *s) {
     char cur[64];
     char after[64];
+    audio_snapshot(s);   /* 无论后面改不改，先把「改之前」记下来 */
     if (audio_mixer_get_path(cur, sizeof(cur)) != 0) {
         /* 读不到就静默返回（别的机型没有该控件，或 amixer 不在）。
          * 注意：宿主进程把 SIGCHLD 设成 SIG_IGN，popen/pclose 会返回 -1，
@@ -325,13 +567,17 @@ static void audio_route_ensure(void) {
         return;                            /* 已路由（HP/BT/SPK）-> 尊重现状 */
     }
     (void)audio_mixer_set_path(AUDIO_SPK_VALUE);   /* 返回值不可信，见上 */
-    /* 回读确认：这是唯一可信的成功判据（和 imgConv 用产物文件自证同理）。 */
+    /* 回读确认：这是唯一可信的成功判据（和 imgConv 用产物文件自证同理）。
+     * 只有回读确实变成 SPK 才记 audio_path_wrote —— 还原时据此判断「是我们改的」。 */
     if (audio_mixer_get_path(after, sizeof(after)) == 0) {
         CM_LOGI("Playback Path OFF -> %s (now=%s)", AUDIO_SPK_VALUE, after);
+        if (strcmp(after, AUDIO_SPK_VALUE) == 0 && s) {
+            strncpy(s->audio_path_wrote, after, sizeof(s->audio_path_wrote) - 1);
+            s->audio_path_wrote[sizeof(s->audio_path_wrote) - 1] = 0;
+        }
     } else {
         CM_LOGI("Playback Path OFF -> %s (readback failed)", AUDIO_SPK_VALUE);
     }
-    audio_amp_volume_ensure();
 }
 
 static const char *audio_pipeline_desc(void) {
@@ -437,6 +683,16 @@ static void cm_gst_enable_debug(void) {
  *     其它 / 文件不存在 -> auto（先蓝牙，后扬声器）
  * 每次建音频盒读一次（不是每包、每秒读），改完标记文件重开一局即生效。 */
 #define AUDIO_DEV_FORCE_FILE "/userdisk/miniapp/data/audiodev.txt"
+/* 视频软解强制开关（纯诊断，默认不存在 = 正常走 mppvideodec）。
+ *
+ * 存在的意义：终末地「平面绑上 + 我们稳定推 AU + 解码器输出过一帧」却全黑时，
+ * 必须把「我们喂的码流坏」和「mppvideodec 对这条流的处理不对」切开。
+ * touch 这个文件 → 走 avdec_h264 软解：
+ *   软解有画面 ⇒ 码流是好的，锅在硬解这一层；
+ *   软解也全黑 ⇒ 锅在我们的 AU 组装 / SPS-PPS 注入（见 cm_rtp.c 的 au_dump_hook，
+ *                那里能 dump 出实际喂给解码器的字节，用设备自带 ffmpeg 验证）。
+ * 不改管线字符串：两条管线字符串都是现成的，这里只是选哪一条。 */
+#define VIDEO_SOFTDEC_SWITCH  "/userdisk/miniapp/data/softdec.txt"
 #define AUDIO_FORCE_AUTO     0
 #define AUDIO_FORCE_SPEAKER  1
 #define AUDIO_FORCE_BT       2
@@ -700,16 +956,80 @@ static int aplay_spawn(cm_box *b, int rate, int channels) {
     return 0;
 }
 
+/* 判断 pid 还活着。SIGCHLD=SIG_IGN 下 waitpid 拿不到状态（ECHILD），
+ * 但内核仍然会在子进程退出时释放 pid，所以 kill(pid, 0) 是可靠的存活探针：
+ *   返回 0        -> 还活着
+ *   -1 + ESRCH    -> 已经没了
+ *   -1 + EPERM    -> 还活着（不可能是我们的错，但保守当成活着） */
+static int aplay_alive(pid_t pid) {
+    if (pid <= 0) return 0;
+    if (kill(pid, 0) == 0) return 1;
+    return errno == EPERM;
+}
+
+/* 收尾外部 aplay 子进程。Bug5 里这一步出过问题，写法要点：
+ *
+ * ① **先关写端再发信号**：关掉管道写端后 aplay 的 read() 返回 0（EOF），
+ *    它会 flush 剩余 PCM 并自己退出 —— 这是最干净的路径，也是「退出后还有
+ *    残响」的正解。反过来先 SIGKILL 会让 ALSA 缓冲里那几十毫秒直接丢音。
+ * ② **SIGTERM 和 SIGKILL 之间必须留时间**。旧代码两行连着发，SIGKILL 几乎
+ *    总是先到，aplay 根本没机会走正常收尾（它的 atexit 要 stop/drain PCM）。
+ * ③ **必须自证进程真的没了**，不能发完信号就当它死了。宿主进程
+ *    SIGCHLD=SIG_IGN，waitpid 会 ECHILD，所以只能 kill(pid,0) 轮询。
+ *    没有这一步的话，「aplay 卡死独占声卡」这种故障在日志里完全看不出来
+ *    （Bug5 的 C 假设考的就是这条）。
+ * ④ 节流总计最多约 1 秒，且只在真的卡死时才会走满。 */
 static void aplay_stop(cm_box *b) {
+    pid_t pid;
+    int i;
+    int waited_ms = 0;
     if (!b) return;
-    if (b->aplay_fd >= 0) { close(b->aplay_fd); b->aplay_fd = -1; }
-    if (b->aplay_pid > 0) {
-        /* 宿主进程 SIGCHLD=SIG_IGN，子进程会被自动回收，waitpid 会 ECHILD；
-         * 所以这里只发信号，不 waitpid。SIGTERM 后 aplay 会 flush 并退出。 */
-        kill(b->aplay_pid, SIGTERM);
-        kill(b->aplay_pid, SIGKILL);
-        b->aplay_pid = 0;
+
+    /* ① 关写端，让 aplay 读 EOF 自己收尾 */
+    if (b->aplay_fd >= 0) {
+        close(b->aplay_fd);
+        b->aplay_fd = -1;
     }
+    pid = b->aplay_pid;
+    b->aplay_pid = 0;
+    if (pid <= 0) return;
+
+    /* 给它 ~200ms 自己退（正常情况 aplay 收到 EOF 立刻退，不用我们杀） */
+    for (i = 0; i < 20; i++) {
+        if (!aplay_alive(pid)) {
+            CM_LOGI("aplay pid=%d exited on EOF after %d ms", (int)pid, waited_ms);
+            return;
+        }
+        cm_sleep_ms(10);
+        waited_ms += 10;
+    }
+
+    /* ② 还没退：SIGTERM（让它 flush），再等 ~300ms */
+    kill(pid, SIGTERM);
+    for (i = 0; i < 30; i++) {
+        if (!aplay_alive(pid)) {
+            CM_LOGI("aplay pid=%d exited on SIGTERM after %d ms", (int)pid, waited_ms);
+            return;
+        }
+        cm_sleep_ms(10);
+        waited_ms += 10;
+    }
+
+    /* ③ 仍然活着：SIGKILL，再确认一次 */
+    CM_LOGW("aplay pid=%d still alive after %d ms, SIGKILL", (int)pid, waited_ms);
+    kill(pid, SIGKILL);
+    for (i = 0; i < 50; i++) {
+        if (!aplay_alive(pid)) {
+            CM_LOGW("aplay pid=%d killed after %d ms (audio may clip)", (int)pid, waited_ms);
+            return;
+        }
+        cm_sleep_ms(10);
+        waited_ms += 10;
+    }
+
+    /* ④ 杀了 1 秒还在：这只可能是 TASK_UNINTERRUPTIBLE（卡在 ALSA 驱动里）。
+     * 记下来 —— 这条日志是「声卡被我们独占」的唯一现场证据，后续排查全指望它。 */
+    CM_LOGE("aplay pid=%d UNKILLABLE after %d ms (stuck in driver?)", (int)pid, waited_ms);
 }
 
 static GstElement *launch(const char *desc) {
@@ -787,6 +1107,7 @@ cm_box *cm_box_create(cm_sess *s, int is_video) {
     b = (cm_box *)calloc(1, sizeof(*b));
     if (!b) return NULL;
     b->is_video = is_video;
+    b->sess = s;
     /* ★ 必须显式置 -1：calloc 给的是 0，而 0 是 stdin 的 fd 号，
      * aplay_stop() 会对视频盒子误关 stdin（后果是后续 popen/system 全坏）。 */
     b->aplay_fd = -1;
@@ -805,7 +1126,23 @@ cm_box *cm_box_create(cm_sess *s, int is_video) {
     }
 
     if (is_video) {
-        b->pipeline = launch(video_pipeline_fmt());
+        /* 诊断开关：/userdisk/miniapp/data/softdec.txt 存在就跳过 mppvideodec
+         * 直接走软解。目的是把「我们喂的码流坏」和「mppvideodec 对这条流
+         * 的行为不对」这两层切开 —— 不用改代码、只 touch 一个文件就能 A/B：
+         *   硬解全黑 + 软解有画面 ⇒ 码流是好的，锅在硬解这一层；
+         *   硬解全黑 + 软解也全黑 ⇒ 锅在我们的 AU 组装 / SPS-PPS 注入。
+         * 纯诊断，默认不打开（文件不存在 = 正常走硬解）。 */
+        int force_soft = 0;
+        {
+            FILE *sf = fopen(VIDEO_SOFTDEC_SWITCH, "r");
+            if (sf) { force_soft = 1; fclose(sf); }
+        }
+        if (force_soft) {
+            CM_LOGW("video: forcing software h264 decoder (%s exists)", VIDEO_SOFTDEC_SWITCH);
+            b->pipeline = launch(video_pipeline_soft());
+        } else {
+            b->pipeline = launch(video_pipeline_fmt());
+        }
         if (!b->pipeline) {
             CM_LOGW("mppvideodec pipeline unavailable, trying software h264");
             b->pipeline = launch(video_pipeline_soft());
@@ -821,13 +1158,19 @@ cm_box *cm_box_create(cm_sess *s, int is_video) {
         }
         if (b->sink) apply_rect(b);
     } else {
-        /* 开机默认 Playback Path=OFF（功放通路未接），必须在出声前拨到 SPK。 */
+        /* 开机默认 Playback Path=OFF（功放通路未接），开播前拨到 SPK。
+         * ★ audio_route_ensure 会先快照，且**绝不再动 card1 音量**
+         *   （Bug5：旧代码把系统音量 0,0 抬成 200,200）。 */
         char adesc[512];
-        audio_route_ensure();
+        audio_route_ensure(s);
         /* 先起 aplay（拿到管道写端 fd），再让 GStreamer 的 fdsink 写进去。
          * 不用 alsasink 的原因见 cm_box 结构里 aplay_fd 的注释。 */
         if (aplay_spawn(b, 48000, 2) != 0) {
             CM_LOGE("aplay spawn failed");
+            /* 走到这里是「已经改了 Playback Path 但盒子没建出来」，
+             * 而 cm_box_destroy 永远不会被调用（b 还没交出去），
+             * 所以必须在这里自己还原一次，否则路由会被永久留在 SPK。 */
+            cm_audio_route_restore(s);
             free(b);
             return NULL;
         }
@@ -837,7 +1180,13 @@ cm_box *cm_box_create(cm_sess *s, int is_video) {
                  "! audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=2 "
                  "! fdsink name=asink fd=%d sync=false", b->aplay_fd);
         b->pipeline = launch(adesc);
-        if (!b->pipeline) { aplay_stop(b); free(b); return NULL; }
+        if (!b->pipeline) {
+            /* 同理：走 cm_box_destroy 而不是 aplay_stop + free，
+             * 这样 aplay 收尾、fd 关闭、mixer 还原三件事都由同一段代码负责，
+             * 不会在这条罕见失败路径上漏掉还原。 */
+            cm_box_destroy(b);
+            return NULL;
+        }
         b->src = (GstAppSrc *)gst_bin_get_by_name((GstBin *)b->pipeline, "asrc");
         b->sink = gst_bin_get_by_name((GstBin *)b->pipeline, "asink");
         {
@@ -892,6 +1241,11 @@ void cm_box_destroy(cm_box *b) {
     if (b->pipeline) { gst_object_unref(b->pipeline); b->pipeline = NULL; }
     /* fdsink 释放后才关管道写端，aplay 读到 EOF 会正常 flush 退出。 */
     aplay_stop(b);
+    /* ★ 还原全局 mixer（Bug5）：拆掉音频盒就把我们改过的 Playback Path 写回去。
+     * 幂等 —— 四条拆管线路径（cm_media 看门狗退出 / cgmedia sess_free /
+     * cgmedia js_stop / cm_cmd setAudio(0)）最终都走这里，谁先谁后都只还原一次。
+     * 不在视频盒上调用：那是另一个 teammate 的文件路径，且音频快照与视频无关。 */
+    if (!b->is_video) cm_audio_route_restore(b->sess);
     free(b->caps_str);
     free(b);
     CM_LOGI("box destroyed");
@@ -907,28 +1261,75 @@ int cm_box_drain_bus(cm_box *b) {
     if (!b || !b->pipeline) return 0;
     bus = gst_element_get_bus(b->pipeline);
     if (!bus) return 0;
-    for (guard = 0; guard < 8; guard++) {
-        GstMessage *msg = gst_bus_timed_pop_filtered(
-            bus, 0 /* 不阻塞 */,
-            GST_MSG_ERROR | GST_MSG_WARNING | GST_MSG_EOS);
+
+    /* ★ 第 1 轮：只取 GST_MSG_ERROR。
+     *
+     * 为什么要拆成两轮而不是混着取：我们手写的 extern 里没有
+     * gst_message_get_type / GST_MESSAGE_TYPE（那两个要走 GstMessage 结构布局，
+     * 本文件没有 GStreamer 头，猜结构体会崩），所以「这条消息到底是 ERROR
+     * 还是 WARNING」**只能靠 pop 时给的 types 过滤来区分**。
+     * 拆分之后，凡是从这一轮 pop 出来的必然是 ERROR，可以放心把
+     * b->failed 置位 —— 这正是 audio-route 留下的遗留
+     * （docs/BUGFIX-bug3-bug4-gst.md §5.3：bus 报错只打印、盒子里永远
+     * failed=0，于是 appsrc 继续收帧、画面永久停在最后一帧，表现就是全黑）。
+     *
+     * 对视频而言这个置位尤为关键：我们给 mppvideodec 加了
+     * ignore-error=false max-errors=16，连续 16 次解码错误后它一定会
+     * post flow error。以前那条 ERROR 只是被打印一句，push 继续成功，
+     * 上层看到的是「fps 正常、appsrc 全部接受」，而屏幕上什么都没有。 */
+    for (guard = 0; guard < 4; guard++) {
+        GstMessage *msg = gst_bus_timed_pop_filtered(bus, 0, GST_MSG_ERROR);
+        GErrorDetail *err = NULL;
+        char *debug = NULL;
         if (!msg) break;
+        gst_message_parse_error(msg, &err, &debug);
         {
-            GErrorDetail *err = NULL;
-            char *debug = NULL;
-            /* ERROR 与 WARNING 的解析函数内部实现相同，都用 parse_error 也行，
-             * 但语义上分开叫更清楚；这里两个都试，谁给出 message 用谁。 */
-            gst_message_parse_error(msg, &err, &debug);
-            if (err && err->message) {
-                CM_LOGE("%s bus: %s%s%s", b->is_video ? "video" : "audio",
-                        err->message,
-                        debug ? " | debug=" : "", debug ? debug : "");
-                errs++;
-            } else if (debug) {
-                /* 可能是 EOS / WARNING：EOS 也要打出来，说明上游断流 */
-                CM_LOGW("%s bus: %s", b->is_video ? "video" : "audio", debug);
+            /* 首次出现用 CM_LOGE + 醒目前缀，保证一定会落进日志
+             * （真机 console.warn/error 才落盘，CM_LOGE 走的是 error 级）。 */
+            static int first_err_logged = 0;
+            if (!first_err_logged) {
+                first_err_logged = 1;
+                CM_LOGE("%s bus ERROR (first) domain=%u code=%d msg=%s debug=%s",
+                        b->is_video ? "video" : "audio",
+                        err ? err->domain : 0u, err ? err->code : 0,
+                        (err && err->message) ? err->message : "(none)",
+                        debug ? debug : "(none)");
+            } else {
+                CM_LOGE("%s bus ERROR domain=%u code=%d msg=%s debug=%s",
+                        b->is_video ? "video" : "audio",
+                        err ? err->domain : 0u, err ? err->code : 0,
+                        (err && err->message) ? err->message : "(none)",
+                        debug ? debug : "(none)");
             }
-            /* 故意不 free：g_free 在本设备的 libglib 里 strings 查不到，
-             * 引入未解析符号会让整个 .so 加载失败。错误路径只泄漏几十字节。 */
+        }
+        if (b->is_video && !b->failed) {
+            b->failed = 1;
+            CM_LOGE("video box marked failed after decoder error: every later "
+                    "cm_box_push is refused, so the plane freezes on its last "
+                    "buffer (screen looks black/frozen). Look for the ERROR line above.");
+        }
+        /* 故意不 free：g_free 在本设备的 libglib 里查不到符号 */
+        gst_message_unref(msg);
+        errs++;
+    }
+
+    /* ★ 第 2 轮：WARNING / EOS 只打日志，绝不置 failed。
+     * `Pipeline construction is invalid, please add queues.` 就是这一类的
+     * WARNING（gst_base_sink_query_latency 发的），它是既有的、无害的，
+     * 把它当致命错误会让每一次播放都瞬间 failed。 */
+    for (guard = 0; guard < 4; guard++) {
+        GstMessage *msg = gst_bus_timed_pop_filtered(
+            bus, 0, GST_MSG_WARNING | GST_MSG_EOS);
+        GErrorDetail *err = NULL;
+        char *debug = NULL;
+        if (!msg) break;
+        gst_message_parse_warning(msg, &err, &debug);
+        if (err && err->message) {
+            CM_LOGW("%s bus WARN: %s%s%s", b->is_video ? "video" : "audio",
+                    err->message,
+                    debug ? " | debug=" : "", debug ? debug : "");
+        } else if (debug) {
+            CM_LOGW("%s bus msg: %s", b->is_video ? "video" : "audio", debug);
         }
         gst_message_unref(msg);
     }
@@ -940,8 +1341,7 @@ int cm_box_push(cm_box *b, const unsigned char *data, int len, uint64_t pts_ns, 
     GstBuffer *buf;
     size_t wrote;
     GstFlowReturn fr;
-    (void)pts_ns;
-    (void)key;
+    (void)pts_ns;   /* 见下方 hunk 2 说明：PTS 这一半无法落地 */
     if (!b || !b->src || b->failed || len <= 0) return -1;
     buf = gst_buffer_new_allocate(NULL, (size_t)len, NULL);
     if (!buf) return -1;
@@ -949,6 +1349,38 @@ int cm_box_push(cm_box *b, const unsigned char *data, int len, uint64_t pts_ns, 
     if (wrote != (size_t)len) {
         gst_buffer_unref(buf);
         return -1;
+    }
+    /* 【bug3/bug4 hunk 2（降级版）：只打 DELTA_UNIT，不打 PTS/DTS】
+     *
+     * 打 DELTA_UNIT 的意义：告诉 h264parse / mppvideodec「这一帧不能作为起点」。
+     * 原来这里两行 `(void)` 把 key 完全丢掉，下游只能靠 H.264 NAL 类型自己猜；
+     * 而 cm_rtp.c 的丢包逻辑**确实会丢帧**（`packet loss seen` / `auDrop`），
+     * 被丢过帧之后 NAL 猜测与真实帧序一旦错位，解码器会把 P 帧当 I 帧用。
+     * 显式标 DELTA_UNIT 是把我们已知的信息传下去，成本为零、没有行为风险。
+     *
+     * 为什么**不**设 PTS/DTS（任务书允许降级，理由如下，别当成漏做）：
+     *   1) 本文件没有 GStreamer 头文件（全仓 grep gstbuffer.h = 0 命中，全靠手写
+     *      声明）。GST_BUFFER_PTS()/GST_BUFFER_DTS() 是 gstbuffer.h 里的**结构体
+     *      字段宏**，没有头文件根本无法展开，硬写结构体偏移等于赌 ABI 布局，
+     *      赌错就是内存写坏。
+     *   2) 官方 accessor `gst_buffer_get_pts/set_pts` 在真机 libgstreamer-1.0.so.0
+     *      (1.22.0) 与本地 stub 的导出符号表里都不存在（已逐个 parse .dynsym），
+     *      调用即未解析符号 → 整个 libjsapi_cgmedia.so 加载失败。
+     *   3) appsrc 当前是 `format=time do-timestamp=true`，由 appsrc 按到达时间
+     *      自己打时间戳；手工再塞一个 PTS 与之叠加，等于两套时间轴打架。
+     *      要让 PTS 真正生效必须先改成 format=time 且关掉 do-timestamp，
+     *      那会把 SINK 的调度基准也一并改掉，属于「为锦上添花冒破画出画风险」。
+     *   所以时间戳这一半按任务书要求跳过，代价与后续做法见
+     *   docs/BUGFIX-bug3-bug4-gst.md。
+     *
+     * ★ 2026-11-13 后续定案：kmssink 已改成 `sync=false`（见 KMS_SINK_PROPS
+     *   上方长注释），SINK 不再按 PTS 调度 —— 也就是说上面第 3 条「两套时间轴
+     *   打架」在**当前配置下已不成立**。但 PTS/DTS 仍然没加，理由回到第 1、2 条
+     *   （没有头文件 + accessor 符号不存在），那两条与 sync 无关，依旧成立。
+     *   也就是说：本次定案不是「补准 PTS」，而是「不再让 SINK 依赖 PTS」。 */
+    if (b->is_video && !key) {
+        gst_buffer_set_flags(buf,
+                             gst_buffer_get_flags(buf) | GST_BUFFER_FLAG_DELTA_UNIT);
     }
     fr = gst_app_src_push_buffer(b->src, buf);
     if (fr != 0 /* GST_FLOW_OK */) {
@@ -1027,8 +1459,70 @@ int cm_box_set_rect(cm_box *b, int x, int y, int w, int h) {
 }
 
 void cm_box_set_caps_video(cm_box *b, int w, int h) {
+    int old_w, old_h;
     if (!b || !b->src) return;
     /* h264parse 会重算 caps，这里只在拿到真实分辨率时更新统计值 */
+    old_w = b->width;
+    old_h = b->height;
+
+    /* 【bug3/bug4 hunk 3：分辨率变化时逼下游重新协商】
+     *
+     * 为什么需要：mppvideodec 的 DPB / 输出 buffer 池是**按首个 SPS 分配的**。
+     * 网关切档（或首帧前我们解析到的 SPS 是错的）时，width/height 变了但
+     * 下游没收到新 caps，解码器仍旧按旧尺寸分配 —— 表现是画面挤压/花屏，
+     * 或者干脆只出第一帧。
+     *
+     * 做法：向上游侧（appsrc 的 src pad）推一对 flush-start / flush-stop，
+     * h264parse 与解码器收到 flush-stop 后会重新走一次 caps 协商 / 重分配 DPB。
+     *
+     * 三条**不可违反**的约束（都是真机踩过的）：
+     *   1) ⚠ 绝不能用 gst_element_set_state(PAUSED→PLAYING) —— 本函数在收包线程
+     *      持着 s->gst_mu 时被调用（cm_rtp.c:339-341 note_sps），set_state 会同步
+     *      等待状态切换、而状态切换又要拿 gst_mu，直接死锁收包线程。
+     *      只许发 event。
+     *   2) 首次调用（old_w/old_h 还是 0）不 flush：那时下游根本还没协商过，
+     *      发 flush 只会把刚起来的 pipeline 打回 NULL 状态附近，白丢首帧。
+     *   3) flush-start 必须配一个 flush-stop(reset_time=TRUE)，否则 pipeline
+     *      永远停在 flushing 状态，之后 push 的 buffer 全被丢掉（表现为
+     *      video_ok=1 但屏幕不动）。
+     * gst_pad_push_event 是 transfer-full（吃掉引用），所以成功失败都不要再 unref
+     * event；只 unref 我们自己 get 出来的 pad。 */
+    if (w > 0 && h > 0 && old_w > 0 && old_h > 0 && (w != old_w || h != old_h)) {
+        GstState got = GST_STATE_VOID_PENDING_;
+        GstState pend = GST_STATE_VOID_PENDING_;
+        GstPad *pad;
+        GstEvent *ev;
+        b->width = w;
+        b->height = h;
+        pad = gst_element_get_static_pad((GstElement *)b->src, "src");
+        if (!pad) {
+            CM_LOGW("video caps %dx%d -> %dx%d: appsrc src pad not found, skip flush",
+                    old_w, old_h, w, h);
+            return;
+        }
+        /* 只在 PLAYING 下 flush：READY/NULL 时下一次 PLAYING 自然就会重新协商。 */
+        if (b->pipeline) {
+            gst_element_get_state(b->pipeline, &got, &pend, 0 /* 不等待 */);
+        }
+        if (got != GST_STATE_PLAYING_) {
+            CM_LOGI("video caps %dx%d -> %dx%d (state=%d, no flush needed)",
+                    old_w, old_h, w, h, (int)got);
+            gst_object_unref(pad);
+            return;
+        }
+        CM_LOGW("video caps CHANGED %dx%d -> %dx%d, flush to renegotiate",
+                old_w, old_h, w, h);
+        ev = gst_event_new_flush_start();
+        if (ev && !gst_pad_push_event(pad, ev)) {
+            CM_LOGW("flush-start push failed");
+        }
+        ev = gst_event_new_flush_stop(1 /* reset_time=TRUE */);
+        if (ev && !gst_pad_push_event(pad, ev)) {
+            CM_LOGW("flush-stop push failed");
+        }
+        gst_object_unref(pad);
+        return;
+    }
     b->width = w;
     b->height = h;
 }

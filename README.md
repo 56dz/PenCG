@@ -194,7 +194,7 @@ Opus 帧    →  appsrc ! opusdec ! fdsink → aplay（扬声器 / bluealsa）
 - **Weex 默认 `flex-direction: column`**：不显式写 `row` 时 `justify-content` 管的是纵向
 - **不能把文案写成 method**：`{{ countText }}` 指向 `methods.countText` 时真机会把**函数源码**渲染出来
 - **`<input>` 不存在**：文本输入只能走 `global.startTextEdit`，或用自绘键盘
-- **`console.log` 不落盘**：只有 `console.warn` / `console.error` 进 `/userdata/applog/`
+- **只有 `console.error` 落盘**：`console.warn` 和 `console.log` 完全不落盘。落盘文件是 `/userdata/applog/loli_s6_dev.txt`，行格式 `[时间戳][E][JS] <正文>`（中间的 `[E]` 是通道级别，恒为 E，不代表严重程度）
 - **`miniapp_cli capture` 在背光关闭时返回 `ret:0` 但只有 1086 字节纯白**：截前先 `hal-screen on`
 
 ## 文档

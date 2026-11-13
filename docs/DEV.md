@@ -64,10 +64,15 @@ powershell -NoProfile -Command "& '.\env\adb\adb.exe' pull /tmp/x.png 'PenCG\out
 
 ## 看设备日志
 ```bash
-./env/adb/adb.exe shell "grep -h '\[pencg\]' /userdata/applog/DictPen_*.log | tail -n 60"
+./env/adb/adb.exe shell "grep -h '\[pencg\]' /userdata/applog/loli_s6_dev.txt | tail -n 60"
 ```
-**只有 `console.warn` / `console.error` 会落盘**，`console.log` 不进日志文件。
-因此 `services/log.js` 的所有输出都走 `console.warn`，并带 `[pencg][I|W|E]` 前缀。
+**落盘文件是 `/userdata/applog/loli_s6_dev.txt`**（`DictPen_*.log` 那个路径在本机不存在）。
+
+**只有 `console.error` 会落盘**：X6 Pro 的 Falcon 运行时里 `console.warn` / `console.log`
+完全不写盘（全盘 `grep -a -c 'W][JS]'` 计数为 0）。因此：
+
+- `services/log.js` 的 `push()` 一律走 `console.error`（`log.js:44`），行内带 `[pencg][I|W|E]` 前缀 —— **真正的级别只看这个前缀**。
+- 落盘行的固定形态是 `[时间戳][E][JS] [pencg][W] ...`，中间那个 `[E]` 是通道级别（恒为 E），不是我们想表达的严重程度，别被它误导。
 
 ## 截图
 ```bash

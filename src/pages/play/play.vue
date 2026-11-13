@@ -137,10 +137,10 @@
 import { navTo, navBack, peekParams, requestHome } from '../../services/nav.js';
 import { restoreSession, isLoggedIn, currentSession } from '../../services/auth.js';
 import { applyTicket, stopGame } from '../../services/session.js';
-import { startPlay, stopPlay, setQuality, setRect, mediaState, setEventHandler, setVideoVisible, setInputBusy, requestKeyFrame } from '../../services/media.js';
+import { startPlay, stopPlay, setQuality, setRect, mediaState, setEventHandler, setVideoVisible, setInputBusy, requestKeyFrame, requestKeyFrameBurst } from '../../services/media.js';
 import { down, move, up, tap, cancel, setInputMode, declarePlatform, keepAlive, mouseMove, mouseDown, mouseUp, sendText, sendKey } from '../../services/input.js';
 import { ImSession } from '../../services/im.js';
-import { initScreen, keepAliveStart, keepAliveStop } from '../../services/screen.js';
+import { initScreen, keepAliveStart, keepAliveStop, getScreenState, screenStateName, isScreenNotOn, KEEP_INTERVAL_MS } from '../../services/screen.js';
 import { loadSettings, saveSettings } from '../../services/settings.js';
 import { recordPlay, touchPlay } from '../../services/history.js';
 import { QUALITIES, QUALITY_LABEL, normQuality } from '../../services/const.js';
@@ -154,6 +154,98 @@ var VIDEO = { x: 243, y: 0, w: 473, h: 266 };
 var VW = 1280;
 var VH = 720;
 var MAX_TOUCH = 5;
+
+/* ★ 退后台宽限期（方案 B，纯时长判据）
+ *
+ * 为什么不再拿 getScreenState() 当触发条件：
+ * 那一层只有「0 = 亮屏」被真机证实（docs/SCREEN-STATE-FINDINGS.md §3/§7.1），
+ * 1/3/4 的语义来自 hal-screen 的另一套编号，两层不能互证。把它当"要不要拆会话"
+ * 的总闸，会出现两种坏结果：一是编号猜错时守卫恒假（系统息屏被当成真退后台 →
+ * stopGame 释放机位，正是 bug1 的观感）；二是读状态失败时把"读不到"误判成熄屏。
+ * 所以改成只看时间：onHide 只摘视频平面（廉价可逆），60 秒内回来就无缝继续，
+ * 超时才真正拆管线释放机位。
+ *
+ * 60 秒这个值的依据：系统的 [Idle] 是 270s 调暗 / 300s 断电 / 900s 杀进程，
+ * 都比 60s 远；而用户"按一下电源键看看时间再按回来"这种动作通常在 10 秒量级。
+ * 取 60s 是为了让「短暂切走」和「真的不玩了」有明显区分度，同时多烧的免费
+ * 时长可控（一局 10 分钟里最多多烧 1 分钟）。 */
+var HIDE_GRACE_MS = 60000;
+
+/* 熄屏加速：屏幕确实非亮屏时，用户多半不会马上回来（按电源键回来要解锁），
+ * 宽限期缩到 10 秒。注意这是"加速条件"不是"触发条件"：即使这一路判错，
+ * 最坏也只是少等 50 秒就释放机位，不会误拆正在看的画面。
+ * 判据走 isScreenNotOn()：只依赖"0 = 亮屏"，对"3 到底存不存在"不敏感。 */
+var HIDE_GRACE_DARK_MS = 10000;
+
+/* ===================== STALLGUARD（bug1 第二阶段） =====================
+ *
+ * 真机实测（2026-11-13，X6 Pro，三次独立复现）：起播后 4m19s / 4m18s / 4m18s，
+ * 网关**静默停止推送 RTP**——音视频同时停，`rx`（native stats.rtp_rx）冻在
+ * 一个固定值（如 18874）、`fps` 从 29~30 掉到 0；而这一时刻：
+ *   screen=0(ON)、`keep #N` 每 20s 照常、ws=open、phase=playing、
+ *   我们 10s 一次的心跳 `op=input cmd="0 <ts>"` 被网关原样回显，
+ *   网关**不发** error / close / 任何提示 op（WS op 统计：2751 input / 7 error
+ *   / 4 result / 4 offer，没有 keep/kick/not_playing 这类东西）、
+ *   native 侧同时刻只剩 `PLI sent (26 bytes, srtcp)`，pt histogram 也冻结。
+ * ⇒ **会话没死，服务端单方面停推。** 官方 SDK 有 RtcKeepPlaying / RtcKeepaliveCfg
+ * 这套「告诉网关我还在玩」的机制，我们从没实现；`kickoutDuration` 默认 300s、
+ * 从 ticket 阶段起算，减去起播前容器冷启动 ~42s，正好落在 4m18s。
+ * 根因在服务端，客户端改不掉它，**只能检测 + 自愈**。
+ *
+ * 判据为什么看 rx 而不是 fps/decoded：
+ *   - fps 与 decoded 是「解码输出」，参考帧缺失时会被 native 丢掉，波动大；
+ *   - rx（stats.rtp_rx）是「通过 SSRC 校验的 RTP 包数」，只要网关还在推就单调涨，
+ *     停推就一点不动，是最干净的判据。
+ *   注意不能用 rxPkts：那是 socket 上的 datagram 总数，含 STUN/DTLS，
+ *   停推之后 ICE 保活的 STUN 照样在涨（真机验证过），拿它判停滞会永远判不出来。
+ *
+ * 20 秒这个阈值：正常播放时 rx 每秒涨几十上百，任何一次网络抖动都不会
+ * 让计数冻结 20 秒；而 20s 又远小于 4m18s 的故障点，所以第一次自愈能在
+ * 用户还没意识到「卡了」的时候就发起。取 10s 太容易被一次 GC 或换档毛刺误触，
+ * 取 30s+ 则用户已经盯着静止画面等太久。 */
+var STALL_RX_MS = 20000;
+/* L1（补关键帧）之后等多久判定「还是没救回来」。PLI 是向网关要 IDR，
+ * 网关处理 + 一帧编码回来通常 <1s，留 5s 是给丢包重发的余量。 */
+var STALL_L1_WAIT_MS = 5000;
+/* 一次故障最多自动恢复 3 次（L1 补帧 / L2 复用网关重连 / L3 重新申请机位）。
+ * 上限存在的意义：这个故障每次都在 4 分钟出头出现，若网关/账号侧真有硬限制，
+ * 无限重连只会把用户剩下的免费时长（和机位）在几秒内烧光，还不如老实告诉他
+ * 手动点「重连」。 */
+var STALL_MAX_TRIES = 3;
+
+/* ================= 第二条判据：弱网冻结（rx 在涨但画面不动） =================
+ *
+ * 真机现场（2026-11-13 16:25–16:42，原神，高铁 Wi-Fi，丢包 5~8%）：
+ *   [play] probe stage=live v=1 screen=0(ON) phase=playing ws=open
+ *          rx=73867 fps=0 kf=6 silent=3s tries=0 keep=on
+ *   native: still no IDR (rx=74418 kfReq=468 gateDrop=15511 auDrop=401)
+ *
+ * rx 从 194 一路涨到 73867，收包停滞判据（看 rx 冻结 20s）**永远不会触发**；
+ * 而 fps 自 16:30:30 起连续 12 分钟为 0，tries 一直是 0 —— 一次自愈都没发起。
+ * 原因是：弱网下网关照推、包照收，但每个 AU 都被丢包打碎，native 的
+ * 「首个完整 IDR 之前丢 P 帧」闸门把 15000+ 个 P 帧全丢了（gateDrop 持续增长）。
+ * 所以「rx 在涨」≠「画面在动」，必须另立一条判据。
+ *
+ * 判据的**主时钟是 fps 连续为 0**，不是 gateDrop 增长：
+ *   `gateDrop` 只在 native「首个完整 IDR 之前丢 P 帧」那道闸门里自增
+ *   （native/csrc/cgmedia/cm_rtp.c 的 gate 分支）。而 native 现在有 IDR 饥饿兜底
+ *   （IDR_STARVE_RELAX_MS = 4000）：4 秒拿不到 IDR 就把 have_kf 置 1、放行 P 帧，
+ *   **从此 gateDrop 再也不涨**。若把判据写成「gateDrop 连续增长 12s」，那么只要
+ *   native 兜底生效（几乎必然），窗口就永远攒不满 —— 判据成了永不触发的死代码。
+ *   而放行的 P 帧没有参考帧，画面照样是死的（fps 仍为 0），这正是我们要抓的场景。
+ * 所以改成：
+ *   ① fps 连续为 0 且采样数 ≥ FREEZE_MIN_SAMPLES（防 2s 窗口抖动误伤）；
+ *   ② 期间「(gateDrop+auDrop) 在涨」或「rx 在涨」——证明包还在进、是我们这边解不出来，
+ *      而不是网关停推（后者归第一条判据管）。
+ *   auDrop 在 native 放行 P 帧之后仍会随坏 AU 增长，正好补上 gateDrop 停涨的空档。
+ *
+ * 12s 的理由：必须比 native 的 IDR 饥饿兜底（4s 放行 P 帧）**慢**，让 native 先自救；
+ * native 一旦放行且画面真的恢复，fps 回到非 0，本判据自行清零。留 12s 也给弱网
+ * IDR 重传留够时间。9s 的 L1 复查同理：弱网下一发 PLI 换回完整 IDR 往往要重传，
+ * 比收包停滞的 5s 更慢才算合理。 */
+var FREEZE_GATE_MS = 12000;
+var FREEZE_L1_WAIT_MS = 9000;
+var FREEZE_MIN_SAMPLES = 3;
 
 // applyTicket 内部已重试 10 次，页面拿不到真实次数，按「约 3 秒一轮」估算展示。
 var ERR_TEXT = {
@@ -226,17 +318,51 @@ export default {
       pli: 0,
       statAt: 0,
       hbAt: 0,   /* 上次发 WS 心跳 "0 <ms>" 的时间 */
+      probeAt: 0, /* 上次打 [play] probe 存活探针的时间（20s 一次，bug1 排查用） */
+      /* ---- STALLGUARD：网关停推检测 + 三级自愈（见文件头 STALL_RX_MS 注释） ---- */
+      stallLastRx: 0,  /* 上次看到的 rx（native stats.rtp_rx）。变大就刷新 stallSince */
+      stallSince: 0,   /* rx 最后一次增长的时刻。0=还没收到过任何包（尚未进入判据） */
+      stallTries: 0,   /* 本次故障已用掉的自动恢复次数（L1/L2/L3 各加一） */
+      /* 这条故障是「哪条判据」发起的：'rx'=收包停滞 / 'freeze'=弱网冻结 / ''=无。
+         必须分开记，否则会互相拆台：弱网冻结时 rx 一直在涨，收包判据的
+         「rx 变大=已恢复」会在每次 tick 把 stallTries 清零，「L1→L2→L3」
+         的升级链永远走不到第二级（真机上就会表现为无限次 L1 补帧）。 */
+      stallOwner: '',
+      stallAt: 0,      /* 本次停滞的判定时刻，用于日志里算「已停 N 秒」 */
+      stallL1Timer: 0, /* L1 之后等 5s 复查的定时器句柄（必须能清） */
+      /* ---- 第二条判据：弱网冻结（rx 在涨但画面不动）。计时器与 stalls 完全独立，
+         否则两条判据会互相清掉对方的计时基准（见文件头 FREEZE_GATE_MS 注释） ---- */
+      freezeDropBase: -1,     /* fps 开始连续为 0 时的 (gateDrop+auDrop)。-1=未建立 */
+      freezeRxBase: 0,        /* fps 开始连续为 0 时的 rx，用于判「包还在进」 */
+      freezeFpsZeroSince: 0,  /* fps 从何时起连续为 0。0=当前不是全零 */
+      freezeFpsZeroCnt: 0,    /* 连续 fps==0 的 stat 采样数（防毛刺，见 FREEZE_MIN_SAMPLES） */
+      freezeLastSeq: 0,       /* 上次判定时看到的 statSeq，保证一个采样只判一次 */
+      freezeZeroAt: 0,        /* 本次冻结的判定时刻，日志里算「已冻 N 秒」 */
+      freezeL1Timer: 0,       /* 冻结 L1 之后等 9s 复查的定时器句柄（必须能清） */
+      statSeq: 0,             /* stat 采样序号。checkFreeze 用它保证「按采样」而不是「按 tick」判定 */
+      gateDrop: 0,            /* native stats.vid_gate_drop 的最新值（只用于显示/判据） */
+      auDrop: 0,              /* native stats.vid_au_drop 的最新值 */
+      kfReq: 0,               /* native stats.vid_kf_req 的最新值（与 kf 对比=网关理不理 PLI） */
       kfTimers: [],   /* 换画质后补发 PLI 的定时器（必须能清，见 clearQualityKf） */
       confirmExit: false,
       pcDownAt: 0,   /* 端游按下时刻，用于区分点击与长按拖动 */
       kbOpen: false, /* 远端弹出了输入框、正在等用户用数字键盘输入 */
-      videoHidden: false, /* KMS 视频平面是否已被缩成 1x1（弹系统键盘期间） */
+      videoHidden: false, /* KMS 视频平面是否已被缩成 1x1（弹系统键盘期间 / 退后台宽限期内） */
+      hiddenSince: 0,   /* 进入 hidden 的时刻（Date.now()）。宽限期的计时起点，0=当前不在后台 */
+      hideGraceTimer: 0, /* 后台宽限期定时器句柄（必须能清，见 clearHideGrace） */
       /* ---- 自绘数字键盘（右栏 244x266，在 KMS 平面之外，不用藏视频） ---- */
       kbShow: false,   /* 键盘是否可见 */
       kbNums: '',      /* 已输入的数字串（用于回显与拼接） */
       kbTip: '',       /* 底部提示（例如「已发送 11 位」） */
       kbTitle: '输入数字', /* 顶部标题：手机号 / 验证码 */
-      busy: false
+      busy: false,
+      /* ---- 页面销毁归因（见 docs/BUGFIX-play-page-teardown.md） ----
+       * 真机上出现过「对局健康进行中，页面自己 beforeDestroy，日志里看不出是谁
+       * 干的」：宿主重复 start 会重载 index 并把栈上的 play 一起摘掉，这条路径
+       * 不经过 onHide/onStop，也没有任何 error。下面两个字段让 cleanup 的日志
+       * 能一眼区分「我们自己退的」和「被宿主干掉的」。 */
+      selfClosedBy: '', /* doExit/finish/fail/bgTeardown/queue 置位：这条销毁是我们主动发起的 */
+      destroyedAt: 0    /* cleanup 执行时刻，仅用于同一行日志里算总时长 */
     };
   },
   computed: {
@@ -472,38 +598,79 @@ export default {
     this.cleanup();
   },
   onHide: function () {
-    this.hidden = true;
-    this.clearTimers();
-    try {
-      keepAliveStop();
-    } catch (e) {}
-    // ★ KMS 视频平面是硬件 overlay，zpos 比小程序合成面和系统桌面都高。
-    // 只停定时器、不拆管线的话，退到后台 / 直接退出软件后，最后一帧会一直盖在
-    // 系统界面上（用户实测报障：游戏都结束了、软件都退出了，画面还在）。
-    // 所以一进后台就把管线 set_state(NULL) 掉，让 kmssink 把 plane 还回去。
-    // 顺带释放机位：后台既看不到也不能操作，白烧免费时长没意义。
-    this.bgTeardown();
+    /* 系统输入法弹出的 onHide 不是退后台：优先级最高，直接返回，连 hiddenSince 都不置。
+       （app.js 里还有一层 inputBusy 守卫，两处语义必须一致，否则会出现
+        "play 当作真退后台拆了会话、app 却以为在打字"的错位。） */
+    if (this.imBusy || this.kbOpen) {
+      logWarn('[play] onHide 忽略：系统输入法使用中');
+      return;
+    }
+    this.enterBackground('onHide');
   },
   onStart: function () {
     logWarn('[play] page onStart');
   },
   onStop: function () {
     logWarn('[play] page onStop');
-    this.bgTeardown();
+    /* onStop 与 onHide 在真机上是同一轮"退后台"的两个回调（顺序不保证），
+       所以它们必须共用同一个宽限期：谁先到谁起定时器，后来的那个只是确认，
+       绝不能再拆一次 —— 旧代码两条路径各自 bgTeardown()，第二次会把已经在
+       宽限期里等着的会话立刻打死。 */
+    if (this.imBusy || this.kbOpen) {
+      logWarn('[play] onStop 忽略：系统输入法使用中');
+      return;
+    }
+    this.enterBackground('onStop');
   },
   onShow: function () {
-    logWarn('[play] page onShow stage=' + this.stage);
-    this.hidden = false;
+    logWarn('[play] page onShow stage=' + this.stage + ' screen=' + this.screenText() +
+      ' hiddenFor=' + (this.hiddenSince ? Math.round((Date.now() - this.hiddenSince) / 1000) + 's' : 0));
+    var wasHidden = !!this.hiddenSince;
+    /* 平面可能是被系统键盘路径摘掉的（kbSystem → hideVideoPlane）：那种情况下
+       hiddenSince 是 0，但平面依然是 1x1。恢复判据必须同时看这两个来源，
+       否则「弹过系统键盘后页面又被切走一次再回来」会留下一块永远不回来的黑区。 */
+    var needRestore = wasHidden || !!this.videoHidden;
+    this.hiddenSince = 0;
+    this.clearHideGrace();
     if (this.dead) return;
+    /* STALLGUARD：后台期间 rx 自然不涨，回来时若沿用旧基准会立刻误判停滞，
+       故把基准重置到「此刻」，让 20s 计数从回到前台重新开始。
+       已用掉的 stallTries 保留：重连后又被网关停推时应当直接升级到下一级，
+       而不是从 L1 重来。 */
+    this.stallLastRx = this.rx;
+    this.stallSince = 0;
+    if (this.stallL1Timer) {
+      clearTimeout(this.stallL1Timer);
+      this.stallL1Timer = 0;
+    }
+    /* 冻结判据同样要重建基准：后台期间 gateDrop/fps 都不再推进（native 还在收包，
+       但 stat 事件到不了 JS），沿用旧基准会让回来第一帧就判成「已冻结 30s」。
+       只清计时与基准，**stallTries / stallOwner 保留**（理由同上）。 */
+    if (this.freezeL1Timer) {
+      clearTimeout(this.freezeL1Timer);
+      this.freezeL1Timer = 0;
+    }
+    this.freezeDropBase = -1;
+    this.freezeRxBase = 0;
+    this.freezeFpsZeroSince = 0;
+    this.freezeFpsZeroCnt = 0;
     if (this.booted) this.startTimers();
+    /* 恢复顺序有讲究：先把平面重建回来（native 侧是销毁重建 vbox），
+       再补一发 PLI 求 IDR —— 重建后解码器没有参考帧，不发 PLI 就是一片灰绿。 */
+    if (needRestore) this.showVideoPlane();
     var s = this.stage;
     if (s === 'live' || s === 'waiting' || s === 'connecting') {
       try {
-        keepAliveStart(20000);
+        keepAliveStart(KEEP_INTERVAL_MS);
       } catch (e) {}
       try {
         setRect(VIDEO);
       } catch (e) {}
+      if (needRestore) {
+        try {
+          requestKeyFrame();
+        } catch (e) {}
+      }
     }
   },
   methods: {
@@ -575,7 +742,7 @@ export default {
         return null;
       }).then(function () {
         try {
-          keepAliveStart(20000);
+          keepAliveStart(KEEP_INTERVAL_MS);
         } catch (e) {}
         return null;
       });
@@ -617,6 +784,8 @@ export default {
         }
         if (r && r.queued) {
           self.stage = 'queued';
+          self.selfClosedBy = 'queued(navTo queue)';
+          self.stallReset();
           logInfo('[play] 进入排队 expires=' + r.expires);
           self.clearTimers();
           try {
@@ -837,6 +1006,17 @@ export default {
         this.fps = ev.fps || 0;
         this.kf = ev.kf || 0;
         this.pli = ev.pli || 0;
+        /* ★ 弱网冻结判据的数据源（native cm_media.c:120 早已输出，JS 侧之前没人读）：
+           gateDrop 涨 = native 正在「等完整 IDR」闸门丢 P 帧 = 一定没画面；
+           kfReq vs kf 的差值回答「网关到底理不理我们的 PLI」。 */
+        this.gateDrop = ev.gateDrop || 0;
+        this.auDrop = ev.auDrop || 0;
+        this.kfReq = ev.kfReq || 0;
+        /* stat 采样序号 +1：checkFreeze 用「采样」而不是「tick」做计数单位。
+           stat 由 native 每 2s 发一次、这里 900ms 节流，而 tick 是 500ms 一次——
+           若按 tick 判，一半的 tick 看不到 gateDrop 变化，会把增长窗口反复清零，
+           而 fps==0 的采样数又会虚高（一次 stat 被数成好几次）。 */
+        this.statSeq++;
         if (ev.w) this.vw = ev.w;
         if (ev.h) this.vh = ev.h;
         return;
@@ -992,6 +1172,8 @@ export default {
     },
     finish: function (text) {
       var self = this;
+      self.selfClosedBy = 'finish';
+      self.stallReset();
       self.stage = 'end';
       self.errText = text || '';
       self.vizOn = false;
@@ -1013,6 +1195,8 @@ export default {
     },
     fail: function (msg, code) {
       var self = this;
+      self.selfClosedBy = 'fail';
+      self.stallReset();
       self.errText = msg || '发生未知错误';
       self.errCode = Number(code) || 0;
       self.stage = 'fail';
@@ -1051,12 +1235,15 @@ export default {
       if (self.busy) return Promise.resolve(null);
       // 未登录时从来没申请过机位，直接回首页，别白发一轮 DELETE
       if (self.stage === 'nologin') {
+        self.selfClosedBy = 'doExit(nologin)';
         self.clearTimers();
         self.goHome();
         return Promise.resolve(null);
       }
       self.busy = true;
       self.confirmExit = false;
+      self.selfClosedBy = 'doExit';
+      self.stallReset();
       self.stage = 'end';
       self.tip = '正在退出并释放机位…';
       logInfo('[play] 用户退出，开始释放机位');
@@ -1162,6 +1349,518 @@ export default {
           try { keepAlive(now); } catch (e) {}
         }
       }
+      /* ★ STALLGUARD：网关静默停推检测（见文件头 STALL_RX_MS 注释）。
+         放在心跳/探针之后：即使它触发重连，本轮的 probe 行也已经写下了
+         「停推前最后一次 rx=…」这个现场，日志顺序更可读。 */
+      try {
+        this.checkStall(now, s);
+      } catch (e) {
+        logWarn('[play] checkStall 异常');
+      }
+      /* ★ 第二条判据：弱网冻结（rx 在涨但画面不动，见 FREEZE_GATE_MS 注释）。
+         必须放在 checkStall 之后：checkStall 会维护 stallLastRx 基准，
+         freeze 依赖「rx 在涨」这个结论；反过来跑会让基准慢半拍。 */
+      try {
+        this.checkFreeze(now, s);
+      } catch (e) {
+        logWarn('[play] checkFreeze 异常');
+      }
+      /* ★ bug1 的现场指纹：每 20 秒打一行「存活探针」，把四条链的即时状态拼在一起：
+       *   屏幕（getScreenState）、JS 定时器是否还在跑（本行本身出现=在跑）、
+       *   媒体字节/帧数（rx/fps/kf）、WS 状态。
+       * 排查「4 分钟后停了」时看这一行就够了：
+       *   - 这一行还在刷 + rx 在涨 + screen=OFF  → 屏黑了，画面其实还在，是保活问题；
+       *   - 这一行断了 + 之后出现 `JS heartbeat lost` → QuickJS 被挂起，JS 链断；
+       *   - 这一行还在刷 + rx 不涨 + wsState 变了 → 网络/网关侧断流，跟屏幕无关。
+       * 20 秒刚好和保活周期对齐，日志量可接受（一局 10 分钟 30 行）。 */
+      if (!this.probeAt || now - this.probeAt >= 20000) {
+        this.probeAt = now;
+        logWarn('[play] probe stage=' + s + ' v=' + (this.vizOn ? 1 : 0) +
+          ' screen=' + this.screenText() +
+          ' phase=' + this.phase + ' ws=' + this.wsState +
+          ' rx=' + this.rx + ' fps=' + this.fps + ' kf=' + this.kf +
+          ' gateDrop=' + this.gateDrop + ' auDrop=' + this.auDrop +
+          ' kfReq=' + this.kfReq +
+          ' silent=' + (this.stallSince ? Math.round((now - this.stallSince) / 1000) + 's' : '0s') +
+          ' frozen=' + (this.freezeFpsZeroSince ? Math.round((now - this.freezeFpsZeroSince) / 1000) + 's' : '0s') +
+          ' tries=' + this.stallTries + (this.stallOwner ? '(' + this.stallOwner + ')' : '') +
+          ' keep=' + (this.hiddenSince ? 'hidden' + Math.round((now - this.hiddenSince) / 1000) + 's' : 'on'));
+      }
+    },
+    /* ============ STALLGUARD：网关停推检测 + 三级自愈 ============
+       设计依据见文件头 STALL_RX_MS 注释（真机 4m18s 网关静默停推）。
+       判据只看两件事：stage==='live' 且 rx 连续 20s 没涨。 */
+
+    /* 把所有停滞状态清干净（含 L1 的复查定时器）。停/恢复/销毁路径都要调，
+       否则退出后残留的 setTimeout 会对着死页面继续自愈。 */
+    stallReset: function () {
+      if (this.stallL1Timer) {
+        clearTimeout(this.stallL1Timer);
+        this.stallL1Timer = 0;
+      }
+      this.stallLastRx = 0;
+      this.stallSince = 0;
+      this.stallAt = 0;
+      this.stallTries = 0;
+      /* 第二条判据（弱网冻结）的计时器与基准一并清掉。stallTries 是两个判据
+         共用的计数上限，所以这里清它会同时重置两边 —— 这是我们想要的语义：
+         「这一局结束了/重连了，自愈额度重新算」。但两条判据各自的**计时器**
+         必须分开清，绝不能在计时过程中互相对调 stallReset()。 */
+      if (this.freezeL1Timer) {
+        clearTimeout(this.freezeL1Timer);
+        this.freezeL1Timer = 0;
+      }
+      this.freezeDropBase = -1;
+      this.freezeRxBase = 0;
+      this.freezeFpsZeroSince = 0;
+      this.freezeFpsZeroCnt = 0;
+      this.freezeZeroAt = 0;
+      this.stallOwner = '';
+    },
+    /* 每 500ms 由 tick() 调一次。刻意很轻：只比较一个整数。 */
+    checkStall: function (now, s) {
+      if (this.dead) return;
+      /* 退后台期间不自愈：hiddenSince 非 0 说明用户不在看，此时 rx 停涨可能
+         只是系统把网络挂起了，这时候去重连/重申请会白烧机位时长，还会和
+         后台宽限期（HIDE_GRACE_MS）的拆解抢同一把机位锁。 */
+      if (this.hiddenSince) return;
+      if (this.busy) return;         /* 别的流程（重连/申请/退出）正在进行 */
+      if (this.stallL1Timer) return; /* L1 已发出，正等 5s 复查 */
+      /* ★ 交叉互斥：冻结判据的 L1 正在等 9s 复查时，收包判据不许再发起自愈。
+         没有这一条时，弱网下两条判据会各发起一次 L1、把共用的 stallTries
+         一次吃掉 2 级（表现为「才补了一轮帧就直接重连」）。两条判据共用
+         stallTries 上限，就必须共用「正在自愈中」这个门。 */
+      if (this.freezeL1Timer) return;
+      /* 一次都没收到过 RTP：还没出过画，交给 waiting 那条 20s 慢提示管，
+         这里判「停滞」没有意义（正常起播本来就要等几秒）。 */
+      if (!this.rx && this.stallTries === 0) {
+        this.stallLastRx = 0;
+        this.stallSince = 0;
+        return;
+      }
+
+      /* ① 先把「rx 变化」判掉，**不分 stage**。
+         这一条必须排在 stage 判断之前：L2 重连成功后 stage 会依次经过
+         connecting → waiting → live，若只在 live 才承认「恢复了」，
+         重连真的救回来时 stallTries 清不掉，20 秒后会被误判成第二级停滞。 */
+      if (this.rx > this.stallLastRx) {
+        this.stallLastRx = this.rx;
+        this.stallSince = now;
+        /* 只有「收包停滞」这一家才有资格用 rx 增长宣判恢复。
+           若当前故障是 weak-net freeze 发起的（stallOwner==='freeze'），
+           rx 本来就在涨，这里的「恢复」是假的——放着不管会把升级链打断。 */
+        if (this.stallTries > 0 && this.stallOwner === 'rx') {
+          var secs = this.stallAt ? Math.round((now - this.stallAt) / 1000) : 0;
+          logWarn('[play] stall recovered: rx=' + this.rx + ' 已恢复（第 ' +
+            this.stallTries + ' 级自愈成功，停滞 ' + secs + 's）');
+          this.stallTries = 0;
+          this.stallOwner = '';
+          this.stallAt = 0;
+          this.tip = '';
+        }
+        return;
+      }
+      /* ② rx 后退：换了媒体会话，新的 cgmedia id 从 0 重新计数。
+         这是「重新起算」，不是「恢复」。**刻意不清 stallTries**——
+         否则「重连 → 20s 又停 → 重连」会无限循环，把机位和免费时长烧光；
+         沿用已用掉的次数，下次直接升级到下一级。 */
+      if (this.rx < this.stallLastRx) {
+        if (this.stallTries > 0) {
+          logWarn('[play] stall: 媒体会话重启，rx 重新计数（' + this.stallLastRx +
+            ' → ' + this.rx + '），已用自愈 ' + this.stallTries + ' 次，继续观察');
+        }
+        this.stallLastRx = this.rx;
+        this.stallSince = now;
+        return;
+      }
+
+      /* ③ rx 没变。只有 live 才计时；但若自愈正在途中（stage 已被改成
+         waiting/connecting），计时必须**继续**，否则「重连成功连上网关
+         却不给流」会永远停在 waiting，再也不会升级到下一级。 */
+      /* 当前故障若由「弱网冻结」判据接管（stallOwner==='freeze'），收包判据
+         只维护 stallLastRx 基准（上面两个分支已做），完全退出升级链 ——
+         两条判据同时动作会互相把对方刚设的 stallTries 改掉。 */
+      if (this.stallOwner === 'freeze') return;
+      if (s !== 'live' && this.stallTries === 0) {
+        this.stallSince = now;
+        return;
+      }
+      if (!this.stallSince) {
+        this.stallSince = now;
+        return;
+      }
+      var silentMs = now - this.stallSince;
+      if (silentMs < STALL_RX_MS) return;
+
+      var self = this;
+      var silent = Math.round(silentMs / 1000);
+
+      /* L1：补关键帧。便宜、无副作用、不打断会话，永远先试这个。 */
+      if (this.stallTries === 0) {
+        this.stallTries = 1;
+        this.stallOwner = 'rx';
+        this.stallAt = now;
+        logWarn('[play] stall detected: rx=' + this.rx + ' 已 ' + silent +
+          's 未增长 → 尝试自愈（第 1 次：补发关键帧）');
+        try {
+          requestKeyFrameBurst(2, 500);
+        } catch (e) {
+          logWarn('[play] stall L1 requestKeyFrameBurst 异常');
+        }
+        this.stallL1Timer = setTimeout(function () {
+          self.stallL1Timer = 0;
+          if (self.dead) return;
+          self.checkStall(Date.now(), self.stage);
+        }, STALL_L1_WAIT_MS);
+        return;
+      }
+
+      /* L2：复用旧 gatewayUrl 重连。这一步会拆掉当前媒体会话，画面会短暂
+         消失（1~3 秒），所以只在 L1 明确失败后才做。 */
+      if (this.stallTries === 1) {
+        this.stallHealL2(now, 'stall', 'rx=' + this.rx + ' 已 ' + silent + 's 未增长');
+        return;
+      }
+
+      /* L3：连旧网关都拿不到流，重新申请机位（机票/机位可能已被服务端回收）。
+         用 STALL_MAX_TRIES - 1 表示「最后一级」，改上限时这一段不用动。 */
+      if (this.stallTries === STALL_MAX_TRIES - 1) {
+        this.stallHealL3(now, 'stall', 'rx=' + this.rx + ' 已 ' + silent + 's 未增长');
+        return;
+      }
+
+      /* 三级用完：不再自动重试，交给用户决定。 */
+      this.stallHealGiveUp('stall', 'rx=' + this.rx + ' 已 ' + silent + 's 未增长',
+        '画面已停止（网关停止推流），自动恢复失败，请点「重连」');
+    },
+
+    /* ============ 两条判据共用的自愈动作（第二个参数 tag 区分日志来源） ============
+     * tag='stall' = 收包停滞（rx 冻结）；tag='freeze' = 弱网冻结（rx 涨但画面不动）。
+     * 抽出来是为了保证两条判据**升级到同一级时动作完全一致**，而不是各写一份、
+     * 日后改一处忘另一处。 */
+    /* 升级到下一级前统一重开时间窗：收包停滞的 20s 窗口 + 冻结判据的 gate 窗口
+       都要重置，否则重连刚回来还没等到第一个 stat，就会被上一轮的计时立刻判成
+       下一级。 */
+    stallWindowReset: function (now) {
+      this.stallSince = now;
+      this.freezeFpsZeroSince = 0;
+      this.freezeFpsZeroCnt = 0;
+      this.freezeDropBase = -1; /* 新会话的 gateDrop/auDrop 从头算 */
+      this.freezeRxBase = 0;
+    },
+    stallHealL2: function (now, tag, detail) {
+      this.stallTries = 2;
+      this.stallOwner = tag === 'freeze' ? 'freeze' : 'rx';
+      this.stallAt = now;
+      this.stallWindowReset(now);
+      logWarn('[play] ' + tag + ': ' + detail + ' → L2 复用网关重连');
+      /* 画面确实已冻：把 vizOn 摘掉，让中栏遮罩显示「正在重连」，
+         同时避免 tick 里 `vizOn && stage==='waiting' → live` 那条兜底
+         把 stage 在重连过程中又推回 live。 */
+      this.vizOn = false;
+      /* canReconnect 在 live+open 时恒 false（它是给按钮用的：能自己玩就别点重连）。
+         这里我们已经判定画面死了，只是借它走同一段重连逻辑，故临时把 stage
+         挪出 live —— onReconnect 内部第一件事就会把它置成 'connecting'。 */
+      this.stage = 'waiting';
+      try {
+        var p = this.onReconnect();
+        if (p && p.catch) p.catch(function () {});
+      } catch (e) {
+        logWarn('[play] ' + tag + ' L2 onReconnect 异常');
+      }
+    },
+    stallHealL3: function (now, tag, detail) {
+      this.stallTries = STALL_MAX_TRIES;
+      this.stallOwner = tag === 'freeze' ? 'freeze' : 'rx';
+      this.stallAt = now;
+      this.stallWindowReset(now);
+      logWarn('[play] ' + tag + ': ' + detail + ' → L3 重新申请机位');
+      this.vizOn = false;
+      try {
+        var q = this.onReapply();
+        if (q && q.catch) q.catch(function () {});
+      } catch (e) {
+        logWarn('[play] ' + tag + ' L3 onReapply 异常');
+      }
+    },
+    /* fail() 会释放机位，「重连 / 重新申请」两个按钮在 fail 态恢复可用
+       （canReconnect 不再被 live+open 挡掉）。stallReset 放在 fail 之前：
+       fail 里也会调一次，幂等，但先清掉可以保证 fail 的日志前面能看到这次
+       停滞的收尾。 */
+    stallHealGiveUp: function (tag, detail, failText) {
+      logWarn('[play] ' + tag + ': 三级自愈全部失败，交给用户（' + detail + '）');
+      this.stallReset();
+      try {
+        this.fail(failText, 0);
+      } catch (e) {
+        logWarn('[play] ' + tag + ' fail() 异常');
+      }
+    },
+
+    /* ========= 第二条判据：弱网冻结（包在进 / 画面不动） ========
+     * 判据（三条同时成立）：
+     *   ① 主时钟是 **fps 连续为 0** 且持续 >= FREEZE_GATE_MS(12s)。
+     *      注意不是「gateDrop 连续增长」——native 的 IDR 饥饿兜底
+     *      （IDR_STARVE_RELAX_MS = 4000，见 native/csrc/cgmedia/cm_rtp.c）
+     *      放行 P 帧后 gateDrop 立即停止增长，只认它会让本判据在 native
+     *      兜底之后永久失效（详见下方 ② 与常量块的说明）。
+     *   ② 最近连续 freezeFpsZeroCnt 次 stat 采样 fps 全为 0（>= FREEZE_MIN_SAMPLES）。
+     *      单次 fps=0 是噪声（2s 窗口里正好没渲染完），连续多次才是真冻结。
+     *   ③ 这段全零期内「丢包侧证据」在动：gateDrop+auDrop 比全零起点大，或 rx 还在涨。
+     *      两者都不动 = 网关连包都不发了，那是第一条判据（rx 冻结）的地盘，这里让路。
+     *   ④ stage==='live'。没出过画的场景交给 waiting 的慢提示，这里不管。
+     * 与第一条判据的关系：收包停滞看「rx 不动」，弱网冻结看「rx 动但画面不动」，
+     * 互斥、不会同时触发。两者共用 stallTries 计数上限（合计最多 3 次），
+     * 但**计时器完全分开**（freezeL1Timer vs stallL1Timer），互不清对方。 */
+    checkFreeze: function (now, s) {
+      if (this.dead) return;
+      if (this.hiddenSince) return;
+      if (this.busy) return;
+      if (this.freezeL1Timer) return; /* 冻结 L1 已发出，正等 9s 复查 */
+      /* 视频平面被我们主动摘掉时（系统键盘弹出 → hideVideoPlane）不判冻结：
+         native 收到 hideVideo 会把平面缩到 1x1，恢复时又会把 have_kf / kf_count /
+         pli_burst 清零重新「等首个 IDR」（见 native/csrc/cgmedia/cm_cmd.c 的
+         setVideoVisible 分支）。那段 gateDrop 增长 + fps=0 是我们自己造成的，
+         不是网络冻结 —— 算进来自愈就变成「每次打字关键盘都补一次关键帧」。 */
+      if (this.videoHidden) {
+        /* 顺带把这一段全零清掉：否则「键盘弹出前已开始的冻结」会把摘平面的
+           那几十秒也算进 frozenMs，键盘一关可能立刻误判升级。 */
+        this.freezeFpsZeroSince = 0;
+        this.freezeFpsZeroCnt = 0;
+        this.freezeDropBase = -1;
+        this.freezeRxBase = 0;
+        return;
+      }
+      /* 只在「有新 stat 采样」时判定。tick 是 500ms，stat 约 2s 一次；
+         按 tick 判会让 fps==0 的采样计数虚高、基准快照被反复重拍。
+         计时（freezeFpsZeroSince 的毫秒数）仍然用真实时间，计数单位才是采样。 */
+      if (this.statSeq === this.freezeLastSeq) return;
+      this.freezeLastSeq = this.statSeq;
+      if (s !== 'live') return;       /* 只对「已经出过画」的会话判定 */
+
+      var dropNow = (this.gateDrop || 0) + (this.auDrop || 0);
+
+      /* ⓿ 恢复判定：fps 回到非 0 = 画面动了 = 冻结解除。
+         必须放在 gateDrop 判定之前，而且**只认 fps**（不认 gateDrop 停止增长）：
+         gateDrop 不涨有两种可能——「画面好了」和「网关连包都不发了」，后者是
+         第一条判据（rx 冻结）的地盘，不该在这里被误认为恢复。
+         native 侧的 IDR 饥饿兜底（video-integrity 的 IDR_STARVE_RELAX_MS）
+         放行 P 帧之后 fps 会恢复，正是走这条路解除。 */
+      if ((this.fps | 0) > 0 && this.stallOwner === 'freeze' && this.stallTries > 0) {
+        var recoveredSecs = this.freezeZeroAt
+          ? Math.round((now - this.freezeZeroAt) / 1000) : 0;
+        logWarn('[play] freeze recovered: fps=' + this.fps + ' 画面恢复（第 ' +
+          this.stallTries + ' 级自愈成功 / native 兜底放行，冻结 ' + recoveredSecs + 's）');
+        this.stallTries = 0;
+        this.stallOwner = '';
+        this.freezeZeroAt = 0;
+        this.tip = '';
+      }
+
+      /* ① fps 连续为 0 的采样计数（防毛刺，单次 fps=0 不算）。
+         进入一段新的全零段时，同时给「丢包侧证据」拍基准快照：
+         freezeDropBase = gateDrop+auDrop，freezeRxBase = rx。 */
+      if ((this.fps | 0) <= 0) {
+        if (!this.freezeFpsZeroSince) {
+          this.freezeFpsZeroSince = now;
+          this.freezeFpsZeroCnt = 0;
+          this.freezeDropBase = dropNow;
+          this.freezeRxBase = this.rx;
+        }
+        this.freezeFpsZeroCnt++;
+      } else {
+        /* fps 有值 = 画面在动，本段冻结不成立，基准全清（下次重新拍）。 */
+        this.freezeFpsZeroSince = 0;
+        this.freezeFpsZeroCnt = 0;
+        this.freezeDropBase = -1;
+        this.freezeRxBase = 0;
+        return;
+      }
+
+      /* ② 丢包侧证据：这段全零期内「闸门丢弃/坏 AU 还在涨」或「包还在进（rx 涨）」。
+         两者都不成立 = 网关连包都不发了 → 那是第一条判据（rx 冻结）的地盘，这里让路。
+         ★ 为什么不是「gateDrop 连续增长」：native 的 IDR 饥饿兜底
+           （IDR_STARVE_RELAX_MS = 4000，见 native/csrc/cgmedia/cm_rtp.c）到期会放行
+           P 帧，放行后 gateDrop **立即停止增长**，但画面依然可能是死的（放行的 P 帧
+           没有参考帧）。只认 gateDrop 连续增长会让本判据在 native 兜底之后永久失效
+           （grew 恒 false → 窗口永远攒不满）。auDrop 在兜底放行后仍随坏 AU 增长，
+           rx 在网关照推时也照样涨 —— 「任一在涨」+「fps 持续为 0」才是真正的画面死。 */
+      var grewDrop = (this.freezeDropBase >= 0) && (dropNow > this.freezeDropBase);
+      var grewRx = this.rx > this.freezeRxBase;
+      if (!grewDrop && !grewRx) {
+        this.freezeFpsZeroSince = 0;
+        this.freezeFpsZeroCnt = 0;
+        this.freezeDropBase = -1;
+        this.freezeRxBase = 0;
+        return;
+      }
+
+      var frozenMs = now - this.freezeFpsZeroSince;
+      if (frozenMs < FREEZE_GATE_MS) return;
+      if (this.freezeFpsZeroCnt < FREEZE_MIN_SAMPLES) return;
+
+      var fpsZeroSecs = Math.round(frozenMs / 1000);
+      var dropDelta = grewDrop ? (dropNow - this.freezeDropBase) : 0;
+      var rxDelta = this.rx - this.freezeRxBase;
+
+      /* L1：连发 3 发 PLI（间隔 400ms）。弱网下单个 PLI 容易连 IDR 请求本身
+         都丢掉，多打几发提高命中率；400ms 是为了在 RTT 内不互相覆盖。
+         **绝不在这里直接重连**：弱网重连要重走起播（几秒黑屏 + 可能重新排队
+         申请机位），代价远大于多等一轮 IDR。 */
+      if (this.stallTries === 0) {
+        this.stallTries = 1;
+        this.stallOwner = 'freeze';
+        this.freezeZeroAt = now;
+        /* 清空这一段冻结的计时与基准：L1 的 9s 复查由定时器自己判，
+           不必再等下一次 stat 攒窗口。 */
+        this.freezeFpsZeroCnt = 0;
+        this.freezeFpsZeroSince = 0;
+        this.freezeDropBase = -1;
+        this.freezeRxBase = 0;
+        logWarn('[play] freeze: 连续 ' + fpsZeroSecs + 's fps=0，期间' +
+          (dropDelta ? ' gateDrop+auDrop +' + dropDelta : '') +
+          (rxDelta ? ' rx +' + rxDelta : '') +
+          '（rx=' + this.rx + ' 仍在涨，判为丢包打碎 AU、拿不到 IDR）→ L1 补帧');
+        try {
+          requestKeyFrameBurst(3, 400);
+        } catch (e) {
+          logWarn('[play] freeze L1 requestKeyFrameBurst 异常');
+        }
+        var self = this;
+        this.freezeL1Timer = setTimeout(function () {
+          self.freezeL1Timer = 0;
+          if (self.dead) return;
+          if (self.hiddenSince || self.busy) return;
+          /* ★ 复查由定时器自己做，**不重入 checkFreeze**：
+             (a) 重入会让 freeze 判据要求重新攒满 12s 的 gate 窗口，
+                 L1→L2 实际要 9+12=21s，与「9s 后仍冻就升级」的设计不符；
+             (b) 更致命的是 checkFreeze 开头有 `if (freezeL1Timer) return`，
+                 但定时器里此刻已置 0，所以主要还是要靠这里直接判。 */
+          if ((self.fps | 0) > 0) {
+            /* 画面已经回来了（多为 native 的 IDR 饥饿兜底放行了 P 帧，
+               或 PLI 生效拿到了 IDR）。这里必须自己收尾：等待期内
+               checkFreeze 是被 freezeL1Timer 挡住的，没人替它做恢复判定。 */
+            var backSecs = self.freezeZeroAt
+              ? Math.round((Date.now() - self.freezeZeroAt) / 1000) : 0;
+            logWarn('[play] freeze recovered: fps=' + self.fps +
+              ' 画面恢复（L1 补帧 / native 兜底生效，冻结 ' + backSecs + 's）');
+            self.stallTries = 0;
+            self.stallOwner = '';
+            self.freezeZeroAt = 0;
+            self.tip = '';
+            return;
+          }
+          /* 仍是 0 fps：按当前级数直接升级。stallTries 此时必为 1（L1 已用）。 */
+          var t = Date.now();
+          if (self.stallTries !== 1) return;
+          self.stallHealL2(t, 'freeze',
+            'fps 仍为 0（L1 补帧 ' + Math.round(FREEZE_L1_WAIT_MS / 1000) +
+            's 无效，rx=' + self.rx + ' 仍在涨）');
+        }, FREEZE_L1_WAIT_MS);
+        return;
+      }
+
+      /* L2 / L3：与收包停滞完全同一套动作（见 stallHealL2/L3 注释）。 */
+      if (this.stallTries === 1) {
+        this.stallHealL2(now, 'freeze',
+          'fps 持续为 0 拿不到 IDR（rx=' + this.rx + ' 仍在涨）');
+        return;
+      }
+      if (this.stallTries === STALL_MAX_TRIES - 1) {
+        this.stallHealL3(now, 'freeze',
+          'fps 持续为 0 拿不到 IDR（rx=' + this.rx + ' 仍在涨）');
+        return;
+      }
+      this.stallHealGiveUp('freeze',
+        'fps 连续为 0、rx=' + this.rx + ' 仍在涨',
+        '画面已冻结（网络丢包严重，关键帧始终拿不到），自动恢复失败，请点「重连」');
+    },
+    /* 屏幕是否处于「非亮屏」—— 现在**只是宽限期的加速条件**，不再是拆不拆的总闸。
+       判据统一走 isScreenNotOn()：只有「0 = 亮屏」被真机证实
+       （docs/SCREEN-STATE-FINDINGS.md §7.1），1/3/4 的语义属 hal-screen 另一层，
+       与 JSAPI getScreenState() 不能互证（真机 JS 日志里 state=3/1/4 一条都没有）。
+       读不到（null/NaN）返回 false：本函数只用来把 60s 宽限缩到 10s，
+       判错的最坏后果是少等 50 秒，不值得为它冒"把亮屏误判成熄屏"的风险。
+       第二个参数传 null 是刻意的：这里拿不到亮度后端，而 isScreenNotOn 在
+       「state 读不到 + 没有亮度」时恰好返回 false，正好是这个保守分支。 */
+    screenIsOff: function () {
+      var st = null;
+      try {
+        st = getScreenState();
+      } catch (e) {
+        return false;
+      }
+      return isScreenNotOn(st, null);
+    },
+    screenText: function () {
+      var st = -1;
+      try {
+        st = getScreenState();
+      } catch (e) {
+        return 'err';
+      }
+      if (st == null) return 'null';
+      return Number(st) + '(' + screenStateName(st) + ')';
+    },
+    /* 进入后台（onHide / onStop 共用）：只做可逆动作 + 起宽限期。
+       两条生命周期的先后顺序在真机上不保证（有时先 onHide 后 onStop，有时只来一个），
+       所以这里必须幂等：已经在宽限期里就不再重置计时起点，否则两条回调
+       互相把 hiddenSince 往后推，宽限期会被无限续命。 */
+    enterBackground: function (from) {
+      if (this.dead) return;
+      var now = Date.now();
+      var first = !this.hiddenSince;
+      if (first) this.hiddenSince = now;
+      /* 摘平面是幂等的（hideVideoPlane 内部有 videoHidden 标志），重复调用无害。
+         这一步必须在起定时器之前：KMS 平面 zpos 高于系统合成面，哪怕只停留
+         一帧也会盖住用户正要看的系统 UI。 */
+      this.hideVideoPlane();
+      /* 保活**不停**：onHide 不等于不玩了。旧代码在这里 keepAliveStop()，
+         一旦 onHide 只是熄屏/短暂切走，保活一停屏幕就真的黑下去再也回不来，
+         那是把手电筒关了再找手电筒。保活只在真正 bgTeardown 时才停。 */
+      if (!first) {
+        logWarn('[play] ' + from + ' 已在后台宽限期内 hiddenFor=' +
+          Math.round((now - this.hiddenSince) / 1000) + 's，不重置计时');
+        return;
+      }
+      this.armHideGrace();
+    },
+    /* 起/重置后台宽限期。屏幕确实非亮屏时用短的 10s（用户按电源键回来要解锁，
+       不会立刻回来），否则 60s。定时器句柄存 this.hideGraceTimer，
+       cleanup / onShow / 到期自己都会清，防止页面销毁后还有回调打进来。 */
+    armHideGrace: function () {
+      if (this.dead) return;
+      this.clearHideGrace();
+      var self = this;
+      var ms = HIDE_GRACE_MS;
+      var dark = false;
+      try {
+        dark = self.screenIsOff();
+      } catch (e) {}
+      if (dark) ms = HIDE_GRACE_DARK_MS;
+      logWarn('[play] 进入后台宽限期 ' + Math.round(ms / 1000) + 's（screen=' +
+        self.screenText() + ' stage=' + self.stage + '）');
+      this.hideGraceTimer = setTimeout(function () {
+        self.hideGraceTimer = 0;
+        if (self.dead) return;
+        /* 到点前又回来了：hiddenSince 已被 onShow 清零，这里直接作废。 */
+        if (!self.hiddenSince) return;
+        logWarn('[play] 后台宽限期到期 hiddenFor=' +
+          Math.round((Date.now() - self.hiddenSince) / 1000) + 's → 拆管线释放机位');
+        self.clearTimers();
+        /* 保活终于可以停了：会话马上要拆，继续续期只会白耗电、
+           还可能和 stopGame 抢同一把机位锁。 */
+        try {
+          keepAliveStop();
+        } catch (e) {}
+        self.bgTeardown();
+      }, ms);
+    },
+    clearHideGrace: function () {
+      if (this.hideGraceTimer) {
+        clearTimeout(this.hideGraceTimer);
+        this.hideGraceTimer = 0;
+      }
     },
     // 后台/退出软件时的兜底拆解：必须同步走到 __cgMedia.stop()，
     // 因为 stopPlay() 的首段全是同步调用（clearInterval + media.stop + ws.close），
@@ -1174,9 +1873,21 @@ export default {
         logWarn('[play] bgTeardown 跳过：系统输入法使用中');
         return;
       }
+      /* 注意：这里**不再**判 screenIsOff()。
+         旧代码在这里又说「屏幕熄了就别拆」，结果和 onHide 的守卫叠成两层：
+         宽限期到期时若屏幕恰好还是非亮屏，就会跳过拆解 → 会话残留、机位
+         永不释放、平面一直挂在系统上（比误拆更糟，也更难自愈）。
+         熄屏的豁免已经上移到 enterBackground 里用「缩短宽限期」表达，
+         走到这里就代表"用户确实离开超过 60s（或熄屏超过 10s）"，该拆了。 */
+      self.clearHideGrace();
+      self.hiddenSince = 0;
+      self.stallReset();
+      /* 宽限期到期 = 我们自己判定的"该拆了"（不是被宿主干掉），记进归因字段，
+       * 这样 cleanup 日志里能区分「后台超时拆解」和「无人认领的销毁」。 */
+      self.selfClosedBy = 'bgTeardown';
       var s = self.stage;
       var playing = s === 'live' || s === 'waiting' || s === 'connecting';
-      logWarn('[play] onHide 拆管线 stage=' + s + ' viz=' + (self.vizOn ? 1 : 0));
+      logWarn('[play] bgTeardown 拆管线 stage=' + s + ' viz=' + (self.vizOn ? 1 : 0));
       try {
         var p = stopPlay();
         if (p && p.catch) p.catch(function () {});
@@ -1198,7 +1909,24 @@ export default {
     cleanup: function () {
       if (this.dead) return;
       this.dead = true;
-      logInfo('[play] cleanup（beforeDestroy）');
+      /* STALLGUARD：先把 L1 的复查定时器清掉 —— dead 之后它还会 fire 一次，
+         虽然 checkStall 开头有 dead 守卫，但清干净比依赖守卫更可靠。 */
+      this.stallReset();
+      this.destroyedAt = Date.now();
+      /* 销毁归因：这一行是排查「对局中途页面没了」的第一现场证据。
+       * by 为空 = 没有任何我们自己发起的退出路径走过（= 被宿主摘掉/重载）；
+       * 另外带上 stage/phase/已玩时长/im 状态/touch 状态，方便对着时间线回溯。 */
+      var _st = this.stage;
+      var _ms = mediaState();
+      var _played = this.startAt ? Math.round((this.destroyedAt - this.startAt) / 1000) : 0;
+      var _imPend = this.im && this.im.pending ? 1 : 0;
+      var _by = this.selfClosedBy || 'none(外部销毁)';
+      logWarn('[play] cleanup（beforeDestroy）by=' + _by +
+        ' stage=' + _st + ' phase=' + (_ms && _ms.phase) + ' ws=' + (_ms && _ms.wsState) +
+        ' played=' + _played + 's viz=' + (this.vizOn ? 1 : 0) +
+        ' hidden=' + (this.hiddenSince ? Math.round((this.destroyedAt - this.hiddenSince) / 1000) + 's' : '0') +
+        ' imBusy=' + (this.imBusy ? 1 : 0) + ' kb=' + (this.kbOpen ? 1 : 0) + ' imPend=' + _imPend +
+        ' busy=' + (this.busy ? 1 : 0) + ' videoHidden=' + (this.videoHidden ? 1 : 0));
       /* 页面销毁时系统键盘可能还挂着：必须解除忙碌标志，否则 app.js 的
          onHide 守卫会把之后每一次真实的退后台都当成"在打字"而放过去。 */
       try {
@@ -1208,12 +1936,28 @@ export default {
         if (this.im) this.im.dispose();
       } catch (e) {}
       this.videoHidden = false;
+      this.hiddenSince = 0;
+      /* 宽限期定时器必须在这里清掉：页面销毁后 JS 上下文还在（页面栈里被
+         closePageByName 摘掉时确实会清，但 beforeDestroy 这条路径不一定），
+         残留的 setTimeout 会在几十秒后对着死页面调 bgTeardown。 */
+      this.clearHideGrace();
       this.clearTimers();
       try {
         setEventHandler(null);
       } catch (e) {}
       try {
         keepAliveStop();
+      } catch (e) {}
+      /* 先把视频平面缩成 1x1，再拆管线 —— 顺序是刻意的：
+       * kmssink 在 set_state(NULL) 时只会按 restore-crtc 恢复 **CRTC mode**，
+       * 不会把 weston 自己的 plane 重新挂回 crtc。正常路径下 zpos=2 的
+       * Esmart1 被解绑后 weston 还能重新提交；但真机见过 plane_mask 掉到 0、
+       * 两个平面全解绑、weston 也回不来的情况（详见 docs/BUGFIX-play-page-teardown.md）。
+       * 缩 1x1 是 native 已支持且验证过的动作（cm_cmd.c setVideoVisible），
+       * 它把「绑着但没人管」的窗口压到最小，也让拆管线这一步的 KMS 状态更干净。
+       * 这里失败不阻塞后续：能缩就缩，缩不了也照样拆。 */
+      try {
+        setVideoVisible(false);
       } catch (e) {}
       try {
         var p = stopPlay();
