@@ -305,6 +305,7 @@ ps.tap(0.5, 0.5)
 **提交前必须扫描**：
 
 ```bash
+# 把下面的 <PHONE>/<PASSWORD> 换成真实值再跑（真实值除了这条命令，别写进任何文件）
 grep -rn '<PHONE>\|<PASSWORD>' --include='*.py' --include='*.md' --include='*.json' \
      --include='*.html' --include='*.csv' --include='*.js' .
 # 必须 0 命中
