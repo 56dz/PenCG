@@ -1,9 +1,14 @@
-# 回函：163CG-API 复核结果（2026-11-13）
+# 回函：163CG-API 复核结果（2026-11-13，2026-11-14 更新）
 
 回应 `HANDOFF-163CG-API.md`。仓库已更新到 **338 条接口**（上一版 272），
 新增 `docs/断流与保活根因分析.md`，commit `3772623` / `83f64c6`。
 
 下面是交接文档里 6 个交付问题 + 对 PenCG bug1 的直接结论。
+
+> **2026-11-14 重要更新**：第四、六节已按最新实测**整体重写**。
+> 上一版列的三条修复建议（会话期 ICE consent / answer 回显 extmap-rtcp-fb /
+> recvonly→sendrecv）**全部已实现且全部无效** —— bug1 根因仍未定位，
+> 但 11 个协议层假设已被逐一排除。详见 `docs/断流与保活根因分析.md`。
 
 ---
 
@@ -116,113 +121,111 @@ commit("setGameCutTime", { total: 1000*(k.no_op_duration1 + k.no_op_duration2),
 
 ---
 
-## 四、对 PenCG bug1 的直接结论
+## 四、对 PenCG bug1 的直接结论（2026-11-14 03:00 重写）
 
-### 先排除三个错误假设
+> **这一节被整体重写过。** 上一版列了「三处缺口 + 三条修复建议」，那些建议已经
+> **全部实测否定**。下面是现在的实际状态。
 
-| 假设 | 反证 |
-|---|---|
-| 不响应 dataChannelReady 被踢 | 网页端也不响应，照样收流 10 分钟（`grep` 无任何响应逻辑） |
-| WS 不心跳被踢 | 网页端 29 s 后 WS 完全静默，照样收流 |
-| 服务端 300 s kickout | 网页端同样从 ticket 起算，258 s 时毫无异常；600 s 断的是前端计时器 |
+### 4.1 一句话结论
 
-`docs/BUGFIX-bug1-stallguard.md` 里「kickoutDuration 300 s − 冷启动 42 s ≈ 258 s」这个推断，
-与网页端实测不吻合，建议降级为「已排除」。
+**bug1 的根因至今未定位。** 但我们把排查范围收窄到了「没有任何协议层可见差异」——
+也就是说，继续对着报文/SDP/auth 包找差异，已经没有东西可找了。
 
-> **2026-11-14 补充**：上面这条「建议降级为已排除」的判断，与 PenCG 侧最新的真机结论**方向一致** ——
-> 那个 `300 s − 42 s` 的算式确实不成立（PenCG 三局实测：把起点改成每次 `wsOpen` 后是 247/253/248 s，
-> 即「每个 WS 会话 ≈250 s」，不是「ticket + 300 s」）。两边的差别只在于是「没有固定计时器」
-> （网页端看起来是）还是「有计时器但绑定在会话上、时长约 250 s」（PenCG 实测看起来是）。
-> **网页端 258 s 时毫无异常这个事实，本身也可能只是网页端的会话在那之前已经被重建过**——
-> 这一点我没有网页端的 `wsOpen` 时间戳，无法判断，标为**待现场确认**。
-> 详见 `docs/BUGFIX-bug1-active-renew.md`。
+### 4.2 已经实测排除的 11 个假设
 
-### 真正的差异：SDP 与 getStats
+方法：全部在**官方网页端**上用 Playwright + `addInitScript` 改写报文做（不改 PenCG 的
+native 代码），把网页端改成「PenCG 的样子」，看它是否也复现 ~250 s 静默停推。
 
-网页端一次完整的 SDP + 20×5 s `getStats()` 采样（2026-11-13）：
+| # | 假设 | 实验手段 | 结果 |
+|---|---|---|---|
+| 1 | 没响应 `dataChannelReady` 被踢 | 网页端本来就不响应（offer 无 SCTP m 段） | 连播 10 min ❌ |
+| 2 | WS 不心跳被踢 | 网页端本来只发 1 次 `0 <ts>` | 连播 10 min ❌ |
+| 3 | 服务端 300 s kickout | 观察 258/300/360 s | 网页端无异常 ❌ |
+| 4 | 前端 600 s 无操作超时 | `gameCutTime.total=1000*(480+120)=600 s` | 网页端 602 s 断（对上了），PenCG 250 s 差 2.4 倍 ❌ |
+| 5 | **会话期不发 ICE consent** | 给 native 补 2.5 s 周期 consent（`cm_ice_consent_tick`） | `resp` 从 #1 涨到 #109、网关全回，**仍在 4m19s 冻结** ❌ |
+| 6 | **answer 不回 `a=extmap`/`a=rtcp-fb`** | `MUNGE=flags`：从 Chrome answer 删掉 5 条 extmap + 19 条 rtcp-fb | 连播 **481 s**（`ct=477.883`）❌ |
+| 7 | **answer 是 `a=recvonly`** | `MUNGE=full`：再把 `sendrecv` 全改 `recvonly` | 跑到 **354 s** 仍正常 ❌ |
+| 8 | **上行 RTCP（RR/NACK/PLI）惹到网关** | 给 native 加 `noRtcp` 开关全关（consent 保留） | `PLI sent`=0、`RR sent`=0，**仍在 247 s 冻结** ❌ |
+| 9 | 游玩期不轮询 HTTP 被判挂机 | 记录网页端所有 `/api/` 请求 | 31 个请求全在开头 16 s，之后零请求，`users/@me/status` 从未出现 ❌ |
+| 10 | **auth 后不发任何 input 帧** | 丢弃全部 `op:"input"`（7 条开播帧 + 心跳） | 连播 **481 s**，`ws-close` 为 0 ❌ |
+| 11 | **auth 包内容不同** | `MUNGE=all`：把网页端 auth 改写成完全等于 PenCG 的形态 | 连播 **284 s**，258 s 节点 `ct=254.787` 完全正常 ❌ |
 
-**服务端 offer**（`a=ice-lite`，2 个 m 段，无 SCTP）：
-- 每个视频 PT（98 H264 / 96 VP8 / 107 H265）都带**全套** `ccm fir` / `nack` / `nack pli` /
-  `goog-remb` / `rrtr` / `transport-cc`
-- extmap：audio `2`(audio-level) `9`(transport-cc)；video `11`(transport-cc)
-  `12`(playout-delay) `13`(generic-frame-descriptor)
-- 每个 m 段都是 `a=sendrecv`
+第 11 条改写后的 auth（token 打码），网关接受并回了 `op:offer`：
 
-**Chrome answer**：`a=sendrecv`，**逐段回显全部 extmap 与 rtcp-fb**。
-
-**getStats（20×5 s）**：
-
-| 指标 | 观测 |
-|---|---|
-| `candidate-pair.consentRequestsSent` | **5 → 40，单调递增（≈每 2.5 s 一次）** |
-| `candidate-pair.responsesReceived` | 6 → 41（网关每次都回） |
-| `requestsReceived` / `responsesSent` | 恒 1 / 1 |
-| `inbound-rtp.pliCount` / `nackCount` | **全程 0** |
-| `remote-inbound-rtp` | 全程缺失（网关从不发 RTCP RR） |
-
-**两个关键结论**：
-
-1. 网关**不靠 RTCP 反馈判活**（浏览器一次 PLI/NACK 都不发也能收 10 分钟）。
-   → 补 RR / NACK 是补协议义务，但别指望它治 bug1。这一点 `BUGFIX-bug1-rtcp-rr.md`
-   的自我判断是对的。
-2. **唯一的周期双向报文是 ICE consent（STUN Binding，~2.5 s 一次）。**
-
-### PenCG 的三处缺口（已核对源码）
-
-| # | 缺口 | 证据 |
-|---|---|---|
-| 1 | **会话期不发 STUN** | `cm_ice.c:1-14` 头注释自述「之后立刻停发 STUN、转 DTLS」；`grep -rn "consent\|refresh" cm_ice.c` → 0 命中 |
-| 2 | **answer 不回 extmap / rtcp-fb** | `src/services/media.js` 里 `grep -c extmap` = 0；`buildAnswer()` 只回 `a=recvonly` + rtpmap/fmtp；native 侧 `grep -rn "transport-cc\|twcc"` → 0 命中 |
-| 3 | **answer 是 `recvonly` 不是 `sendrecv`** | `media.js:141` 每段 `a=recvonly`；网页端是 `sendrecv` |
-
-### 修复建议（按性价比，可独立验证）
-
-**① 会话期 ICE consent（先做这个，改动最小）**
-
-`cm_ice.c` 里**已经有**完整能力：
-
-- `ice_send_binding(cm_sess *s, const char *key, int with_change_req, int as_controlled)`
-  —— 构造 USERNAME / PRIORITY / ICE-CONTROLLING / USE-CANDIDATE / MESSAGE-INTEGRITY /
-  FINGERPRINT，发到 `s->cfg.remote_ip:remote_port`
-- `cm_stun_handle()` —— 收到网关的 Binding Request 能正确回 `0x0101`
-
-缺的只是一个**会话期定时器**：
-
-```c
-/* 在 cm_ice_run() 成功后启动；会话结束时取消 */
-static void ice_consent_tick(void *arg) {
-    cm_sess *s = arg;
-    /* key = answer 里公布的 ice-pwd；as_controlled=0 保持 controlling 角色 */
-    ice_send_binding(s, s->cfg.our_pwd[0] ? s->cfg.our_pwd : s->cfg.pwd,
-                     /*with_change_req=*/0, /*as_controlled=*/0);
-    /* 2500 ms 后再次 */
-    cm_timer_after(s, 2500, ice_consent_tick, s);
-}
+```json
+{"id":"1794595903308","op":"auth","data":{
+  "user_id":"…","token":"<token>","game_code":"mrfzzmd",
+  "w":1280,"h":720,"quality":"low","codecs":["h264"],"platform":1}}
 ```
 
-注意：
+**就是说：PenCG 的 auth 包（缺 `fps`、缺 `apk_decoder`、platform 4→1、codecs 15→1）
+网关完全接受，而且不因此停推。**
 
-- key 用 **`ice-pwd`**（answer 公布的那个），不是网关的密码；
-- `as_controlled` 保持 0，除非网关回过 487 Role Conflict；
-- 响应 `0x0101` 媒体期可以丢弃，**但日志里要能看见它在回**（`rx_kept++`）——
-  这是验证 patch 生效的最快信号。
+### 4.3 上一版的三条修复建议，现在的状态
 
-如果 4m18s 消失，bug1 就定案了。（**2026-11-14 更正**：按新判据应读作「如果 `wsOpen` + 250s 之后画面还在动」，见 `docs/BUGFIX-bug1-active-renew.md`）
+| 上一版建议 | 现状 |
+|---|---|
+| ① 会话期 ICE consent | **已实现**（`cm_ice_consent_tick` + `ice_consent_count`/`rx_consent_resp` 统计 + stat JSON 的 `consentSent`/`consentResp` 字段）。实测网关正常回，但**不治 bug1**。留着——它是 RFC 8445 §11 的正当行为，去掉反而更不对。 |
+| ② answer 回显 `a=extmap`/`a=rtcp-fb` | **已实现**（`media.js` 的 `parseSdp` 认 `a=extmap:`/`a=rtcp-fb:`，`buildAnswer` 回显；但**显式跳过 `transport-wide-cc`/`transport-cc`**，因为 native 还没有 TWCC，声明了不发会让网关的拥塞控制以为「一个包都没收到」，比不声明更糟）。**不治 bug1**。 |
+| ③ `recvonly` → `sendrecv` | **已实现**。**不治 bug1**。 |
 
-**② answer 回显 `a=extmap` / `a=rtcp-fb`**
+### 4.4 一条关键的附带发现（对定位有用）
 
-`buildAnswer()` 里按 m 段处理时，把 offer 里该段的 `a=extmap:*` 与 `a=rtcp-fb:*` 原样搬过去；
-native 侧按 extmap id 解析 RTP 头扩展、每 100 ms 发一条 TWCC（RTCP **PT=205 FMT=15**，
-PenCG 现有 NACK 是 PT=205 FMT=1，可以复用同一套 RTCP 打包代码）。
+冻结期间我们发的 ICE consent **仍然被网关正常回应**：
 
-短时间做不完 TWCC 的话，**至少先把 extmap/rtcp-fb 回显上** —— 让网关看到「这个对端声明了
-transport-cc」，比完全静默好。
+```
+[cgmedia] #1 ICE consent sent (#97, every 2500ms) resp=98  rxStun=108
+（此时 RTP 已停了 12 s）
+```
 
-**③ `a=recvonly` → `a=sendrecv`**
+**网关没有丢弃这个会话**——UDP 五元组是活的、我们的报文它照收照回。它是**单独停掉了
+RTP 的推送**。这排除了「会话被回收 / NAT 超时 / 端口失效」一大类解释。
 
-网页端就是 sendrecv；`recvonly` 可能让网关不把你当活跃订阅者。
+### 4.5 剩下的候选方向（按性价比排序）
+
+> 2026-11-14 03:40 更新：这一节按设备侧新取证重排了。两条关键新事实：
+> **①第一个媒体包 `seq` 已经是 31394（不是 0）**，实测包率 ≈80 pkt/s，
+> 第一次回绕要 (65536−31394)/80 ≈ **427 s**，与 230~259 s 的冻结差 1.7 倍；
+> **②SRTP 认证从未失败过一次**（`grep 'DUMP fail'`=0、`SRTP BRUTE`=0），
+> 若 ROC 错了认证会成片失败。所以原来的第 1 名降到第 2 名。
+
+1. **DTLS 层的差别（现在是第一优先）。** 设备侧实测值已取到，三次会话完全一致：
+   `DTLS OK version=DTLSv1.2 cipher=ECDHE-RSA-CHACHA20-POLY1305 srtp=SRTP_AES128_CM_SHA1_80`。
+   对应代码：`cm_dtls.c:352 SSL_CTX_set_tlsext_use_srtp(ctx, "SRTP_AES128_CM_SHA1_80")`
+   （**单一 profile**，Chrome 是 `SRTP_AEAD_AES_128_GCM:SRTP_AES128_CM_SHA1_80`，GCM 在前）、
+   `:350 SSL_CTX_new(DTLS_client_method())`、`:355 SSL_VERIFY_NONE`、
+   `:357 SSL_OP_NO_TICKET`；**没有设 min/max_proto、cipher_list、extended_master_secret，
+   全走 OpenSSL 默认**。网关最终选中同一套 SRTP profile，但 **ClientHello 本身不一样**
+   ——若网关按指纹风控，入口在这里。
+   验证：抓两边 ClientHello 逐字段 diff（cipher suite 顺序、extension 顺序与内容、use_srtp 列表）。
+2. **SRTP 的 ROC / 重放窗口（基本排除，可花 10 分钟坐实）。**
+   真机日志里前 8 个包 `roc=0 seq=31394..31401`，加上实测 80 pkt/s，
+   第一次回绕在 ~427 s，不在冻结窗口内；且认证零失败。
+   要彻底坐实：`cm_srtp.c:369` 的 dump 条件现在是
+   `if (srtp_auth_fail + rtp_rx < CM_SRTP_DUMP_MAX)`（`CM_SRTP_DUMP_MAX=8`，
+   **只打开头 8 个包就永久静默**），改成「每 500 包一条」或「seq 接近 0/65535 时打」，
+   跑一轮看冻结时的 `seq` 离回绕有多远。
+3. **网关按 `pkg`/`game_code`/宿主机分档。** 已有两组对照：
+   自建客户端 `container=t-04 / host=ahnfs10015 / encoder=high,None` → 230 s 冻结；
+   网页端 `container=t-18 / host=ahnfs10007 / encoder=high,None` → 481 s 未冻结。
+   `encoder` 两边一样，判据不在它身上；但 `container`/`host` 不同，
+   **每轮都记下来**，凑够样本才能判断是「某些宿主机有问题」还是巧合。
+4. **UDP 接收缓冲区**（较弱）。冻结期间 `rxStun` 同步增长说明 socket 仍在正常读取，
+   如果是 rcvbuf 满导致内核丢弃，`rxStun` 也会停。所以基本可以排除。
+
+### 4.6 工程上的建议
+
+**在根因定位之前，用主动换会话兜底。** 每 ~230 s 重新 `POST tickets` + 重连，
+用户侧表现是「画面卡 1~2 秒」，比「4 分钟后彻底冻结」好得多。
+
+> ⚠️ 注意：`play.vue` 里 `ACTIVE_RENEW_MS` 已被改成 **0（默认关闭）**，理由是
+> 「换会话必然换机位」的副作用（见 `docs/BUGFIX-bug1-active-renew.md`）。
+> 现在的第一道防线是 **STALLGUARD**（`STALL_RX_MS = 8000`，rx 8 s 不涨就判停）+
+> 三级自愈（补关键帧 → 复用网关重连 → 重新申请机位）。真机实测 L2 能在 11 秒内恢复
+> （`stall recovered: rx=79 已恢复（第 2 级自愈成功，停滞 4s）`）。
 
 ---
+
 
 ## 五、其它修正（对 PenCG 有用）
 
@@ -240,18 +243,49 @@ transport-cc」，比完全静默好。
 
 ---
 
-## 六、还需要的实测（如果 ①②③ 都不成立）
+## 六、还需要的实测（2026-11-14 03:00 重写）
 
-按顺序：
+上一版这里写的是「按顺序只加 ①②③，看 4m18s 还在不在」。**①②③ 已经全部做完，
+全部无效**（见第四节）。所以现在的顺序是：
 
-1. 只加 ①，跑满 10 分钟，看 4m18s 是否还在。
-   （**2026-11-14 更正**：按新判据应读作「看每个 WS 会话能否越过 ≈250 s」，
-   即 `wsOpen` 之后 250 s 处是否停推；见 `docs/BUGFIX-bug1-active-renew.md`。）
-2. 若还在 → 加 ②，再跑一次。
-3. 若还在 → 加 ③。
-4. 若还都在 → 那就是服务端按「客户端 IP + 会话时长」做的策略，需要对比
-   「PenCG 的 DTLS 指纹 / answer 的 sctp-port / `a=mid` / `a=msid` 是否缺失」等更细的差异。
-   目前网页端 answer 的完整文本已存档在 `docs/断流与保活根因分析.md` 与本报告 2.1 节，
-   可以逐行对比。
+1. **抓两边 DTLS ClientHello 逐字段 diff（第一优先）。** 网页端用
+   `chrome://webrtc-internals` 或 Playwright hook `RTCPeerConnection` 导出；PenCG 侧
+   在 `cm_dtls.c` 的发送路径 dump（或用 `SSL_CTX_set_msg_callback` 已有的 `msg_cb`，
+   它能看到每个握手报文）。重点比：`supported_versions`、`cipher_suites` 顺序、
+   `use_srtp` 的 profiles（自建只给 `SRTP_AES128_CM_SHA1_80`，Chrome 是 GCM 在前）、
+   `extended_master_secret`、`supported_groups`、证书 CN/有效期。
+2. **（可选，10 分钟）坐实 ROC 排除。** 改 `cm_srtp.c:369` 的 dump 条件为周期性，
+   跑到冻结看 `seq`。按现有数据（起始 31394、80 pkt/s）预计冻结时 `seq` 在
+   31394+80*250≈51400，离 65536 还远，预期不跨 0。
+3. **每局记录 `op:result` 的 `{"container","host"}` 与冻结时刻。** 跑 5~10 局，
+   看是否某些 host/容器必冻（现有样本：`t-04/ahnfs10015` 冻、`t-18/ahnfs10007` 不冻）。
+   注意设备日志里 `op:result` 是 offset 加密的，且 **offset 不一定是 62**
+   （实测遇到过 55）——对 0..255 暴力搜 `b'"op"'` 最稳。
+4. 若以上都排除 → 那基本可以认定是网关按**账号/容器/IP** 做的时长策略，
+   PenCG 侧无法规避，只能靠 STALLGUARD 自愈兜底。
 
-如果需要，我这边可以再抓一次 PenCG 的 answer 与网页端 answer 做逐行 diff。
+### 如果还需要我做什么
+
+- 我可以再抓一次**网页端 answer 的完整文本**与你这边 answer 做逐行 diff（已有存档，
+  `docs/断流与保活根因分析.md` §2 + `work/samples/` 里的 `server-offer.sdp`/`client-answer.sdp`）。
+- 我也可以帮你把网页端的 `RTCPeerConnection` 完整配置（`getConfiguration()`、
+  `sctp`、`iceTransportPolicy`、bundle 策略）导出来。
+- **但报文层的差异已经查完了**，再做逐字节 diff 的边际收益很低。
+
+### 一条方法上的提醒
+
+想验证「X 是原因」，**去掉 X 看是否复现**，比「加上 X 看是否消失」可靠。
+因为「加上 X 之后不断了」可能只是 X 顺手带出了别的效果（比如重连换了新机位）。
+本轮三次假结论都是这么来的——另外，**跑实验前必须确认没有第二个客户端在用同一账号**，
+否则每轮都会被 `games_playing_status` 顶掉。
+
+---
+
+## 七、本轮（2026-11-14）163CG-API 侧新增的东西
+
+| 项 | 位置 |
+|---|---|
+| 断流与保活根因分析（11 个假设的完整实测记录） | `docs/断流与保活根因分析.md`（已重写） |
+| 实验工具 7 个 | `work/get_ticket.py`、`longplay{,2}.js`、`sdp_probe.js`、`pencg_shape.js`、`no_input_probe2.js`、`poll_probe.js`、`pencg_auth_probe.js` |
+| 两条「会话结束」路径的完整取证 | `docs/断流与保活根因分析.md` §4（含 `op:"close"` 的 6 行真实时刻表） |
+| `errcode` 速查表 | 同上（403 / 1213 / 1811 / 1288 / 0+normal） |
