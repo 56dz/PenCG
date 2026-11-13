@@ -243,7 +243,7 @@ export const DEV_LOGOUT     = null; // 非 null 会自动登出
 
 上面是**应该的样子**。**提交前必须确认三个都是 `null`**（`grep -n "export const DEV_" PenCG/src/dev-autostart.js`）。
 
-这曾是一个 P0 级审查问题（`docs/REVIEW-report.md` 的 S1）。**本文写作时该项正处于违规状态**：`DEV_AUTOSTART = { page: 'login', delay: 2500, params: {} }`，是取证留下的开关，打包前必须清掉。详见 `docs/MARKET-COMPLIANCE.md` §3.2。
+这曾是一个 P0 级审查问题（`docs/REVIEW-report.md` 的 S1）。**2026-11-14 已修复**：1.2.0 发布包里 `dev-autostart-eed06a3a.js.bin` 只有 **139 字节**（三个 `null` 字面量的 AST 骨架），且 `yssy` / 手机号 / 密码 / 测试游戏码全部 0 命中。详见 `docs/MARKET-COMPLIANCE.md` §3.2。
 
 **为什么这条这么危险**：如果它被写成 `{ page: 'play', ... }`，发布包一启动就会**自动进播放页并占用机位** —— 用户什么都没点，机位已经在计时扣费了。
 
@@ -579,7 +579,7 @@ AI 写完代码后，**逐条打勾**再提交。
 - [ ] 没有 `flex: 1` 简写
 - [ ] 没有 `<text>` 内容换行
 - [ ] 没有多类名选择器（`.a .b` / `.a.b`）
-- [ ] `dev-autostart.js` 三个开关都是 `null`（**写作时不符**：`DEV_AUTOSTART` 非 null）
+- [ ] `dev-autostart.js` 三个开关都是 `null`，且包内 `dev-autostart-*.js.bin` 只有 139 字节、不含凭据（1.2.0 已验证，每次打包重验）
 - [ ] 没有新增 shell / adb 调用
 
 ### 7.2 正确性

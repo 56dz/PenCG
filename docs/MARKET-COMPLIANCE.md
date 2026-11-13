@@ -173,7 +173,7 @@ var VIDEO = { x: 243, y: 0, w: 473, h: 266 };
 | R5 | 缺口登记只看 seq、不看所属 AU | **已修** | `grep -n "R5 修正" cm_rtp.c` |
 | R3 | SPS/PPS 注入与重排顺序 | **已修** | 无 `R3 修正` 标记，凭 `cm_rtp.c` 里「必须先重排、后注入」的注释判断 |
 | L1 | stat JSON 缺 NACK / relax 字段 | **已修** | `grep -n "nackRecovered" cm_media.c` |
-| S1 | `DEV_AUTOSTART` 非 null 会让生产包自动跳页 | **⛔ 当前为阻断项，见下方说明** |
+| S1 | `DEV_AUTOSTART` 非 null 会让生产包自动跳页 | **✅ 已修（2026-11-14，包内核验，见下方）** |
 | R4 | IDR hold 会被下一个 FU-A start 清掉 | **未修** |
 | P1-7 | `relax_until_ms`（饥饿放行时间戳）不存在 | **未修** |
 | L2 | `gap_drop` 三处内联、未抽公共函数 | **未修**（仅 `cm_rtp.c:453` 有定义） |
@@ -184,27 +184,38 @@ var VIDEO = { x: 243, y: 0, w: 473, h: 266 };
 
 未修的 6 条（R4 / P1-7 / L2 / L3 / L4 / L6）均**不阻塞上线**：R4 与 P1-7 属于丢包极端场景下的加固，L2 是重构、L3/L4 是健壮性、L6 是错误处理。但它们应当进入下一轮迭代，不应被遗忘。
 
-#### S1 当前是阻断项（写作时实测）
+#### S1：已于 2026-11-14 修复（包内核验通过）
 
-`PenCG/src/dev-autostart.js` 的三个开关在本文写作期间是：
+**修复前（历史快照，仅作记录）**：`DEV_AUTOSTART` 曾是 `{ page: 'login', delay: 2500, params: {} }`，是取证留下的开关。它非 `null` 意味着**发布包会自己跳到指定页面**，否则：
+- 用户打开应用会莫名其妙进入登录页；
+- 若指向 `play` 页会**直接占用机位**，等于免费消耗用户的机位资源。
+
+**当前状态（1.2.0 发布包实测）**：
 
 ```js
-export const DEV_AUTOSTART = { page: 'login', delay: 2500, params: {} };  // <-- 非 null！
+export const DEV_AUTOSTART = null;
 export const DEV_AUTOLOGIN = null;
 export const DEV_LOGOUT    = null;
 ```
 
-`DEV_AUTOSTART` 非 `null` 意味着**发布包会自己跳到指定页面**（这里是 `login`，2.5 秒后）。这是取证留下的开关，**必须在打包前改回 `null`**，否则：
-- 用户打开应用会莫名其妙进入登录页；
-- 若指向 `play` 页会**直接占用机位**，等于免费消耗用户的机位资源。
+不只看了源码，还核了**包内产物**：`8002026110200003.1_2_0.amr` 里的 `dev-autostart-eed06a3a.js.bin` 只有 **139 字节**（三个 `null` 字面量的 AST 骨架），且 `yssy` / 手机号 / 密码 / 测试游戏码全部 0 命中。
 
-**验收命令**（必须输出三行 `null`）：
+**验收命令**（源码必须输出三行 `null`）：
 
 ```
 grep -n "export const DEV_" PenCG/src/dev-autostart.js
 ```
 
-> 本文写作时此项未通过，已列入 §7 整改清单第 13 条。
+**验收命令（产物必须只有 139 字节、且不含凭据）**：
+
+```python
+import zipfile
+z = zipfile.ZipFile('8002026110200003.1_2_0.amr')
+n = [x for x in z.namelist() if 'dev-autostart' in x][0]
+d = z.read(n)
+print(len(d))                                   # 期望 139
+print([b for b in (b'yssy', b'mrzfzmd') if b in d])  # 期望 []
+```
 
 
 ### 3.3 去除冗余
@@ -387,12 +398,12 @@ $ unzip -l 8002026110200003.1_1_1.amr | grep -i "deploy\|adb"
 | 6 | diag 页入口可达性确认 | 规则 1/3 | 待确认 | 全仓无 UI 入口 |
 | 7 | 资源按需加载 | 规则 3 | **通过（2026-11-14 审计）** | 图片不进 JS bundle（`images/<md5>.png` 独立文件）、页面按页拆 `*.js.bin`；唯一待优化项 `fixWebpIcons` 串行探测已记入 §3.4「需真机验证」，不阻断提审 |
 | 8 | 未修 6 条审查项（R4/P1-7/L2/L3/L4/L6） | 规则 3 | **已修**（本轮补齐） | `grep -rn "REVIEW" src native` 逐条关闭 |
-| 9 | 机型探测代码 | 规则 4 | **已写，未真机验证** | `PenCG/src/services/device_profile.js` 存在；启动打 `[device] width=... source=...` |
-| 9b | X6 Pro 上确认 `[device]` 日志 | 规则 4 | **未做** | 日志出现 `source=env` 或 `source=fallback` 且值合理 |
+| 9 | 机型探测代码 | 规则 4 | **已写，已真机验证（结论为否定，见 §4.2）** | `PenCG/src/services/device_profile.js` 存在；启动打 `[device] width=... source=...` |
+| 9b | X6 Pro 上确认 `[device]` 日志 | 规则 4 | **✅ 已做（2026-11-14）** | 实测 `width=960 height=266 source=fallback raw=800x480 envModel=HaaS UI`，X6 零回归 |
 | 10 | X7 Pro 冒烟测试 | 规则 4 | **未做（零测试）** | 按 `docs/DEVICE-MATRIX.md` 记录 |
 | 11 | native 进程调用口径确认 | 规则 5 | 待确认 | 审核方书面答复 |
 | 12 | 三份新文档 + README 索引 | 规则 6 | **已完成** | 文件存在、README 有小节 |
-| 13 | **`DEV_AUTOSTART` 改回 `null`** | 规则 3（不测试直接上传） | **⛔ 阻断，未完成** | `grep "export const DEV_"` 三行全 null |
+| 13 | **`DEV_AUTOSTART` 改回 `null`** | 规则 3（不测试直接上传） | **✅ 已完成（2026-11-14）** | 源码三行全 null + 包内 `.js.bin` 仅 139 字节、无凭据 |
 
 ---
 
@@ -402,7 +413,7 @@ $ unzip -l 8002026110200003.1_1_1.amr | grep -i "deploy\|adb"
 
 ### 8.1 构建
 
-- [ ] `PenCG/package.json` 的 `version` 已递增（当前 `1.1.1`），产物名与版本一致
+- [ ] `PenCG/package.json` 的 `version` 已递增（当前 `1.2.0`），产物名与版本一致
 - [ ] `npm run build` 输出 `打包成功`，无新增 warning（已知 warning 见 `docs/DEV.md`）
 - [ ] native 侧：`powershell -File native/build.ps1` 退出码 0
 - [ ] **`.so` 是否真的更新过，不能看 md5 / 体积判断** —— 装机时 `.so` 会被改名并追加 section，体积会从约 80 KB 涨到约 198 KB。判断依据见 `docs/DEV.md`
@@ -410,7 +421,7 @@ $ unzip -l 8002026110200003.1_1_1.amr | grep -i "deploy\|adb"
 
 ### 8.2 代码
 
-- [ ] `PenCG/src/dev-autostart.js` 三个开关（`DEV_AUTOSTART` / `DEV_AUTOLOGIN` / `DEV_LOGOUT`）**全部为 `null`** —— **本文写作时此项未通过，`DEV_AUTOSTART` 仍是 `{ page: 'login', delay: 2500 }`**
+- [ ] `PenCG/src/dev-autostart.js` 三个开关（`DEV_AUTOSTART` / `DEV_AUTOLOGIN` / `DEV_LOGOUT`）**全部为 `null`** —— 1.2.0 发布时已验证通过（源码三行 null + 包内 `.js.bin` 139 字节、无凭据）；此处仍是勾选项，每次打包都要重验
 - [ ] `grep -rn "font-size:[^;]*px" src` = 0
 - [ ] `grep -rn "[0-9]\(em\|rem\)\b" src --include=*.vue --include=*.less` = 0
 - [ ] 新增代码没有引入 `console.warn` / `console.log`（只有 `console.error` 落盘，见 `docs/VERIFY-playbook.md` §0）
