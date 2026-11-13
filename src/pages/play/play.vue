@@ -2503,41 +2503,41 @@ export default {
 
 /* ---------- 左栏 243x266 ---------- */
 .p2-left {
-  width: 243px;
-  height: 266px;
+  width: 25.3125vw;
+  height: 100vh;
   flex-direction: column;
-  padding-left: 12px;
-  padding-right: 12px;
-  padding-top: 8px;
-  padding-bottom: 2px;
+  padding-left: 1.25vw;
+  padding-right: 1.25vw;
+  padding-top: 3.0076vh;
+  padding-bottom: 0.7519vh;
   background-color: @nav-background;
 }
 
 /* 品牌图标 + 游戏名两行（名字由 JS 截断成 nameL1/nameL2，text 不许自动换行） */
 .p2-lhead {
-  height: 36px;
+  height: 13.5339vh;
   flex-direction: row;
   align-items: center;
 }
 
 .p2-logo {
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
+  width: 2.7084vw;
+  height: 9.7745vh;
+  border-radius: 0.625vw;
   background-color: transparent;
 }
 
 .p2-namebox {
-  width: 181px;
-  height: 34px;
+  width: 18.8542vw;
+  height: 12.782vh;
   flex-direction: column;
   justify-content: center;
-  margin-left: 8px;
+  margin-left: 0.8334vw;
   overflow: hidden;
 }
 
 .p2-name {
-  height: 17px;
+  height: 6.391vh;
   font-size: 1.3542vw;
   color: @text-color-strong;
   font-weight: 700;
@@ -2545,11 +2545,11 @@ export default {
 
 /* phase · ws · ice 调试条 */
 .p2-lstrip {
-  height: 14px;
-  margin-top: 6px;
-  padding-left: 6px;
-  padding-right: 6px;
-  border-radius: 4px;
+  height: 5.2632vh;
+  margin-top: 2.2557vh;
+  padding-left: 0.625vw;
+  padding-right: 0.625vw;
+  border-radius: 0.4167vw;
   justify-content: center;
   overflow: hidden;
   background-color: @background-color;
@@ -2562,22 +2562,22 @@ export default {
 
 /* 地区 + 当前画质 */
 .p2-lrow {
-  height: 18px;
+  height: 6.767vh;
   flex-direction: row;
   align-items: center;
-  margin-top: 6px;
+  margin-top: 2.2557vh;
 }
 
 .p2-chipgap {
-  margin-left: 6px;
+  margin-left: 0.625vw;
 }
 
 .p2-ltime {
-  height: 24px;
+  height: 9.0226vh;
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
-  margin-top: 8px;
+  margin-top: 3.0076vh;
 }
 
 .p2-ltime-label {
@@ -2596,31 +2596,31 @@ export default {
   flex-shrink: 1;
   flex-basis: 0px;
   flex-direction: column;
-  margin-top: 8px;
+  margin-top: 3.0076vh;
   overflow: hidden;
 }
 
 .p2-lmsg-main {
-  height: 16px;
+  height: 6.0151vh;
   font-size: 1.25vw;
   color: @text-color;
 }
 
 .p2-lmsg-main-err {
-  height: 16px;
+  height: 6.0151vh;
   font-size: 1.25vw;
   color: @danger;
 }
 
 .p2-lmsg-sub {
-  height: 14px;
+  height: 5.2632vh;
   font-size: 1.0417vw;
   color: @text-color-dim;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .p2-lstat {
-  height: 14px;
+  height: 5.2632vh;
   justify-content: center;
   overflow: hidden;
 }
@@ -2642,15 +2642,15 @@ export default {
 
 /* 未出画占位：必须不透明盖满 473x266，否则会透出上一页内容 */
 .mask {
-  width: 473px;
-  height: 266px;
+  width: 49.2709vw;
+  height: 100vh;
   background-color: #191F29;
   justify-content: center;
   align-items: center;
 }
 
 .p2-mask-box {
-  width: 420px;
+  width: 43.75vw;
   flex-direction: column;
   align-items: center;
 }
@@ -2663,32 +2663,32 @@ export default {
 }
 
 .p2-mask-dots {
-  height: 22px;
+  height: 8.2707vh;
   font-size: 1.7708vw;
   color: @accent;
   font-weight: 700;
   text-align: center;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .p2-mask-sub {
   font-size: 1.25vw;
   color: @text-color-dim;
   text-align: center;
-  margin-top: 4px;
+  margin-top: 1.5038vh;
 }
 
 .p2-mask-err {
   font-size: 1.25vw;
   color: @danger;
   text-align: center;
-  margin-top: 8px;
+  margin-top: 3.0076vh;
 }
 
 /* ---------- 右栏 244x266 ---------- */
 .p2-right {
-  width: 244px;
-  height: 266px;
+  width: 25.4167vw;
+  height: 100vh;
   flex-direction: column;
   background-color: @background-color;
 }
@@ -2698,19 +2698,19 @@ export default {
    标题 20 + 回显 26 + 四行 (46*4) + 行间 4*3 = 20+26+184+12 = 242，余 8 留白。
    横向预算：244 - padding 20 = 224；键 70*3 + 间距 6*2 = 222 ≤ 224。 */
 .p2-kb {
-  width: 244px;
-  height: 266px;
+  width: 25.4167vw;
+  height: 100vh;
   flex-direction: column;
-  padding-left: 10px;
-  padding-right: 10px;
-  padding-top: 8px;
-  padding-bottom: 8px;
+  padding-left: 1.0417vw;
+  padding-right: 1.0417vw;
+  padding-top: 3.0076vh;
+  padding-bottom: 3.0076vh;
   background-color: @background-color;
 }
 
 .p2-kbhead {
-  width: 224px;
-  height: 20px;
+  width: 23.3334vw;
+  height: 7.5188vh;
   flex-direction: row;
   justify-content: space-between;
   align-items: center;
@@ -2722,9 +2722,9 @@ export default {
 }
 
 .p2-kbsys {
-  width: 62px;
-  height: 18px;
-  border-radius: 9px;
+  width: 6.4584vw;
+  height: 6.767vh;
+  border-radius: 0.9375vw;
   border-width: 1px;
   border-style: solid;
   border-color: @card-border-color;
@@ -2738,10 +2738,10 @@ export default {
 }
 
 .p2-kbdisp {
-  width: 224px;
-  height: 26px;
-  margin-top: 2px;
-  border-radius: 6px;
+  width: 23.3334vw;
+  height: 9.7745vh;
+  margin-top: 0.7519vh;
+  border-radius: 0.625vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -2753,17 +2753,17 @@ export default {
 }
 
 .p2-kbrow {
-  width: 224px;
-  height: 46px;
+  width: 23.3334vw;
+  height: 17.2933vh;
   flex-direction: row;
   justify-content: space-between;
-  margin-top: 4px;
+  margin-top: 1.5038vh;
 }
 
 .p2-kbkey {
-  width: 70px;
-  height: 46px;
-  border-radius: 8px;
+  width: 7.2917vw;
+  height: 17.2933vh;
+  border-radius: 0.8334vw;
   background-color: @card-background-color;
   border-width: 1px;
   border-style: solid;
@@ -2797,33 +2797,33 @@ export default {
   flex-shrink: 1;
   flex-basis: 0px;
   flex-direction: column;
-  padding-left: 12px;
-  padding-right: 12px;
-  padding-top: 8px;
-  padding-bottom: 2px;
+  padding-left: 1.25vw;
+  padding-right: 1.25vw;
+  padding-top: 3.0076vh;
+  padding-bottom: 0.7519vh;
 }
 
 /* 画质四档 2x2：106*2 + 6 = 218 ≤ 219（244 减左右 padding 各 12，border-box） */
 .p2-qrow {
-  height: 44px;
+  height: 16.5414vh;
   flex-direction: row;
 }
 
 .p2-qrow2 {
-  margin-top: 8px;
+  margin-top: 3.0076vh;
 }
 
 .p2-qbtn {
-  width: 106px;
-  height: 44px;
-  border-radius: 8px;
+  width: 11.0417vw;
+  height: 16.5414vh;
+  border-radius: 0.8334vw;
   justify-content: center;
   align-items: center;
 }
 
 /* 只剩一档画质时铺满整行（244 - 12*2 = 220），视觉上是一个状态条而不是按钮组 */
 .p2-qbtn-solo {
-  width: 220px;
+  width: 22.9167vw;
   background-color: @card-background-color;
   border-width: 1px;
   border-style: solid;
@@ -2831,7 +2831,7 @@ export default {
 }
 
 .p2-gap {
-  margin-right: 6px;
+  margin-right: 0.625vw;
 }
 
 .p2-qbtn-lock {
@@ -2866,8 +2866,8 @@ export default {
 
 /* 画质提示恒定占位，避免出现/消失时按钮跳动 */
 .p2-rhint {
-  height: 16px;
-  margin-top: 6px;
+  height: 6.0151vh;
+  margin-top: 2.2557vh;
   justify-content: center;
 }
 
@@ -2879,20 +2879,20 @@ export default {
 /* 码率 / 帧率 / 丢包 / 分辨率：拆两行写，避免长文本在 220px 里被截 */
 .p2-rstat {
   flex-direction: column;
-  margin-top: 8px;
+  margin-top: 3.0076vh;
 }
 
 .p2-rstat-main {
-  height: 13px;
+  height: 4.8873vh;
   font-size: 1.0417vw;
   color: @accent-blue;
 }
 
 .p2-rstat-dim {
-  height: 12px;
+  height: 4.5113vh;
   font-size: 0.9375vw;
   color: @text-color-dim;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .p2-rfill {
@@ -2903,15 +2903,15 @@ export default {
 
 /* 三个操作按钮：69*3 + 6*2 = 219 ≤ 220 */
 .p2-racts {
-  height: 36px;
+  height: 13.5339vh;
   flex-direction: row;
-  margin-top: 6px;
+  margin-top: 2.2557vh;
 }
 
 .p2-act {
-  width: 69px;
-  height: 36px;
-  border-radius: 8px;
+  width: 7.1875vw;
+  height: 13.5339vh;
+  border-radius: 0.8334vw;
   justify-content: center;
   align-items: center;
   background-color: @ctrl-background;
@@ -2947,7 +2947,7 @@ export default {
 }
 
 .p2-rfoot {
-  height: 16px;
+  height: 6.0151vh;
   justify-content: center;
 }
 
@@ -2962,41 +2962,41 @@ export default {
   flex-shrink: 1;
   flex-basis: 0px;
   flex-direction: column;
-  padding-left: 16px;
-  padding-right: 16px;
-  padding-top: 10px;
-  padding-bottom: 10px;
+  padding-left: 1.6667vw;
+  padding-right: 1.6667vw;
+  padding-top: 3.7594vh;
+  padding-bottom: 3.7594vh;
   justify-content: center;
 }
 
 .p2-ctitle {
-  height: 22px;
+  height: 8.2707vh;
   font-size: 1.6667vw;
   color: @text-color-strong;
   font-weight: 700;
 }
 
 .p2-csub {
-  height: 16px;
+  height: 6.0151vh;
   font-size: 1.1458vw;
   color: @text-color-dim;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .p2-cplayed {
-  height: 18px;
+  height: 6.767vh;
   font-size: 1.25vw;
   color: @gold;
-  margin-top: 8px;
+  margin-top: 3.0076vh;
 }
 
 /* 底色由 p2-act-main / p2-act-danger 给，这里不写 background-color，否则会覆盖掉 */
 .p2-cbtn {
-  width: 212px;
-  height: 36px;
-  border-radius: 8px;
+  width: 22.0834vw;
+  height: 13.5339vh;
+  border-radius: 0.8334vw;
   justify-content: center;
   align-items: center;
-  margin-top: 10px;
+  margin-top: 3.7594vh;
 }
 </style>

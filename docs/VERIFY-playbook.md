@@ -109,6 +109,65 @@ $ADB shell "grep -a -c 'pencg' $L"
 > **路径更正（2026-11-14）**：`/userdata/applog/loli_s6_dev.txt` 实测是 **1 字节空文件**，
 > 真日志在 `DictPen_YYYYMMDD_HHMMSS.log`。早期版本本文档把两者说反了，已全部更正。
 
+### 0.5 ★ 两个「看着对但其实错了」的坑（都真实误判过，必读）
+
+#### 坑 1：`/tmp` 不是同一个目录 —— 差点得出「改动零影响」的错误结论
+
+同一条 `/tmp` 路径，在两种进程里指向**完全不同的位置**：
+
+| 进程 | `/tmp` 实际指向 | 验证 |
+| :-- | :-- | :-- |
+| MSYS bash（`ops_bash`） | `C:\Users\<user>\AppData\Local\Temp`（即 `%TEMP%`） | `cd /tmp && pwd` |
+| Windows python | `D:\tmp` | `python -c "import os;print(os.path.abspath('/tmp'))"` |
+
+后果：`miniapp_cli capture /tmp/a.png` 把图写在**设备上**的 `/tmp/a.png`，`adb pull` 到 bash 视角的
+`/tmp/a.png` 落在 `%TEMP%`；而 python 脚本读 `/tmp/a.png` 时读的是 `D:\tmp\a.png`（空目录）——
+**如果那个路径刚好有个旧文件，比对的就是两份过期截图，结果全是 0**，看起来像「改动完全没有副作用」。
+2026-11-14 布局参数化时真实发生过一次，几乎据此下了错误结论。
+
+**规则**：
+
+```bash
+# ❌ 不要
+python tools/pxdiff.py diff /tmp/base.png /tmp/new.png
+
+# ✅ 要传绝对 Windows 路径，且提前确认文件存在
+python tools/pxdiff.py diff D:\pcgpx\base.png D:\pcgpx\new.png
+```
+
+比对前先 `ls -l` 两个文件、确认字节数与时间戳都是本次的。`PenCG/tools/pxdiff.py` 头部也写死了这条。
+
+#### 坑 2：`miniapp_cli uninstall` 会连登录态一起删掉
+
+`uninstall` 不只卸载应用，它会**删掉整个数据目录**
+`/userdisk/miniapp/data/mini_app/pkg/8002026110200003/data/`，其中包括
+`sharedpreferences/preferences.json` —— `pencg_session`（token / userId / encrypt / offset）、
+`pencg_login_phone`、`pencg_history` **全部清空**。
+
+现场指纹（日志连续多行）：
+
+```
+8002026110200003/preferences.json doesn't exist.
+```
+
+之后进「我的」或 play 页会看到：
+
+```
+[pencg][W] [play] 未登录，引导到登录页
+```
+
+**规则：像素回归 / 视觉验证只能用 `install` 覆盖，永远不要 `uninstall`。**
+2026-11-14 布局参数化时用 `uninstall` 求「干净初态」，结果设备被退化成未登录，
+还得重新登录才能继续。
+
+`install` 覆盖的副作用是**旧画面可能残留**（banner 轮播、上一版组件状态），
+所以截图前必须等画面稳定：
+
+```bash
+# tools/shoot.sh 的做法：连续两次 capture 的 md5 相同才算稳定
+sh tools/shoot.sh D:\pcgpx\shot.png 6
+```
+
 ---
 
 ## 1. bug 1 —— 熄屏被判成退后台，游戏会话被拆（lifecycle）
@@ -226,6 +285,8 @@ $ADB shell "pidof miniapp"; $ADB shell "pidof aplay"
 - 只看到轮询那条、看不到 `onShow` 那条 → `closePageByName` 后 `onShow` 未被回调
   （遗留风险 3，建议结论补进 HANDOFF.md）。
 - 一条 `[pencg]` 都没有 → 回到 §0.4 第 ③ 步，**先确认通道**。
+- 截图比对结果「全是 0、改动毫无影响」→ **先怀疑 §0.5 坑 1**（`/tmp` 路径陷阱），
+  用 `ls -l` 核对两份图确实是本次抓的，再下「零影响」结论。
 
 ---
 

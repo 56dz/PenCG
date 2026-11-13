@@ -77,6 +77,11 @@ typedef struct {
     int hdr_msgs;
     int bad_hdr;
     int filtered_stun; /* 握手期间被 cm_udp_prepare_dtls 清掉的 STUN 包数 */
+
+    /* 指纹取证：把我们发出的 ClientHello 完整 hex dump 出来（只 dump 一次）。
+     * 网关若按 DTLS 指纹风控，比对对象就是这串字节 vs Chrome 的 ClientHello。 */
+    int ch_dumped;          /* 0=还没 dump 过 */
+    unsigned char ch_hex[1024]; /* ClientHello 前 512 字节的 hex 文本 */
 } cm_dtls_ctx;
 
 static void log_ssl_errors(const char *what, int id) {
@@ -140,12 +145,29 @@ static void msg_cb(int write_p, int version, int content_type, const void *buf, 
         }
     }
 
-    if (content_type == 22 /* handshake */ && buf && len >= 1) htype = ((const unsigned char *)buf)[0];
+    const unsigned char *buf_p = (const unsigned char *)buf;
+    if (content_type == 22 /* handshake */ && buf && len >= 1) htype = buf_p[0];
     (void)version;
     (void)ssl;
 
     if (write_p) {
         if (d) d->out_msgs++;
+        /* 指纹取证：把我们发出的 ClientHello（handshake type=1）整包 dump 成 hex。
+         * 每个 DTLS 报文可能被 OpenSSL 分片回调多次，这里只记录第一片 + 总长。 */
+        if (htype == 1 && d && !d->ch_dumped) {
+            size_t n = len < sizeof(d->ch_hex) / 2 ? len : sizeof(d->ch_hex) / 2;
+            static const char *hx = "0123456789abcdef";
+            for (size_t i = 0; i < n; i++) {
+                d->ch_hex[i * 2] = hx[(buf_p[i] >> 4) & 0xf];
+                d->ch_hex[i * 2 + 1] = hx[buf_p[i] & 0xf];
+            }
+            d->ch_hex[n * 2] = '\0';
+            d->ch_dumped = (int)len; /* 先记第一片长度 */
+            CM_LOGI("#%d DTLS ClientHello first-frag len=%d total-frag=%d hex=%s",
+                    s->id, (int)n, (int)len, d->ch_hex);
+        } else if (htype == 1 && d && d->ch_dumped) {
+            CM_LOGI("#%d DTLS ClientHello more-frag len=%d", s->id, (int)len);
+        }
         CM_LOGD("#%d DTLS >> %s len=%d type=%d", s->id, nm, (int)len, htype);
     } else {
         if (d) {

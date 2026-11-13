@@ -752,16 +752,16 @@ export default {
 .mb-head {
   flex-direction: row;
   align-items: center;
-  height: 32px;
-  padding-left: 12px;
-  padding-right: 12px;
+  height: 12.0301vh;
+  padding-left: 1.25vw;
+  padding-right: 1.25vw;
 }
 
 .mb-state {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  height: 16px;
+  height: 6.0151vh;
   overflow: hidden;
 }
 
@@ -771,9 +771,9 @@ export default {
 }
 
 .mb-refresh {
-  width: 82px;
-  height: 24px;
-  border-radius: 8px;
+  width: 8.5417vw;
+  height: 9.0226vh;
+  border-radius: 0.8334vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -790,14 +790,14 @@ export default {
   flex-basis: 0%;
   flex-direction: row;
   align-items: center;
-  padding-left: 24px;
-  padding-right: 24px;
+  padding-left: 2.5vw;
+  padding-right: 2.5vw;
 }
 
 .mb-guest-avatar {
-  width: 56px;
-  height: 56px;
-  border-radius: 28px;
+  width: 5.8334vw;
+  height: 21.0527vh;
+  border-radius: 2.9167vw;
   background-color: @card-background-color;
   justify-content: center;
   align-items: center;
@@ -813,7 +813,7 @@ export default {
   flex-shrink: 1;
   flex-basis: 0%;
   flex-direction: column;
-  margin-left: 14px;
+  margin-left: 1.4584vw;
 }
 
 .mb-guest-title {
@@ -824,19 +824,19 @@ export default {
 .mb-guest-desc {
   font-size: 1.25vw;
   color: @text-color-dim;
-  margin-top: 5px;
+  margin-top: 1.8797vh;
 }
 
 .mb-guest-err {
   font-size: 1.1458vw;
   color: @danger;
-  margin-top: 5px;
+  margin-top: 1.8797vh;
 }
 
 .mb-guest-btn {
-  width: 132px;
-  height: 40px;
-  border-radius: 10px;
+  width: 13.75vw;
+  height: 15.0376vh;
+  border-radius: 1.0417vw;
   background-color: @accent;
   justify-content: center;
   align-items: center;
@@ -860,30 +860,30 @@ export default {
 .mb-inner {
   width: 100%;
   flex-direction: column;
-  padding-left: 12px;
-  padding-right: 12px;
+  padding-left: 1.25vw;
+  padding-right: 1.25vw;
 }
 
 .mb-row {
   flex-direction: row;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .mb-ucard {
-  width: 236px;
-  height: 78px;
-  border-radius: 10px;
+  width: 24.5834vw;
+  height: 29.3234vh;
+  border-radius: 1.0417vw;
   background-color: @card-background-color;
   flex-direction: row;
   align-items: center;
-  padding-left: 10px;
-  margin-right: 6px;
+  padding-left: 1.0417vw;
+  margin-right: 0.625vw;
 }
 
 .mb-avatar {
-  width: 50px;
-  height: 50px;
-  border-radius: 25px;
+  width: 5.2084vw;
+  height: 18.797vh;
+  border-radius: 2.6042vw;
   background-color: @accent;
   justify-content: center;
   align-items: center;
@@ -899,7 +899,7 @@ export default {
   flex-shrink: 1;
   flex-basis: 0%;
   flex-direction: column;
-  margin-left: 10px;
+  margin-left: 1.0417vw;
 }
 
 .mb-uname-row {
@@ -908,47 +908,47 @@ export default {
 }
 
 .mb-unick-wrap {
-  height: 20px;
+  height: 7.5188vh;
   overflow: hidden;
 }
 
 .mb-unick {
   font-size: 1.5625vw;
   color: @text-color;
-  max-width: 130px;
+  max-width: 13.5417vw;
 }
 
 .mb-vip-badge {
   font-size: 1.0417vw;
   color: #FFD35C;
   background-color: #3A3320;
-  border-radius: 4px;
-  padding-left: 4px;
-  padding-right: 4px;
-  margin-left: 5px;
+  border-radius: 0.4167vw;
+  padding-left: 0.4167vw;
+  padding-right: 0.4167vw;
+  margin-left: 0.5209vw;
 }
 
 .mb-uuid {
   font-size: 1.1458vw;
   color: @text-color-dim;
-  margin-top: 4px;
+  margin-top: 1.5038vh;
 }
 
 .mb-uphone {
   font-size: 1.1458vw;
   color: @text-color-dim;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .mb-tcard {
-  width: 206px;
-  height: 78px;
-  border-radius: 10px;
+  width: 21.4584vw;
+  height: 29.3234vh;
+  border-radius: 1.0417vw;
   background-color: @card-background-color;
   flex-direction: column;
-  padding-left: 12px;
+  padding-left: 1.25vw;
   justify-content: center;
-  margin-right: 6px;
+  margin-right: 0.625vw;
 }
 
 .mb-tcard-label {
@@ -959,24 +959,24 @@ export default {
 .mb-tcard-value {
   font-size: 2.0833vw;
   color: @accent-blue;
-  margin-top: 3px;
+  margin-top: 1.1279vh;
 }
 
 .mb-tcard-sub {
   font-size: 1.0417vw;
   color: @text-color-dim;
-  margin-top: 3px;
+  margin-top: 1.1279vh;
 }
 
 .mb-vcard {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  height: 78px;
-  border-radius: 10px;
+  height: 29.3234vh;
+  border-radius: 1.0417vw;
   background-color: @card-background-color;
   flex-direction: column;
-  padding-left: 12px;
+  padding-left: 1.25vw;
   justify-content: center;
 }
 
@@ -988,20 +988,20 @@ export default {
 .mb-vcard-value {
   font-size: 1.5625vw;
   color: #FFD35C;
-  margin-top: 3px;
+  margin-top: 1.1279vh;
 }
 
 .mb-vcard-sub {
   font-size: 1.0417vw;
   color: @text-color-dim;
-  margin-top: 3px;
+  margin-top: 1.1279vh;
 }
 
 .mb-sec-head {
   flex-direction: row;
   align-items: center;
-  height: 22px;
-  margin-top: 3px;
+  height: 8.2707vh;
+  margin-top: 1.1279vh;
 }
 
 .mb-sec-title {
@@ -1015,13 +1015,13 @@ export default {
   flex-basis: 0%;
   font-size: 1.1458vw;
   color: @text-color-dim;
-  margin-left: 6px;
+  margin-left: 0.625vw;
 }
 
 .mb-clear-btn {
-  width: 46px;
-  height: 20px;
-  border-radius: 6px;
+  width: 4.7917vw;
+  height: 7.5188vh;
+  border-radius: 0.625vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -1034,7 +1034,7 @@ export default {
 
 .mb-his-scroll {
   width: 100%;
-  height: 80px;
+  height: 30.0752vh;
   overflow: hidden;
 }
 
@@ -1043,29 +1043,29 @@ export default {
 }
 
 .mb-hcard {
-  width: 84px;
-  height: 76px;
-  border-radius: 10px;
+  width: 8.75vw;
+  height: 28.5715vh;
+  border-radius: 1.0417vw;
   background-color: @card-background-color;
   flex-direction: column;
   align-items: center;
-  margin-right: 6px;
-  padding-top: 6px;
+  margin-right: 0.625vw;
+  padding-top: 2.2557vh;
 }
 
 .mb-hicon-wrap {
-  width: 44px;
-  height: 44px;
-  border-radius: 8px;
+  width: 4.5834vw;
+  height: 16.5414vh;
+  border-radius: 0.8334vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
 }
 
 .mb-hicon {
-  width: 44px;
-  height: 44px;
-  border-radius: 8px;
+  width: 4.5834vw;
+  height: 16.5414vh;
+  border-radius: 0.8334vw;
 }
 
 .mb-hicon-alt {
@@ -1074,14 +1074,14 @@ export default {
 }
 
 .mb-hname-wrap {
-  height: 14px;
+  height: 5.2632vh;
   overflow: hidden;
 }
 
 .mb-hname {
   font-size: 1.0417vw;
   color: @text-color;
-  margin-top: 4px;
+  margin-top: 1.5038vh;
   text-align: center;
 }
 
@@ -1092,8 +1092,8 @@ export default {
 }
 
 .mb-empty-his {
-  height: 30px;
-  border-radius: 10px;
+  height: 11.2782vh;
+  border-radius: 1.0417vw;
   background-color: @card-background-color;
   justify-content: center;
   align-items: center;
@@ -1106,20 +1106,20 @@ export default {
 
 .mb-fx-row {
   flex-direction: row;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .mb-fcard {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  height: 44px;
-  border-radius: 10px;
+  height: 16.5414vh;
+  border-radius: 1.0417vw;
   background-color: @card-background-color;
   flex-direction: column;
   justify-content: center;
-  padding-left: 10px;
-  margin-right: 6px;
+  padding-left: 1.0417vw;
+  margin-right: 0.625vw;
 }
 
 .mb-fname {
@@ -1130,28 +1130,28 @@ export default {
 .mb-fdesc {
   font-size: 1.0417vw;
   color: @text-color-dim;
-  margin-top: 3px;
-  max-width: 120px;
+  margin-top: 1.1279vh;
+  max-width: 12.5vw;
 }
 
 .mb-foot {
   flex-direction: column;
-  margin-top: 5px;
-  padding-bottom: 2px;
+  margin-top: 1.8797vh;
+  padding-bottom: 0.7519vh;
 }
 
 .mb-foot-text {
   font-size: 1.0417vw;
   color: @text-color-dim;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .mb-toast {
-  height: 22px;
-  margin-left: 12px;
-  margin-bottom: 6px;
-  width: 220px;
-  border-radius: 8px;
+  height: 8.2707vh;
+  margin-left: 1.25vw;
+  margin-bottom: 2.2557vh;
+  width: 22.9167vw;
+  border-radius: 0.8334vw;
   background-color: @card-background-color;
   justify-content: center;
   align-items: center;
@@ -1170,8 +1170,8 @@ export default {
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  padding-left: 24px;
-  padding-right: 24px;
+  padding-left: 2.5vw;
+  padding-right: 2.5vw;
 }
 
 .mb-modal-title {
@@ -1182,22 +1182,22 @@ export default {
 .mb-modal-desc {
   font-size: 1.1458vw;
   color: @text-color-dim;
-  margin-top: 8px;
+  margin-top: 3.0076vh;
 }
 
 .mb-modal-row {
   flex-direction: row;
-  margin-top: 14px;
+  margin-top: 5.2632vh;
 }
 
 .mb-modal-cancel {
-  width: 96px;
-  height: 34px;
-  border-radius: 8px;
+  width: 10vw;
+  height: 12.782vh;
+  border-radius: 0.8334vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
-  margin-right: 12px;
+  margin-right: 1.25vw;
 }
 
 .mb-modal-cancel-text {
@@ -1206,9 +1206,9 @@ export default {
 }
 
 .mb-modal-ok {
-  width: 96px;
-  height: 34px;
-  border-radius: 8px;
+  width: 10vw;
+  height: 12.782vh;
+  border-radius: 0.8334vw;
   background-color: @accent;
   justify-content: center;
   align-items: center;
@@ -1237,17 +1237,17 @@ export default {
 }
 
 .mb-spon-img {
-  width: 180px;
-  height: 180px;
-  border-radius: 8px;
+  width: 18.75vw;
+  height: 67.6692vh;
+  border-radius: 0.8334vw;
   background-color: #FFFFFF;
 }
 
 .mb-spon-side {
   flex-direction: column;
   justify-content: center;
-  margin-left: 20px;
-  width: 260px;
+  margin-left: 2.0834vw;
+  width: 27.0834vw;
 }
 
 .mb-spon-title {
@@ -1258,13 +1258,13 @@ export default {
 .mb-spon-desc {
   font-size: 1.1458vw;
   color: @text-color-dim;
-  margin-top: 8px;
+  margin-top: 3.0076vh;
 }
 
 .mb-spon-hint {
   font-size: 1.0417vw;
   color: @accent-blue;
-  margin-top: 10px;
+  margin-top: 3.7594vh;
 }
 
 /* 留言提示：比 hint 再退一档，但用金色（和赞助主题呼应），避免和蓝色链接混淆 */
@@ -1272,17 +1272,17 @@ export default {
   font-size: 1.0417vw;
   line-height: 1.5625vw;
   color: @gold;
-  margin-top: 6px;
+  margin-top: 2.2557vh;
 }
 
 .mb-spon-btn {
-  width: 96px;
-  height: 34px;
-  border-radius: 8px;
+  width: 10vw;
+  height: 12.782vh;
+  border-radius: 0.8334vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
-  margin-top: 16px;
+  margin-top: 6.0151vh;
 }
 
 .mb-spon-btn-text {

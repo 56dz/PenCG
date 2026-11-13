@@ -287,6 +287,20 @@ $ADB shell "mv \"$L\" \"$L.bak\" 2>/dev/null; sync"
 
 > ⚠️ MSYS Bash 下 `adb pull /tmp/x.png` 会被改写成 `C:\Users\...\Temp\x.png` 导致失败。用 PowerShell 调用（见 `docs/DEV.md`）。
 
+> ⛔ **禁止用 `miniapp_cli uninstall` 求「干净初态」**（2026-11-14 实测踩坑）。
+> 它会删掉整个 `/userdisk/miniapp/data/mini_app/pkg/8002026110200003/data/`，
+> 把 `sharedpreferences/preferences.json` 里的 `pencg_session`（token / userId / encrypt / offset）、
+> `pencg_login_phone`、`pencg_history` **全部清空**，设备当场退化成未登录：
+>
+> ```
+> 8002026110200003/preferences.json doesn't exist.
+> [pencg][W] [play] 未登录，引导到登录页
+> ```
+>
+> **回归只能用 `install` 覆盖**：`push amr → miniapp_cli install → hal-screen on → miniapp_cli start`。
+> 覆盖 install 的副作用是旧画面可能残留（banner 轮播、上一版组件状态），
+> 所以截图必须等画面稳定（连续两次 `capture` 的 md5 相同），见 `tools/shoot.sh`。
+
 #### 4.1.1 机型探测自检（每次装机后必做第一步）
 
 `src/app.js` 的 `onLaunch` 现在会无条件打一行设备档案日志。装机启动后先看这一行，它记录本机 env 到底给了什么：
@@ -463,19 +477,27 @@ $ADB pull "$L" ./shots/logs/x6pro-DictPen.log
 | 机型探测代码 | **已写；env 通道已真机验证，结论是「可读但无真值」** | `PenCG/src/services/device_profile.js` + `PenCG/src/app.js` 的 `bootProfile()` / `this.setViewPort(DESIGN_WIDTH)`。**X6 Pro 真机 2026-11-14 00:23 实测**：env 可读，但报 `deviceWidth=800 deviceHeight=480 deviceModel="HaaS UI" platform="Linux" apiVersion=1` —— HaaS 通用参考分辨率，与实际硬件无关，宽高比 1.67 被闸门丢弃 → `source=fallback`。**故 env 通道对「视口自适应」没有实用价值**，代码保留只为「万一某固件填真值」与「日志比 raw=null 更有信息量」 |
 | 探测失败兜底 | **已实现** | `FALLBACK_WIDTH = 960`；`pickDesignWidth()` 在 env 缺失/不可信时返回 `source='fallback'`，与改动前行为等价。node 侧 6 组用例已跑（env 缺失 / 960×266 / 936×280 / 960×280 / 480×960 面板 / 全 0），全部落在预期分支 |
 | X6 Pro 启动日志实测 | **已做（2026-11-14 00:23，1.2.0）** | 原文：`[pencg][I] [device] width=960 height=266 source=fallback model=- raw=800x480 envModel=HaaS UI platform=Linux api=1`。三条结论：①`$falcon.env` 确实可读（非 `raw=null`）；②报的是框架默认值 800×480，非视口也非面板；③闸门正确拦下并落回 960 |
-| X6 Pro 布局回归 | **已做，零回归** | 与改动前（1.1.1）逐像素比对：**diff>30 的像素数 0、最大差 0**。因为画布仍是 960，`base.less` 的 960 布局照旧成立 |
+| X6 Pro 布局回归（机型探测改动） | **已做，零回归** | 与改动前（1.1.1）逐像素比对：**diff>30 的像素数 0、最大差 0**。因为画布仍是 960，`base.less` 的 960 布局照旧成立 |
+| X6 Pro 布局回归（vw/vh 迁移） | **部分**：`base.less` 47 处已测，其余 531 处**待测** | 已测部分：ceil 取整后几何与基线完全重合（`.tab-on` 仍 `y49..79`、`.brand-logo` 仍 `y14..39`），`>30` = 387（全部为 `width`/`border-radius` 的亚像素抗锯齿，非几何位移），判据 `>30 ≤ 400` 通过。朴素四舍五入版曾达 `>30` = 1422 且 `.tab-on` 上移 1px，已回退 |
 | 探测时序风险 | **已排除** | 曾担心 `onLaunch` 早于 `JQuickFalconEnv::init()` 会导致 `raw=null`；真机日志出现 `raw=800x480` 证明 `onLaunch` 时 env 已就绪 |
 | X6 Pro 功能验证 | **已做**，但**不是按本清单的 33 项逐条执行** —— 历史上是针对具体 bug 做的验证（详见 `docs/BUGFIX-SUMMARY.md`）。本清单是**今后**的标准化流程，尚未完整走过一遍 | — |
 | X6 Pro 字号 vw 迁移后复测 | **未做**（167→175 处迁移后未逐页走查） | 本轮改动未触碰任何 `font-size`；`grep -rnE "font-size:[^;]*px" src/` 仍为 **0** |
 | X7 Pro 任意测试 | **未做** | — |
-| X7 Pro 布局弹性 | **未做，且有已知缺口** | 即使 env 正确报出 936，`src/styles/base.less` 的 `.page{width:960px}` / `.bar{width:76px}` / `.content{width:884px}` 与 `src/services/media.js:273`、`:495` 的 960×266 仍会把内容铺出 24px。**要在 X7 Pro 上真正可用，必须先把这几处参数化** |
+| X7 Pro 布局弹性（CSS 层） | **已参数化（2026-11-14）** | ✅ `base.less` + 8 个页面 + `play.vue` 全三批共 **619 处**布局 px → vw/vh（另有 16 处刻意跳过：`border-width`、`flex-basis:0`、`≤1px`）；ceil 4 位取整，见 `docs/VW-VH-GUIDE.md` §8.4。`.page{width:100vw;height:100vh}`、`.bar{width:7.9167vw}`、`.content{width:92.0834vw}` 随视口自适应 |
+| X7 Pro 播放页视频区 | **已知限制（设计如此，不是待办）** | `src/services/media.js:273`、`:495` 的 `{w:960,h:266}` 与 `play.vue:153` 的 `VIDEO={x:243,y:0,w:473,h:266}` **保持 px 不变** —— 它们是发给网关 `setRect`／SDP 协商用的**物理像素矩形**，与 KMS 平面坐标、视频编码尺寸绑定，不是 CSS。改成 vw 会让 native 收到 `100vw` 这种无意义字符串直接崩。X7 Pro 的 936 宽要在这里按 `device_profile.js` 的 `KNOWN_MODELS.x7p`（`width:936, height:280, panelXOffset:0, planeId:-1, swScale:1`）**手工填数值**，不是靠 CSS 自适应。**`.page` 的 `100vw/100vh` 只解决画布，不解决 KMS 矩形** |
 | 测试记录归档 | 部分（日志散落在 `.tmp/`） | — |
 
 > 结论（2026-11-14 更新，含 X6 Pro 真机实测）：**多机型自适应的「自动探测」这条路在本固件上实际不通** —— `$falcon.env` 读得到，但报的永远是框架默认值 800×480，不含硬件真值。这是真机得出的确定事实，不是推断。
 >
 > 因此 X7 Pro 的视口只能**手工指定**：改 `device_profile.js` 的 `FORCE_WIDTH = 936` 重新构建，或在真机上 `$falcon.env.custom.$set('pencgDesignWidth', 936)` 免构建覆盖（会持久化，验完清 0）。代码的 960 兜底保证「探测不到 = 行为与改动前完全一致」，X6 Pro 已实测零回归。
 >
-> **PenCG 仍然只能声称「在 X6 Pro 上工作」。** 要满足新规第 4 条，剩余工作按依赖顺序是：① 把 `base.less`（`.page` 960 / `.bar` 76 / `.content` 884）与 `media.js:273`/`:495` 的 960×266、`play.vue` 三栏 960 参数化 —— **这是当前唯一真正的阻塞项**，不解决它，画布改成 936 反而会溢出 24px；② 用 `FORCE_WIDTH` 或 `custom` 通道在 X6 Pro 上跑一遍 936 宽度的布局测试（伪机型验证，§3.2/§3.3）；③ 有 X7 Pro 实机后跑本清单并回填 §1.2（视口到底 936×280 还是 960×280、planeId、panelXOffset）；④ 字号迁移后的 X6 Pro 逐页复测。
+> **PenCG 仍然只能声称「在 X6 Pro 上工作」。** 要满足新规第 4 条，剩余工作按依赖顺序是：
+
+① ~~把 `base.less`（`.page` 960 / `.bar` 76 / `.content` 884）参数化~~ —— **2026-11-14 已完成**：样式层 578 处布局 px 已全部转 vw/vh（`docs/VW-VH-GUIDE.md` §8.4），**真机回归范围要看清**：目前只有 `base.less` 那 47 处在 X6 Pro 上实测过（几何与基线完全一致，`>30` = 387 属亚像素抗锯齿，判据 `>30 ≤ 400`）；**其余 531 处尚未装机截图比对**，等机位后按 `tools/shoot.sh` + `tools/pxdiff.py` 逐页跑。
+② **`media.js:273`/`:495` 的 960×266 与 `play.vue` 的 KMS 矩形** —— **这不是待办，是已知限制（设计如此）**。它们是发给网关 `setRect`／SDP 协商用的物理像素矩形，与 KMS 平面坐标、视频编码尺寸绑定，不能按 CSS 比例换算；改成 vw/vh 会让 native 收到无意义字符串而崩。**X7 Pro 要在这里手工按机型填数值**（参考 `device_profile.js` 的 `KNOWN_MODELS.x7p`：`width:936, height:280, panelXOffset:0, planeId:-1, swScale:1`）。注意 `.page` 的 `100vw/100vh` **只解决画布，不解决 KMS 矩形** —— 两者是两套坐标系统，不能混为一谈。
+③ 用 `FORCE_WIDTH = 936` 或 `env.custom.pencgDesignWidth = 936` 在 X6 Pro 上跑一遍 936 宽度的布局测试（伪机型验证，§3.2/§3.3）。
+④ 有 X7 Pro 实机后跑本清单并回填 §1.2（视口到底 936×280 还是 960×280、planeId、panelXOffset）。
+⑤ 字号迁移后的 X6 Pro 逐页复测。
 
 ---
 

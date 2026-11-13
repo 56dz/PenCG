@@ -19,6 +19,8 @@
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <time.h>
 
 #include "cm_session.h"
 
@@ -631,6 +633,11 @@ static void cm_gst_log_handler(void *category, int level, const char *file,
 }
 
 static void cm_gst_enable_debug(void) {
+    /* ★ 防爆盘：gstdebug.txt 开关（内容如 kmssink:7）会让 kmssink 的每帧
+     * TRACE/LOG 行全部落进 DictPen_*.log —— 真机实测一局把日志灌到 158MB
+     * （曾把 /userdata 的 56M 可用空间写满）。所以开关文件必须在 30 分钟后
+     * 自动失效：取证时先 touch gstdebug.txt 再起播，30 分钟后即使忘删也只会
+     * 灌半小时，不会刷一整夜。 */
     static int dbg_once = 0;
     if (dbg_once) return;
     dbg_once = 1;
@@ -638,13 +645,24 @@ static void cm_gst_enable_debug(void) {
         FILE *df = fopen("/userdisk/miniapp/data/gstdebug.txt", "r");
         if (df) {
             char lv[256];
-            if (fgets(lv, sizeof(lv), df)) {
+            int fresh = 0;
+            /* freshness check：文件 mtime 距今超过 30 分钟就当它不存在 */
+            struct stat st;
+            if (fstat(fileno(df), &st) == 0) {
+                long age_s = (long)(time(NULL) - st.st_mtime);
+                fresh = (age_s >= 0 && age_s <= 1800);
+                if (!fresh)
+                    CM_LOGW("gstdebug.txt is %ld min old, ignore (touch it to enable GST_DEBUG)", age_s / 60);
+            } else {
+                fresh = 1; /* 拿不到 mtime 就保持旧行为 */
+            }
+            if (fresh && fgets(lv, sizeof(lv), df)) {
                 size_t n = strlen(lv);
                 while (n && (lv[n - 1] == '\n' || lv[n - 1] == '\r')) lv[--n] = 0;
                 if (n) {
                     gst_debug_set_threshold_from_string(lv, 1);
                     gst_debug_add_log_function((void *)cm_gst_log_handler, NULL, NULL);
-                    CM_LOGW("GST_DEBUG enabled: %s", lv);
+                    CM_LOGW("GST_DEBUG enabled: %s (auto-expires 30min after file mtime)", lv);
                 }
             }
             fclose(df);

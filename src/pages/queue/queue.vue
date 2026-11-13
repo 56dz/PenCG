@@ -402,14 +402,14 @@ export default {
 @import "base.less";
 
 .bdg {
-  margin-left: 10px;
+  margin-left: 1.0417vw;
 }
 
 .qhead {
-  height: 34px;
+  height: 12.782vh;
   flex-direction: row;
   align-items: center;
-  padding-left: 16px;
+  padding-left: 1.6667vw;
 }
 
 .qtitle {
@@ -419,9 +419,9 @@ export default {
 }
 
 .qname-wrap {
-  height: 22px;
+  height: 8.2707vh;
   overflow: hidden;
-  padding-left: 16px;
+  padding-left: 1.6667vw;
 }
 
 .qname {
@@ -430,30 +430,30 @@ export default {
 }
 
 .cards {
-  height: 96px;
+  height: 36.0903vh;
   flex-direction: row;
-  padding-left: 16px;
-  padding-right: 16px;
-  margin-top: 10px;
+  padding-left: 1.6667vw;
+  padding-right: 1.6667vw;
+  margin-top: 3.7594vh;
 }
 
 .ccard {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0;
-  height: 96px;
+  height: 36.0903vh;
   flex-direction: column;
   justify-content: center;
-  padding-left: 14px;
-  padding-right: 14px;
+  padding-left: 1.4584vw;
+  padding-right: 1.4584vw;
 }
 
 .cwait {
-  margin-right: 10px;
+  margin-right: 1.0417vw;
 }
 
 .crank {
-  margin-right: 10px;
+  margin-right: 1.0417vw;
 }
 
 .cwait-label {
@@ -465,13 +465,13 @@ export default {
   font-size: 2.2917vw;
   color: @accent;
   font-weight: 700;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .cwait-sub {
   font-size: 1.0417vw;
   color: @text-color-dim;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .crank-label {
@@ -483,13 +483,13 @@ export default {
   font-size: 2.2917vw;
   color: @accent-blue;
   font-weight: 700;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .crank-sub {
   font-size: 1.0417vw;
   color: @text-color-dim;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .ctime-label {
@@ -501,20 +501,20 @@ export default {
   font-size: 2.2917vw;
   color: @text-color-strong;
   font-weight: 700;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .ctime-sub {
   font-size: 1.0417vw;
   color: @text-color-dim;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .tiprow {
-  height: 20px;
-  padding-left: 16px;
-  padding-right: 16px;
-  margin-top: 6px;
+  height: 7.5188vh;
+  padding-left: 1.6667vw;
+  padding-right: 1.6667vw;
+  margin-top: 2.2557vh;
   justify-content: center;
 }
 
@@ -534,25 +534,25 @@ export default {
 }
 
 .qacts {
-  height: 34px;
+  height: 12.782vh;
   flex-direction: row;
-  padding-left: 16px;
-  padding-right: 16px;
-  margin-top: 8px;
+  padding-left: 1.6667vw;
+  padding-right: 1.6667vw;
+  margin-top: 3.0076vh;
 }
 
 .a1 {
-  width: 170px;
-  margin-right: 10px;
+  width: 17.7084vw;
+  margin-right: 1.0417vw;
 }
 
 .a2 {
-  width: 170px;
-  margin-right: 10px;
+  width: 17.7084vw;
+  margin-right: 1.0417vw;
 }
 
 .a3 {
-  width: 150px;
+  width: 15.625vw;
 }
 
 .qbtn-danger {
@@ -566,9 +566,9 @@ export default {
 }
 
 .qfoot {
-  height: 16px;
+  height: 6.0151vh;
   justify-content: center;
-  margin-top: 4px;
+  margin-top: 1.5038vh;
 }
 
 .qfoot-text {

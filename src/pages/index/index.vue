@@ -770,32 +770,32 @@ export default {
 @import "base.less";
 
 .topbar {
-  height: 38px;
+  height: 14.2858vh;
   flex-direction: row;
   align-items: center;
-  padding-left: 12px;
-  padding-right: 10px;
+  padding-left: 1.25vw;
+  padding-right: 1.0417vw;
 }
 
 .topbar-title {
   font-size: 1.7708vw;
   color: @text-color;
-  width: 78px;
+  width: 8.125vw;
 }
 
 .search-entry {
-  height: 26px;
+  height: 9.7745vh;
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  border-radius: 13px;
+  border-radius: 1.3542vw;
   background-color: @card-background-color;
   /* 右上角用户名移除后搜索框独占整行。Weex 默认 flex-direction 是 column，
      不显式写 row 的话 justify-content 管的是纵向，文字仍会被横向居中。 */
   flex-direction: row;
   justify-content: flex-start;
   align-items: center;
-  padding-left: 12px;
+  padding-left: 1.25vw;
 }
 
 .search-hint {
@@ -808,34 +808,34 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  padding-left: 12px;
-  padding-right: 8px;
-  padding-bottom: 6px;
+  padding-left: 1.25vw;
+  padding-right: 0.8334vw;
+  padding-bottom: 2.2557vh;
 }
 
 .banner-row {
   flex-direction: row;
-  height: 78px;
+  height: 29.3234vh;
 }
 
 .banner {
-  width: 200px;
-  height: 76px;
-  margin-right: 6px;
-  border-radius: 8px;
+  width: 20.8334vw;
+  height: 28.5715vh;
+  margin-right: 0.625vw;
+  border-radius: 0.8334vw;
   overflow: hidden;
 }
 
 .banner-img {
-  width: 200px;
-  height: 76px;
+  width: 20.8334vw;
+  height: 28.5715vh;
 }
 
 .banner-mask {
-  height: 20px;
+  height: 7.5188vh;
   flex-direction: row;
   align-items: center;
-  padding-left: 6px;
+  padding-left: 0.625vw;
   background-color: rgba(0, 0, 0, 0.45);
 }
 
@@ -845,20 +845,20 @@ export default {
 }
 
 .notice-row {
-  height: 24px;
+  height: 9.0226vh;
   flex-direction: row;
   align-items: center;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .notice-tag {
   font-size: 1.1458vw;
   color: #ffffff;
   background-color: @accent;
-  border-radius: 3px;
-  padding-left: 4px;
-  padding-right: 4px;
-  margin-right: 6px;
+  border-radius: 0.3125vw;
+  padding-left: 0.4167vw;
+  padding-right: 0.4167vw;
+  margin-right: 0.625vw;
 }
 
 .notice-text {
@@ -872,11 +872,11 @@ export default {
 
 .mod {
   flex-direction: column;
-  margin-top: 4px;
+  margin-top: 1.5038vh;
 }
 
 .mod-head {
-  height: 20px;
+  height: 7.5188vh;
   flex-direction: row;
   align-items: center;
 }
@@ -899,7 +899,7 @@ export default {
 }
 
 .mod-scroll {
-  height: 102px;
+  height: 38.3459vh;
 }
 
 .mod-row {
@@ -910,34 +910,34 @@ export default {
    关键：<text> 在 Weex 里 height 常被内容行高顶掉，所以文字一律套一个
    定高 + overflow:hidden 的 div 容器（.gcard-line），由容器裁掉溢出。 */
 .gcard {
-  width: 74px;
-  height: 100px;
-  margin-right: 6px;
-  border-radius: 8px;
+  width: 7.7084vw;
+  height: 37.594vh;
+  margin-right: 0.625vw;
+  border-radius: 0.8334vw;
   background-color: @card-background-color;
   flex-direction: column;
   align-items: center;
-  padding-top: 4px;
+  padding-top: 1.5038vh;
   overflow: hidden;
 }
 
 .gcard-icon-wrap {
-  width: 56px;
-  height: 56px;
-  border-radius: 8px;
+  width: 5.8334vw;
+  height: 21.0527vh;
+  border-radius: 0.8334vw;
   overflow: hidden;
 }
 
 .gcard-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 8px;
+  width: 5.8334vw;
+  height: 21.0527vh;
+  border-radius: 0.8334vw;
 }
 
 .gcard-line {
-  width: 70px;
-  height: 13px;
-  margin-top: 3px;
+  width: 7.2917vw;
+  height: 4.8873vh;
+  margin-top: 1.1279vh;
   overflow: hidden;
   justify-content: center;
   align-items: center;
@@ -967,26 +967,26 @@ export default {
 }
 
 .lcard {
-  width: 278px;
-  height: 64px;
-  margin-right: 6px;
-  margin-bottom: 6px;
-  border-radius: 8px;
+  width: 28.9584vw;
+  height: 24.0602vh;
+  margin-right: 0.625vw;
+  margin-bottom: 2.2557vh;
+  border-radius: 0.8334vw;
   background-color: @card-background-color;
   flex-direction: row;
   align-items: center;
-  padding-left: 6px;
+  padding-left: 0.625vw;
 }
 
 .lcard-icon-wrap {
-  width: 56px;
-  height: 56px;
+  width: 5.8334vw;
+  height: 21.0527vh;
 }
 
 .lcard-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 8px;
+  width: 5.8334vw;
+  height: 21.0527vh;
+  border-radius: 0.8334vw;
 }
 
 .lcard-info {
@@ -994,8 +994,8 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  padding-left: 8px;
-  padding-right: 6px;
+  padding-left: 0.8334vw;
+  padding-right: 0.625vw;
 }
 
 .lcard-name {
@@ -1011,17 +1011,17 @@ export default {
 }
 
 .more-row {
-  height: 30px;
+  height: 11.2782vh;
   flex-direction: row;
   justify-content: center;
   align-items: center;
 }
 
 .more-btn {
-  height: 26px;
-  padding-left: 16px;
-  padding-right: 16px;
-  border-radius: 13px;
+  height: 9.7745vh;
+  padding-left: 1.6667vw;
+  padding-right: 1.6667vw;
+  border-radius: 1.3542vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -1047,11 +1047,11 @@ export default {
 }
 
 .retry-btn {
-  height: 26px;
-  margin-left: 10px;
-  padding-left: 14px;
-  padding-right: 14px;
-  border-radius: 13px;
+  height: 9.7745vh;
+  margin-left: 1.0417vw;
+  padding-left: 1.4584vw;
+  padding-right: 1.4584vw;
+  border-radius: 1.3542vw;
   background-color: @accent;
   justify-content: center;
   align-items: center;
@@ -1067,10 +1067,10 @@ export default {
    6 个 tab 原来的 h33+mt4 总高 276 会溢出 266 的栏（第 6 个被裁），改成 31+3 = 258。 */
 
 .ih-tab {
-  width: 64px;
-  height: 31px;
-  margin-top: 3px;
-  border-radius: 8px;
+  width: 6.6667vw;
+  height: 11.6542vh;
+  margin-top: 1.1279vh;
+  border-radius: 0.8334vw;
   justify-content: center;
   align-items: center;
   background-color: @background-color;
@@ -1112,61 +1112,61 @@ export default {
 
 /* 有旧帧时不再整页替换，错误以小条形式浮在内容顶部 */
 .ih-err {
-  height: 24px;
+  height: 9.0226vh;
   flex-direction: row;
   align-items: center;
   justify-content: center;
   background-color: @card-background-color;
-  border-radius: 6px;
-  margin-bottom: 4px;
+  border-radius: 0.625vw;
+  margin-bottom: 1.5038vh;
 }
 
 /* ---------------- banner 平分整行 ---------------- */
 .ih-banner {
-  height: 76px;
-  margin-right: 6px;
-  border-radius: 8px;
+  height: 28.5715vh;
+  margin-right: 0.625vw;
+  border-radius: 0.8334vw;
   overflow: hidden;
 }
 
 .ih-banner-img {
-  height: 76px;
-  border-radius: 8px;
+  height: 28.5715vh;
+  border-radius: 0.8334vw;
 }
 
-.ih-bn1 { width: 858px; }
-.ih-bn2 { width: 426px; }
-.ih-bn3 { width: 282px; }
-.ih-bn4 { width: 210px; }
+.ih-bn1 { width: 89.375vw; }
+.ih-bn2 { width: 44.375vw; }
+.ih-bn3 { width: 29.375vw; }
+.ih-bn4 { width: 21.875vw; }
 
-.ih-img1 { width: 858px; }
-.ih-img2 { width: 426px; }
-.ih-img3 { width: 282px; }
-.ih-img4 { width: 210px; }
+.ih-img1 { width: 89.375vw; }
+.ih-img2 { width: 44.375vw; }
+.ih-img3 { width: 29.375vw; }
+.ih-img4 { width: 21.875vw; }
 
 /* ---------------- 公告条：定高 + overflow 裁切，文本已在 JS 里硬截断 ---------------- */
 .ih-notice-row {
-  height: 24px;
+  height: 9.0226vh;
   flex-direction: row;
   align-items: center;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 .ih-notice-tag {
   font-size: 1.1458vw;
   color: #FFFFFF;
   background-color: @accent;
-  border-radius: 3px;
-  padding-left: 4px;
-  padding-right: 4px;
-  margin-right: 6px;
+  border-radius: 0.3125vw;
+  padding-left: 0.4167vw;
+  padding-right: 0.4167vw;
+  margin-right: 0.625vw;
 }
 
 .ih-notice-box {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0;
-  height: 18px;
+  height: 6.767vh;
   overflow: hidden;
 }
 
@@ -1194,13 +1194,13 @@ export default {
    不额外增加包体。整块可点，点击后由 sponsorOn 分支整块替换内容区。
    ★ 不要给这里加 position:absolute / z-index：本运行时禁用绝对定位。 */
 .ih-spon-row {
-  height: 40px;
+  height: 15.0376vh;
   flex-direction: row;
   align-items: center;
-  margin-top: 3px;
-  padding-left: 6px;
-  padding-right: 6px;
-  border-radius: 6px;
+  margin-top: 1.1279vh;
+  padding-left: 0.625vw;
+  padding-right: 0.625vw;
+  border-radius: 0.625vw;
   background-color: @card-background-color;
   border-width: 1px;
   border-color: @gold;
@@ -1210,24 +1210,24 @@ export default {
   font-size: 1.1458vw;
   color: #1E2831;
   background-color: @gold;
-  border-radius: 3px;
-  padding-left: 4px;
-  padding-right: 4px;
-  margin-right: 6px;
+  border-radius: 0.3125vw;
+  padding-left: 0.4167vw;
+  padding-right: 0.4167vw;
+  margin-right: 0.625vw;
 }
 
 .ih-spon-thumb-wrap {
-  width: 32px;
-  height: 32px;
+  width: 3.3334vw;
+  height: 12.0301vh;
   align-items: center;
   justify-content: center;
-  margin-right: 8px;
+  margin-right: 0.8334vw;
 }
 
 .ih-spon-thumb {
-  width: 32px;
-  height: 32px;
-  border-radius: 4px;
+  width: 3.3334vw;
+  height: 12.0301vh;
+  border-radius: 0.4167vw;
   background-color: #FFFFFF;
 }
 
@@ -1235,7 +1235,7 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0;
-  height: 18px;
+  height: 6.767vh;
   overflow: hidden;
 }
 
@@ -1246,13 +1246,13 @@ export default {
 }
 
 .ih-spon-more {
-  width: 46px;
-  height: 20px;
-  border-radius: 10px;
+  width: 4.7917vw;
+  height: 7.5188vh;
+  border-radius: 1.0417vw;
   background-color: @accent;
   align-items: center;
   justify-content: center;
-  margin-left: 6px;
+  margin-left: 0.625vw;
 }
 
 .ih-spon-more-text {
@@ -1272,17 +1272,17 @@ export default {
 }
 
 .ih-spon-full-img {
-  width: 200px;
-  height: 200px;
-  border-radius: 8px;
+  width: 20.8334vw;
+  height: 75.188vh;
+  border-radius: 0.8334vw;
   background-color: #FFFFFF;
 }
 
 .ih-spon-full-side {
   flex-direction: column;
   justify-content: center;
-  margin-left: 22px;
-  width: 300px;
+  margin-left: 2.2917vw;
+  width: 31.25vw;
 }
 
 .ih-spon-full-title {
@@ -1293,13 +1293,13 @@ export default {
 .ih-spon-full-desc {
   font-size: 1.25vw;
   color: @text-color;
-  margin-top: 10px;
+  margin-top: 3.7594vh;
 }
 
 .ih-spon-full-hint {
   font-size: 1.1458vw;
   color: @accent-blue;
-  margin-top: 10px;
+  margin-top: 3.7594vh;
 }
 
 /* 留言提示：金色，和「赞助」标签同色系；比 hint 低一档字号 */
@@ -1307,17 +1307,17 @@ export default {
   font-size: 1.1458vw;
   line-height: 1.6667vw;
   color: @gold;
-  margin-top: 8px;
+  margin-top: 3.0076vh;
 }
 
 .ih-spon-full-btn {
-  width: 96px;
-  height: 32px;
-  border-radius: 8px;
+  width: 10vw;
+  height: 12.0301vh;
+  border-radius: 0.8334vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
-  margin-top: 16px;
+  margin-top: 6.0151vh;
 }
 
 .ih-spon-full-btn-text {

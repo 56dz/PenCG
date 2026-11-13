@@ -450,18 +450,18 @@ export default {
 
 /* ---------- 顶部条 ---------- */
 .topbar {
-  height: 38px;
+  height: 14.2858vh;
   flex-direction: row;
   align-items: center;
-  padding-left: 10px;
-  padding-right: 10px;
+  padding-left: 1.0417vw;
+  padding-right: 1.0417vw;
 }
 
 .back-btn {
-  height: 24px;
-  padding-left: 10px;
-  padding-right: 10px;
-  border-radius: 12px;
+  height: 9.0226vh;
+  padding-left: 1.0417vw;
+  padding-right: 1.0417vw;
+  border-radius: 1.25vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -473,13 +473,13 @@ export default {
 }
 
 .topbar-title-wrap {
-  height: 22px;
+  height: 8.2707vh;
   overflow: hidden;
-  margin-left: 10px;
+  margin-left: 1.0417vw;
 }
 
 .line-17 {
-  height: 17px;
+  height: 6.391vh;
   overflow: hidden;
 }
 
@@ -490,9 +490,9 @@ export default {
 }
 
 .topbar-sub-wrap {
-  height: 17px;
+  height: 6.391vh;
   overflow: hidden;
-  margin-left: 8px;
+  margin-left: 0.8334vw;
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
@@ -508,26 +508,26 @@ export default {
    画布 266 - 顶部条 38 = 228，高度写满才不会在底部留一条背景色空带 */
 .body {
   flex-direction: row;
-  padding-left: 12px;
-  padding-right: 8px;
-  padding-bottom: 6px;
-  height: 228px;
+  padding-left: 1.25vw;
+  padding-right: 0.8334vw;
+  padding-bottom: 2.2557vh;
+  height: 85.7143vh;
 }
 
 .col-left {
-  width: 424px;
+  width: 44.1667vw;
   flex-direction: column;
 }
 
 .hero {
   flex-direction: row;
-  height: 96px;
+  height: 36.0903vh;
 }
 
 .hero-icon {
-  width: 96px;
-  height: 96px;
-  border-radius: 10px;
+  width: 10vw;
+  height: 36.0903vh;
+  border-radius: 1.0417vw;
   background-color: @card-background-color;
 }
 
@@ -536,8 +536,8 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  padding-left: 10px;
-  padding-right: 4px;
+  padding-left: 1.0417vw;
+  padding-right: 0.4167vw;
 }
 
 .hero-name {
@@ -556,18 +556,18 @@ export default {
 .chip-row {
   flex-direction: row;
   flex-wrap: wrap;
-  margin-top: 6px;
-  height: 44px;
+  margin-top: 2.2557vh;
+  height: 16.5414vh;
   overflow: hidden;
 }
 
 .chip {
-  height: 18px;
-  padding-left: 6px;
-  padding-right: 6px;
-  margin-right: 5px;
-  margin-bottom: 4px;
-  border-radius: 9px;
+  height: 6.767vh;
+  padding-left: 0.625vw;
+  padding-right: 0.625vw;
+  margin-right: 0.5209vw;
+  margin-bottom: 1.5038vh;
+  border-radius: 0.9375vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -589,15 +589,15 @@ export default {
 
 .stats {
   flex-direction: row;
-  margin-top: 8px;
-  height: 44px;
+  margin-top: 3.0076vh;
+  height: 16.5414vh;
 }
 
 .stat {
-  width: 132px;
-  height: 44px;
-  margin-right: 8px;
-  border-radius: 8px;
+  width: 13.75vw;
+  height: 16.5414vh;
+  margin-right: 0.8334vw;
+  border-radius: 0.8334vw;
   background-color: @card-background-color;
   flex-direction: column;
   justify-content: center;
@@ -620,18 +620,18 @@ export default {
 .actions {
   flex-direction: row;
   align-items: center;
-  margin-top: 8px;
-  height: 34px;
+  margin-top: 3.0076vh;
+  height: 12.782vh;
 }
 
 .btn {
-  margin-right: 10px;
+  margin-right: 1.0417vw;
 }
 
 .hist-line {
-  height: 16px;
+  height: 6.0151vh;
   overflow: hidden;
-  margin-top: 4px;
+  margin-top: 1.5038vh;
 }
 
 .hist-t {
@@ -652,28 +652,28 @@ export default {
   flex-shrink: 1;
   flex-basis: 0%;
   flex-direction: column;
-  margin-left: 10px;
+  margin-left: 1.0417vw;
 }
 
 .q-row {
   flex-direction: row;
   align-items: center;
-  height: 26px;
+  height: 9.7745vh;
 }
 
 .q-label {
   font-size: 1.3542vw;
   color: @text-color;
-  margin-right: 8px;
-  width: 30px;
+  margin-right: 0.8334vw;
+  width: 3.125vw;
 }
 
 .q-chip {
-  height: 22px;
-  padding-left: 12px;
-  padding-right: 12px;
-  margin-right: 6px;
-  border-radius: 11px;
+  height: 8.2707vh;
+  padding-left: 1.25vw;
+  padding-right: 1.25vw;
+  margin-right: 0.625vw;
+  border-radius: 1.1459vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -693,10 +693,10 @@ export default {
 }
 
 .sec-head {
-  height: 22px;
+  height: 8.2707vh;
   flex-direction: row;
   align-items: center;
-  margin-top: 4px;
+  margin-top: 1.5038vh;
 }
 
 .sec-title {
@@ -718,14 +718,14 @@ export default {
   flex-shrink: 1;
   flex-basis: 0%;
   overflow: hidden;
-  padding-right: 6px;
-  padding-bottom: 4px;
+  padding-right: 0.625vw;
+  padding-bottom: 1.5038vh;
 }
 
 .desc-line {
   font-size: 1.25vw;
   color: @text-color-dim;
-  height: 17px;
+  height: 6.391vh;
   lines: 1;
 }
 
@@ -751,11 +751,11 @@ export default {
 }
 
 .retry-btn {
-  height: 26px;
-  margin-left: 10px;
-  padding-left: 14px;
-  padding-right: 14px;
-  border-radius: 13px;
+  height: 9.7745vh;
+  margin-left: 1.0417vw;
+  padding-left: 1.4584vw;
+  padding-right: 1.4584vw;
+  border-radius: 1.3542vw;
   background-color: @accent;
   justify-content: center;
   align-items: center;

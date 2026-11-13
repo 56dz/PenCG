@@ -520,9 +520,9 @@ export default {
 .kb-head {
   flex-direction: row;
   align-items: center;
-  height: 40px;
-  padding-left: 12px;
-  padding-right: 12px;
+  height: 15.0376vh;
+  padding-left: 1.25vw;
+  padding-right: 1.25vw;
 }
 
 .kb-title {
@@ -536,21 +536,21 @@ export default {
   flex-basis: 0%;
   font-size: 1.1458vw;
   color: @text-color-dim;
-  margin-left: 10px;
+  margin-left: 1.0417vw;
   lines: 1;
 }
 
 .kb-val {
   font-size: 1.5625vw;
   color: @accent;
-  margin-right: 10px;
-  max-width: 260px;
+  margin-right: 1.0417vw;
+  max-width: 27.0834vw;
 }
 
 .kb-close {
-  width: 56px;
-  height: 26px;
-  border-radius: 8px;
+  width: 5.8334vw;
+  height: 9.7745vh;
+  border-radius: 0.8334vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -576,15 +576,15 @@ export default {
 
 .kb-row {
   flex-direction: row;
-  margin-top: 5px;
+  margin-top: 1.8797vh;
 }
 
 .kb-key {
-  width: 74px;
-  height: 40px;
-  margin-left: 4px;
-  margin-right: 4px;
-  border-radius: 8px;
+  width: 7.7084vw;
+  height: 15.0376vh;
+  margin-left: 0.4167vw;
+  margin-right: 0.4167vw;
+  border-radius: 0.8334vw;
   background-color: @card-background-color;
   justify-content: center;
   align-items: center;
@@ -595,7 +595,7 @@ export default {
 }
 
 .kb-key-ok {
-  width: 240px;
+  width: 25vw;
   background-color: @accent;
 }
 
@@ -606,9 +606,9 @@ export default {
 
 
 .logo-img {
-  width: 62px;
-  height: 62px;
-  border-radius: 14px;
+  width: 6.4584vw;
+  height: 23.3083vh;
+  border-radius: 1.4584vw;
   background-color: transparent;
 }
 
@@ -617,63 +617,63 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  width: 884px;
-  height: 266px;
+  width: 92.0834vw;
+  height: 100vh;
   flex-direction: row;
 }
 
 .brand-col {
-  width: 286px;
-  height: 266px;
+  width: 29.7917vw;
+  height: 100vh;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding-left: 10px;
-  padding-right: 6px;
+  padding-left: 1.0417vw;
+  padding-right: 0.625vw;
 }
 
 .brand-name {
   font-size: 1.9792vw;
   color: @text-color;
-  margin-top: 10px;
+  margin-top: 3.7594vh;
 }
 
 .brand-sub {
   font-size: 1.25vw;
   color: @accent-blue;
-  margin-top: 3px;
+  margin-top: 1.1279vh;
 }
 
 .brand-tip {
   font-size: 1.1458vw;
   color: @text-color-dim;
-  margin-top: 8px;
+  margin-top: 3.0076vh;
 }
 
 .form-col {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  height: 266px;
+  height: 100vh;
   flex-direction: column;
-  padding-top: 8px;
-  padding-right: 12px;
+  padding-top: 3.0076vh;
+  padding-right: 1.25vw;
 }
 
 .tabs {
   flex-direction: row;
   align-items: center;
-  height: 28px;
+  height: 10.5264vh;
 }
 
 .mtab {
-  width: 88px;
-  height: 28px;
-  border-radius: 8px;
+  width: 9.1667vw;
+  height: 10.5264vh;
+  border-radius: 0.8334vw;
   background-color: @card-background-color;
   justify-content: center;
   align-items: center;
-  margin-right: 8px;
+  margin-right: 0.8334vw;
 }
 
 .mtab-on {
@@ -702,24 +702,24 @@ export default {
 .frow {
   flex-direction: row;
   align-items: center;
-  height: 36px;
-  margin-top: 7px;
+  height: 13.5339vh;
+  margin-top: 2.6316vh;
 }
 
 .flabel {
-  width: 52px;
+  width: 5.4167vw;
   font-size: 1.25vw;
   color: @text-color-dim;
 }
 
 .cc {
-  width: 44px;
-  height: 32px;
-  border-radius: 8px;
+  width: 4.5834vw;
+  height: 12.0301vh;
+  border-radius: 0.8334vw;
   background-color: @card-background-color;
   justify-content: center;
   align-items: center;
-  margin-right: 6px;
+  margin-right: 0.625vw;
 }
 
 .cc-text {
@@ -728,21 +728,21 @@ export default {
 }
 
 .field {
-  width: 190px;
-  height: 32px;
-  border-radius: 8px;
+  width: 19.7917vw;
+  height: 12.0301vh;
+  border-radius: 0.8334vw;
   background-color: @card-background-color;
   flex-direction: column;
   justify-content: center;
-  padding-left: 10px;
+  padding-left: 1.0417vw;
 }
 
 .field-wide {
-  width: 240px;
+  width: 25vw;
 }
 
 .field-code {
-  width: 140px;
+  width: 14.5834vw;
 }
 
 .field-val {
@@ -756,10 +756,10 @@ export default {
 }
 
 .swap {
-  width: 46px;
-  height: 30px;
-  margin-left: 8px;
-  border-radius: 8px;
+  width: 4.7917vw;
+  height: 11.2782vh;
+  margin-left: 0.8334vw;
+  border-radius: 0.8334vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -771,10 +771,10 @@ export default {
 }
 
 .sms-btn {
-  width: 88px;
-  height: 30px;
-  margin-left: 8px;
-  border-radius: 8px;
+  width: 9.1667vw;
+  height: 11.2782vh;
+  margin-left: 0.8334vw;
+  border-radius: 0.8334vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -790,9 +790,9 @@ export default {
 }
 
 .go-btn {
-  width: 132px;
-  height: 34px;
-  border-radius: 8px;
+  width: 13.75vw;
+  height: 12.782vh;
+  border-radius: 0.8334vw;
   background-color: @accent;
   justify-content: center;
   align-items: center;
@@ -813,25 +813,25 @@ export default {
   flex-basis: 0%;
   font-size: 1.25vw;
   color: @danger;
-  margin-left: 10px;
+  margin-left: 1.0417vw;
   lines: 2;
 }
 
 .tip {
   font-size: 1.1458vw;
   color: @text-color-dim;
-  margin-top: 6px;
+  margin-top: 2.2557vh;
   lines: 1;
 }
 
 .toast {
-  height: 24px;
-  margin-top: 8px;
-  border-radius: 8px;
+  height: 9.0226vh;
+  margin-top: 3.0076vh;
+  border-radius: 0.8334vw;
   background-color: @card-background-color;
   justify-content: center;
   align-items: center;
-  width: 200px;
+  width: 20.8334vw;
 }
 
 .toast-text {

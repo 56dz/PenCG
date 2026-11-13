@@ -418,18 +418,18 @@ export default {
 
 /* ---------- 顶部条 ---------- */
 .topbar {
-  height: 38px;
+  height: 14.2858vh;
   flex-direction: row;
   align-items: center;
-  padding-left: 10px;
-  padding-right: 10px;
+  padding-left: 1.0417vw;
+  padding-right: 1.0417vw;
 }
 
 .back-btn {
-  height: 24px;
-  padding-left: 10px;
-  padding-right: 10px;
-  border-radius: 12px;
+  height: 9.0226vh;
+  padding-left: 1.0417vw;
+  padding-right: 1.0417vw;
+  border-radius: 1.25vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -441,17 +441,17 @@ export default {
 }
 
 .search-box {
-  height: 26px;
+  height: 9.7745vh;
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  margin-left: 8px;
-  margin-right: 8px;
-  border-radius: 13px;
+  margin-left: 0.8334vw;
+  margin-right: 0.8334vw;
+  border-radius: 1.3542vw;
   background-color: @card-background-color;
   justify-content: center;
-  padding-left: 12px;
-  padding-right: 8px;
+  padding-left: 1.25vw;
+  padding-right: 0.8334vw;
 }
 
 .search-txt {
@@ -465,10 +465,10 @@ export default {
 }
 
 .go-btn {
-  height: 26px;
-  padding-left: 16px;
-  padding-right: 16px;
-  border-radius: 13px;
+  height: 9.7745vh;
+  padding-left: 1.6667vw;
+  padding-right: 1.6667vw;
+  border-radius: 1.3542vw;
   background-color: @accent;
   justify-content: center;
   align-items: center;
@@ -480,12 +480,12 @@ export default {
 }
 
 .hint-row {
-  height: 18px;
+  height: 6.767vh;
   overflow: hidden;
   flex-direction: row;
   align-items: center;
-  padding-left: 12px;
-  padding-right: 12px;
+  padding-left: 1.25vw;
+  padding-right: 1.25vw;
 }
 
 .hint-t {
@@ -500,9 +500,9 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  padding-left: 12px;
-  padding-right: 8px;
-  padding-bottom: 6px;
+  padding-left: 1.25vw;
+  padding-right: 0.8334vw;
+  padding-bottom: 2.2557vh;
 }
 
 .content-body {
@@ -510,31 +510,31 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  padding-left: 12px;
-  padding-right: 8px;
+  padding-left: 1.25vw;
+  padding-right: 0.8334vw;
 }
 
 .sec {
   flex-direction: column;
-  margin-bottom: 2px;
+  margin-bottom: 0.7519vh;
 }
 
 .sec-head {
-  height: 20px;
+  height: 7.5188vh;
   flex-direction: row;
   align-items: center;
-  margin-top: 2px;
+  margin-top: 0.7519vh;
 }
 
 /* 结果页标题：父级 .content-body 已有 12 左边距，这里不能再加，
    否则标题比下方卡片网格多缩进 12px */
 .sec-head-flat {
   margin-top: 0;
-  height: 22px;
+  height: 8.2707vh;
 }
 
 .sec-title-wrap {
-  height: 20px;
+  height: 7.5188vh;
   overflow: hidden;
   flex-grow: 1;
   flex-shrink: 1;
@@ -558,18 +558,18 @@ export default {
 .chip-wrap {
   flex-direction: row;
   flex-wrap: wrap;
-  padding-bottom: 2px;
+  padding-bottom: 0.7519vh;
 }
 
 .chip {
-  height: 22px;
-  max-width: 132px;
+  height: 8.2707vh;
+  max-width: 13.75vw;
   overflow: hidden;
-  padding-left: 10px;
-  padding-right: 10px;
-  margin-right: 6px;
-  margin-bottom: 5px;
-  border-radius: 11px;
+  padding-left: 1.0417vw;
+  padding-right: 1.0417vw;
+  margin-right: 0.625vw;
+  margin-bottom: 1.8797vh;
+  border-radius: 1.1459vw;
   background-color: @card-background-color;
   justify-content: center;
   align-items: center;
@@ -591,10 +591,10 @@ export default {
 }
 
 .clear-btn {
-  height: 18px;
-  padding-left: 8px;
-  padding-right: 8px;
-  border-radius: 9px;
+  height: 6.767vh;
+  padding-left: 0.8334vw;
+  padding-right: 0.8334vw;
+  border-radius: 0.9375vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -611,36 +611,36 @@ export default {
 }
 
 .lcard {
-  width: 278px;
-  height: 64px;
-  margin-right: 6px;
-  margin-bottom: 6px;
-  border-radius: 8px;
+  width: 28.9584vw;
+  height: 24.0602vh;
+  margin-right: 0.625vw;
+  margin-bottom: 2.2557vh;
+  border-radius: 0.8334vw;
   background-color: @card-background-color;
   flex-direction: row;
   align-items: center;
-  padding-left: 6px;
+  padding-left: 0.625vw;
 }
 
 .lcard-icon-wrap {
-  width: 56px;
-  height: 56px;
+  width: 5.8334vw;
+  height: 21.0527vh;
 }
 
 .lcard-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 8px;
+  width: 5.8334vw;
+  height: 21.0527vh;
+  border-radius: 0.8334vw;
 }
 
 .search-txt-wrap {
-  height: 20px;
+  height: 7.5188vh;
   overflow: hidden;
   justify-content: center;
 }
 
 .lcard-line {
-  height: 17px;
+  height: 6.391vh;
   overflow: hidden;
 }
 
@@ -649,8 +649,8 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  padding-left: 8px;
-  padding-right: 6px;
+  padding-left: 0.8334vw;
+  padding-right: 0.625vw;
 }
 
 .lcard-name {
@@ -666,17 +666,17 @@ export default {
 }
 
 .more-row {
-  height: 30px;
+  height: 11.2782vh;
   flex-direction: row;
   justify-content: center;
   align-items: center;
 }
 
 .more-btn {
-  height: 26px;
-  padding-left: 16px;
-  padding-right: 16px;
-  border-radius: 13px;
+  height: 9.7745vh;
+  padding-left: 1.6667vw;
+  padding-right: 1.6667vw;
+  border-radius: 1.3542vw;
   background-color: @ctrl-background;
   justify-content: center;
   align-items: center;
@@ -703,11 +703,11 @@ export default {
 }
 
 .retry-btn {
-  height: 26px;
-  margin-left: 10px;
-  padding-left: 14px;
-  padding-right: 14px;
-  border-radius: 13px;
+  height: 9.7745vh;
+  margin-left: 1.0417vw;
+  padding-left: 1.4584vw;
+  padding-right: 1.4584vw;
+  border-radius: 1.3542vw;
   background-color: @accent;
   justify-content: center;
   align-items: center;

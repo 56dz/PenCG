@@ -11,7 +11,7 @@
 ![platform](https://img.shields.io/badge/X6%20Pro-RK3562-03C47E)
 ![runtime](https://img.shields.io/badge/Falcon-QuickJS%20%2B%20Vue2-03C47E)
 ![media](https://img.shields.io/badge/DTLS--SRTP-self--built-03C47E)
-![version](https://img.shields.io/badge/version-1.2.1-1E2831)
+![version](https://img.shields.io/badge/version-1.2.2-1E2831)
 ![license](https://img.shields.io/badge/license-GPL--3.0-1E2831)
 
 </div>

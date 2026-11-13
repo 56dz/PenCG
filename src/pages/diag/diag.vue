@@ -653,10 +653,10 @@ export default {
 /* 固定举证区：左栏三张图，肉眼判断 file:// 到底能不能渲染 */
 .proof {
   flex-direction: column;
-  width: 150px;
-  height: 266px;
-  padding-left: 6px;
-  padding-top: 4px;
+  width: 15.625vw;
+  height: 100vh;
+  padding-left: 0.625vw;
+  padding-top: 1.5038vh;
   background-color: #171b26;
 }
 
@@ -667,9 +667,9 @@ export default {
 }
 
 .pimg {
-  width: 52px;
-  height: 52px;
-  margin-bottom: 2px;
+  width: 5.4167vw;
+  height: 19.5489vh;
+  margin-bottom: 0.7519vh;
 }
 
 .content {
@@ -679,15 +679,15 @@ export default {
 .hdr {
   flex-direction: row;
   align-items: center;
-  height: 24px;
-  padding-left: 8px;
+  height: 9.0226vh;
+  padding-left: 0.8334vw;
   background-color: #1c2030;
 }
 
 .hdr-t {
   font-size: 1.3542vw;
   color: #f2f4f8;
-  margin-right: 12px;
+  margin-right: 1.25vw;
 }
 
 .hdr-s {
@@ -700,8 +700,8 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0;
-  padding-left: 8px;
-  padding-top: 2px;
+  padding-left: 0.8334vw;
+  padding-top: 0.7519vh;
 }
 
 .col {
@@ -709,7 +709,7 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0;
-  margin-right: 8px;
+  margin-right: 0.8334vw;
 }
 
 .ln {
