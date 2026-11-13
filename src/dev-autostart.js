@@ -59,3 +59,12 @@ export const DEV_LOGOUT = null;
  *
  * ★ 取证结束必须改回 false。★ */
 export const DEV_NO_RTCP = false;
+
+/* ---- DTLS 指纹 A/B 取证开关（2026-11-14）----
+ * 背景见 docs/DTLS-CLIENTHELLO-FINGERPRINT.md：我们的 ClientHello 是
+ * 28 个 OpenSSL 默认序套件（含静态 RSA）、无 ALPN，与 Chrome 四层全不同。
+ * 置 true 时 cfgObj 带 chromeFp:1，native 把 cipher_list 换成 Chrome 序
+ * （14 个现代套件，无静态 RSA）。use_srtp/扩展集合不动。
+ *
+ * ★ 取证结束必须改回 false。★ */
+export const DEV_CHROME_FP = false;

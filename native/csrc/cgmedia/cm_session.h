@@ -59,6 +59,10 @@ typedef struct {
     /* 取证开关：置 1 时主循环跳过 PLI / NACK / RR 三种上行 RTCP，
      * 用来二分「上行 RTCP 是否触发网关停推」。默认 0（正常发送）。 */
     int  no_rtcp;
+    /* 取证开关：置 1 时 ClientHello 的 cipher_list 改用 Chrome 顺序
+     * （只含 TLS1.2 现代套件、去掉静态 RSA），用来 A/B「网关是否按
+     * DTLS/JA3 类指纹风控」。use_srtp/扩展集合不动。默认 0。 */
+    int  chrome_fp;
 } cm_cfg;
 
 /* ---------------- 事件（JSON 文本，poll 时拼数组） ---------------- */

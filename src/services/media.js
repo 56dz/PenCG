@@ -4,7 +4,7 @@
 import { loadNative, loadMedia, callJSON } from './native.js';
 import { encodeBody, decodeBody, currentOffset, currentToken, currentUserId } from './cg.js';
 import { logInfo, logWarn, logError } from './log.js';
-import { DEV_NO_RTCP } from '../dev-autostart.js';
+import { DEV_NO_RTCP, DEV_CHROME_FP } from '../dev-autostart.js';
 
 const S = {
   wsId: 0,
@@ -571,7 +571,11 @@ export async function startMedia() {
     // ★ 取证开关（对比实验用）：DEV_NO_RTCP=1 时 native 不发任何上行 RTCP
     // （PLI/NACK/RR），用于二分「网关是否因为我们的上行 RTCP 而停推」。
     // 量产/默认恒为 0。来源：src/dev-autostart.js 的 DEV_NO_RTCP。
-    noRtcp: DEV_NO_RTCP ? 1 : 0
+    noRtcp: DEV_NO_RTCP ? 1 : 0,
+    // ★ 取证开关（DTLS 指纹 A/B）：DEV_CHROME_FP=1 时 native 的 ClientHello
+    // 用 Chrome 序 cipher_list（见 docs/DTLS-CLIENTHELLO-FINGERPRINT.md）。
+    // 量产/默认恒为 0。来源：src/dev-autostart.js 的 DEV_CHROME_FP。
+    chromeFp: DEV_CHROME_FP ? 1 : 0
   };
   const r = callJSON(mm, 'start', [JSON.stringify(cfgObj)]);
   if (!r || !r.id) throw new Error('cgmedia start 失败: ' + JSON.stringify(r));

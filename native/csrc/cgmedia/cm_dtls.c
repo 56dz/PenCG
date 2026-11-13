@@ -374,6 +374,30 @@ int cm_dtls_run(cm_sess *s) {
     if (SSL_CTX_set_tlsext_use_srtp(ctx, "SRTP_AES128_CM_SHA1_80") != 0) {
         CM_LOGW("#%d set_tlsext_use_srtp returned non-zero", s->id);
     }
+    /* A/B 实验：chromeFp=1 时把 cipher_list 换成 Chrome 序（TLS1.2 现代
+     * 套件、无静态 RSA）。对照 docs/DTLS-CLIENTHELLO-FINGERPRINT.md：
+     * 我们默认 28 个 OpenSSL 套件含 c00a/c014/0039/0033/0035/002f/00ff，
+     * Chrome 只发 ~15 个现代套件且顺序不同。扩展集合与 use_srtp 不动。 */
+    if (s->cfg.chrome_fp &&
+        SSL_CTX_set_cipher_list(ctx,
+            "ECDHE-ECDSA-CHACHA20-POLY1305:"
+            "ECDHE-RSA-CHACHA20-POLY1305:"
+            "ECDHE-ECDSA-AES128-GCM-SHA256:"
+            "ECDHE-RSA-AES128-GCM-SHA256:"
+            "ECDHE-ECDSA-AES256-GCM-SHA384:"
+            "ECDHE-RSA-AES256-GCM-SHA384:"
+            "ECDHE-ECDSA-AES128-SHA:"
+            "ECDHE-RSA-AES128-SHA:"
+            "ECDHE-ECDSA-AES256-SHA:"
+            "ECDHE-RSA-AES256-SHA:"
+            "AES128-GCM-SHA256:"
+            "AES256-GCM-SHA384:"
+            "AES128-SHA:"
+            "AES256-SHA") == 0) {
+        CM_LOGW("#%d chrome_fp set_cipher_list failed, keep default", s->id);
+    } else if (s->cfg.chrome_fp) {
+        CM_LOGI("#%d chrome_fp cipher list applied (14 suites, Chrome order)", s->id);
+    }
     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
     SSL_CTX_set_read_ahead(ctx, 1); /* DTLS 必须，否则同一 datagram 里的多报文会丢 */
     SSL_CTX_set_options(ctx, SSL_OP_NO_TICKET);

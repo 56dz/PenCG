@@ -28,6 +28,14 @@
 
 **结论**：我们与 Chrome 在 cipher 顺序、suite 集合、extension 集合（缺 ALPN）、use_srtp profile 列表四层全部不同。若网关按 JA3/JA3S 类指纹风控（只放行官方 SDK/Chrome 指纹，其它限速或 250s 掐断），入口证据成立。
 
+## A/B 实验结果（2026-11-14 06:08 对照局）：指纹假说 ❌ 被否定
+
+- **基准局**（05:55，默认 28 套件 OpenSSL 序，原神 `yssy`，gw-lt-hbtj-05）：sess=250s 停推 → 8s 检出 → L2 → 5s 恢复。
+- **对照局**（06:08，`DEV_CHROME_FP=true`，14 套件 Chrome 序，ClientHello 从 203B 缩到 **177B**，日志 `chrome_fp cipher list applied (14 suites, Chrome order)`，终末地 `mrfzzmd`）：**同样在 sess≈250s 停推**（06:13:10 detected rx=26133 → L2 → 06:13:18 recovered 停滞 5s）。
+- **结论：cipher 序/集合改变不改变停推时刻 ⇒ 网关的 250s 掐断不基于 DTLS ClientHello 指纹**（至少不基于 cipher 这一层）。extension 层（ALPN 等）仍未验证，但优先级下降。
+- 结合第二会话同样 250s（05:55 局的 L2 新会话也在 ~248s 被掐）：**停推是「按媒体会话的固定时长定时踢」，与指纹无关、与 会话序号 无关** —— 更像服务端对非官方 SDK 会话的统一 TTL，或对所有人统一的会话时长上限（网页端 481s 未冻结那一次仍待解释）。
+- 下一步候选（按性价比）：①用官方 web 包同参数起一局确认网页端现在是否也会 250s 被掐（若也会 → 是平台策略变化，不是我们的问题）；②抓 op=close 的 code/reason 分布（已有日志埋点，被动收集）。
+
 ## 对应改动
 
 `cm_dtls.c` 的 `msg_cb()`：handshake type=1 时把第一分片前 512B dump 成 hex（`CM_LOGI("#%d DTLS ClientHello first-frag ...")`），每 DTLS 上下文只 dump 一次。取数命令：
