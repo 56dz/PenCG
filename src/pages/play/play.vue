@@ -142,6 +142,7 @@ import { down, move, up, tap, cancel, setInputMode, declarePlatform, keepAlive, 
 import { ImSession } from '../../services/im.js';
 import { initScreen, keepAliveStart, keepAliveStop, getScreenState, screenStateName, isScreenNotOn, KEEP_INTERVAL_MS } from '../../services/screen.js';
 import { loadSettings, saveSettings } from '../../services/settings.js';
+import { DEV_AUTOTAP } from '../../dev-autostart.js';
 import { recordPlay, touchPlay } from '../../services/history.js';
 import { QUALITIES, QUALITY_LABEL, normQuality } from '../../services/const.js';
 import { logInfo, logWarn, logError } from '../../services/log.js';
@@ -373,6 +374,8 @@ export default {
       pli: 0,
       statAt: 0,
       hbAt: 0,   /* 上次发 WS 心跳 "0 <ms>" 的时间 */
+      tapAt: 0,  /* 上次 autotap 注入触摸的时间（DEV_AUTOTAP 取证用） */
+      tapCount: 0, /* autotap 已注入次数（日志显示用） */
       probeAt: 0, /* 上次打 [play] probe 存活探针的时间（20s 一次，bug1 排查用） */
       /* ---- STALLGUARD：网关停推检测 + 三级自愈（见文件头 STALL_RX_MS 注释） ---- */
       stallLastRx: 0,  /* 上次看到的 rx（native stats.rtp_rx）。变大就刷新 stallSince */
@@ -1419,6 +1422,24 @@ export default {
           try { keepAlive(now); } catch (e) {}
         }
       }
+      /* ★ 交互续命 A/B（取证开关 DEV_AUTOTAP，见 dev-autostart.js 说明）：
+         live 态下每 30s 注入一次 1px 微动触摸（down@1,1 → up@2,2），
+         验证「真实输入能否重置服务端 250s 踢出计时」。判定：sess 跨过
+         260s 继续涨 = 输入续命有效；仍 ~250s 停推 = 无效。 */
+      if (DEV_AUTOTAP && s === 'live' && !this.busy && this.vizOn) {
+        if (!this.tapAt || now - this.tapAt >= 30000) {
+          this.tapAt = now;
+          try {
+            down(1, 1, 0, this.vw || VW, this.vh || VH);
+            var _selfTap = this;
+            setTimeout(function () {
+              try { _selfTap.up2(); } catch (e) {}
+            }, 120);
+            logWarn('[play] autotap: 注入微动触摸（第 ' +
+              (++this.tapCount || (this.tapCount = 1)) + ' 次）');
+          } catch (e) {}
+        }
+      }
       /* ★ STALLGUARD：网关静默停推检测（见文件头 STALL_RX_MS 注释）。
          放在心跳/探针之后：即使它触发重连，本轮的 probe 行也已经写下了
          「停推前最后一次 rx=…」这个现场，日志顺序更可读。 */
@@ -1565,6 +1586,10 @@ export default {
       } catch (e) {
         logWarn('[play] renew onReapply 异常');
       }
+    },
+    /* autotap 专用：抬起用另一坐标（2,2），模拟真实微动 */
+    up2: function () {
+      try { up(2, 2, 0, this.vw || VW, this.vh || VH); } catch (e) {}
     },
     /* 每 500ms 由 tick() 调一次。刻意很轻：只比较一个整数。 */
     checkStall: function (now, s) {

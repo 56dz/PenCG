@@ -68,3 +68,15 @@ export const DEV_NO_RTCP = false;
  *
  * ★ 取证结束必须改回 false。★ */
 export const DEV_CHROME_FP = false;
+
+/* ---- 交互续命 A/B 取证开关（2026-11-14）----
+ * 背景：六局实测「每媒体会话 ~250s 准点停推」，10s 一次的 keepAlive 心跳
+ * （cmd "0 <ts>"）不能重置计时，DTLS 指纹也已排除。剩最后一个假设：
+ * 服务端的踢出计时器可能被「真实玩家输入」重置（官方 setKeepAliveConfig
+ * 的 kickout 语义 = 「太久没回来」）。本开关在 play 页 live 态下每
+ * DEV_AUTOTAP_MS 毫秒自动注入一次 1px 微动触摸（cmd 1/2 down-up，
+ * 落点 1,1 → 2,2，不影响操作），若定时器被输入重置，sess 将跨过 260s
+ * 继续增长；若仍 250s 被掐，则「kickout 只认官方 SDK keepPlaying 帧」。
+ *
+ * ★ 取证结束必须改回 false。★ */
+export const DEV_AUTOTAP = false;

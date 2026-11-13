@@ -365,6 +365,30 @@ done
 
 ### 5.4 组 2（区分 A：中途发真实输入）
 
+> **★ 2026-11-14 06:38 实验完成：A 假设 ❌ 被否定 ★**
+>
+> 实现：`DEV_AUTOTAP` 取证开关（`src/dev-autostart.js:82`）——不用不稳定的
+> `send_event touch slip` 注入，改为 play 页 tick 里 live 态每 30s 直接调
+> `down(1,1,…)`/`up(2,2,…)`（真实 cmd 1/2 输入帧，`play.vue` autotap 块）。
+>
+> 真机（原神 yssy，gw-lt-hbtj-03，06:33:55 起流）：autotap 每 30s 注入一次
+> （06:33:55…06:40 共 16+ 次，日志 `[play] autotap: 注入微动触摸`），
+> **06:38:09（会话存活 254s）照样停推**：`stall detected rx=18865 已 8s 未增长`
+> → L2 复用网关 → 06:38:16 recovered（停滞 5s）。停推时刻与 tap 完全无关。
+>
+> **判定：停流时刻固定在 wsOpen+250s，与真实输入无关 → A 假设不成立。**
+> 结合本日已完成的两组排除实验：keepAlive `0 <ts>` 心跳不重置计时（六局 250s 准点）、
+> DTLS ClientHello 指纹不影响（chrome_fp A/B，commit 36722b6）——
+> **服务端的踢出计时器不认任何我们已知的客户端信号**（输入/心跳/指纹），
+> 只认官方 SDK 的 `RtcKeepPlaying`（channel 2, CmdId=20015）帧，
+> 或者干脆是按会话的纯定时踢（与客户端行为完全无关）。
+>
+> 取证开关已复位（DEV_AUTOSTART=null、DEV_AUTOTAP=false），autotap 代码保留
+> （tapAt/tapCount 字段 + tick 内 DEV_AUTOTAP 门控，量产不生效）。
+>
+> ——以下为原始实验设计（保留存档）。设备注入通道后来被证实更不稳定
+> （「只有左侧竖导航栏能点」也失效过一轮），所以本实验最终改用 DEV_AUTOTAP 实现。
+
 **做什么**：起播后**每分钟**发一次真实的触摸 tap（走我们自己的 `onTS/onTE` → `cmd 8` 路径）。
 
 ```bash
