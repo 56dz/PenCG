@@ -131,7 +131,7 @@ commit("setGameCutTime", { total: 1000*(k.no_op_duration1 + k.no_op_duration2),
 **bug1 的根因至今未定位。** 但我们把排查范围收窄到了「没有任何协议层可见差异」——
 也就是说，继续对着报文/SDP/auth 包找差异，已经没有东西可找了。
 
-### 4.2 已经实测排除的 11 个假设
+### 4.2 已经实测排除的 12 个假设（第 12 条 = DTLS cipher 指纹，2026-11-14 06:07 真机 A/B）
 
 方法：全部在**官方网页端**上用 Playwright + `addInitScript` 改写报文做（不改 PenCG 的
 native 代码），把网页端改成「PenCG 的样子」，看它是否也复现 ~250 s 静默停推。
@@ -149,6 +149,7 @@ native 代码），把网页端改成「PenCG 的样子」，看它是否也复�
 | 9 | 游玩期不轮询 HTTP 被判挂机 | 记录网页端所有 `/api/` 请求 | 31 个请求全在开头 16 s，之后零请求，`users/@me/status` 从未出现 ❌ |
 | 10 | **auth 后不发任何 input 帧** | 丢弃全部 `op:"input"`（7 条开播帧 + 心跳） | 连播 **481 s**，`ws-close` 为 0 ❌ |
 | 11 | **auth 包内容不同** | `MUNGE=all`：把网页端 auth 改写成完全等于 PenCG 的形态 | 连播 **284 s**，258 s 节点 `ct=254.787` 完全正常 ❌ |
+| 12 | **DTLS cipher 指纹**（OpenSSL 默认序 28 套件 vs Chrome 序） | native 加 `chromeFp` 开关：ClientHello 203B→177B（14 个 Chrome 序套件，静态 RSA 全消失，扩展区逐字节不变） | 握手照常成功，**停推 ≈237 s 与未改时同量级** ❌ |
 
 第 11 条改写后的 auth（token 打码），网关接受并回了 `op:offer`：
 
@@ -189,15 +190,16 @@ RTP 的推送**。这排除了「会话被回收 / NAT 超时 / 端口失效」�
 > **②SRTP 认证从未失败过一次**（`grep 'DUMP fail'`=0、`SRTP BRUTE`=0），
 > 若 ROC 错了认证会成片失败。所以原来的第 1 名降到第 2 名。
 
-1. **DTLS 层的差别（现在是第一优先）。** 设备侧实测值已取到，三次会话完全一致：
-   `DTLS OK version=DTLSv1.2 cipher=ECDHE-RSA-CHACHA20-POLY1305 srtp=SRTP_AES128_CM_SHA1_80`。
-   对应代码：`cm_dtls.c:352 SSL_CTX_set_tlsext_use_srtp(ctx, "SRTP_AES128_CM_SHA1_80")`
-   （**单一 profile**，Chrome 是 `SRTP_AEAD_AES_128_GCM:SRTP_AES128_CM_SHA1_80`，GCM 在前）、
-   `:350 SSL_CTX_new(DTLS_client_method())`、`:355 SSL_VERIFY_NONE`、
-   `:357 SSL_OP_NO_TICKET`；**没有设 min/max_proto、cipher_list、extended_master_secret，
-   全走 OpenSSL 默认**。网关最终选中同一套 SRTP profile，但 **ClientHello 本身不一样**
-   ——若网关按指纹风控，入口在这里。
-   验证：抓两边 ClientHello 逐字段 diff（cipher suite 顺序、extension 顺序与内容、use_srtp 列表）。
+> **2026-11-14 06:20 再更新：第 12 个假设（DTLS cipher 指纹）已真机 A/B 否定。**
+> `chromeFp=1` 时 ClientHello 从 203B（28 套件含静态 RSA）变成 177B（14 个 Chrome 序
+> 套件 + `00ff`，静态 RSA 全部消失，扩展区逐字节不变），`DTLS OK` 照常握手成功，
+> **停推时刻 ≈237 s（06:09:13 出画 → 06:13:10 stall detected），与未改时完全同量级**。
+> 所以「cipher 套件集合/顺序」从候选中划掉，完整 hex 见 `docs/DTLS-CLIENTHELLO-FINGERPRINT.md`。
+
+1. **DTLS extension 级指纹（原第一优先降级于此）。** cipher 序已实测无效，
+   但扩展集合仍有差异：自建客户端没有 ALPN、没有 supported_versions、
+   use_srtp 只列 `SHA1_80`（Chrome 是 `SRTP_AEAD_AES_128_GCM` 在前）。
+   ALPN 服务端没选，这条属于「半协议语义」差异，A/B 成本高、命中概率中。
 2. **SRTP 的 ROC / 重放窗口（基本排除，可花 10 分钟坐实）。**
    真机日志里前 8 个包 `roc=0 seq=31394..31401`，加上实测 80 pkt/s，
    第一次回绕在 ~427 s，不在冻结窗口内；且认证零失败。
@@ -212,6 +214,8 @@ RTP 的推送**。这排除了「会话被回收 / NAT 超时 / 端口失效」�
    **每轮都记下来**，凑够样本才能判断是「某些宿主机有问题」还是巧合。
 4. **UDP 接收缓冲区**（较弱）。冻结期间 `rxStun` 同步增长说明 socket 仍在正常读取，
    如果是 rcvbuf 满导致内核丢弃，`rxStun` 也会停。所以基本可以排除。
+5. **账号/时长策略**（无法从客户端侧修）。若以上全部排除，只能接受
+   「网关对非浏览器 UA 做会话时长软限」的解释，靠 STALLGUARD 兜底。
 
 ### 4.6 工程上的建议
 
@@ -243,17 +247,15 @@ RTP 的推送**。这排除了「会话被回收 / NAT 超时 / 端口失效」�
 
 ---
 
-## 六、还需要的实测（2026-11-14 03:00 重写）
+## 六、还需要的实测（2026-11-14 06:20 重写）
 
 上一版这里写的是「按顺序只加 ①②③，看 4m18s 还在不在」。**①②③ 已经全部做完，
-全部无效**（见第四节）。所以现在的顺序是：
+全部无效**（见第四节）。之后又做了 cipher 指纹 A/B（也已否定）。所以现在的顺序是：
 
-1. **抓两边 DTLS ClientHello 逐字段 diff（第一优先）。** 网页端用
-   `chrome://webrtc-internals` 或 Playwright hook `RTCPeerConnection` 导出；PenCG 侧
-   在 `cm_dtls.c` 的发送路径 dump（或用 `SSL_CTX_set_msg_callback` 已有的 `msg_cb`，
-   它能看到每个握手报文）。重点比：`supported_versions`、`cipher_suites` 顺序、
-   `use_srtp` 的 profiles（自建只给 `SRTP_AES128_CM_SHA1_80`，Chrome 是 GCM 在前）、
-   `extended_master_secret`、`supported_groups`、证书 CN/有效期。
+1. **（已完成，已否定）DTLS cipher 指纹 A/B。** `chromeFp` 开关把 ClientHello 的
+   cipher_list 换成 Chrome 序后停推时刻不变（≈237 s）。cipher 层排除。
+   若要继续指纹方向，只剩 extension 级（ALPN/supported_versions/use_srtp 列表），
+   但 ALPN 服务端没选，性价比低。
 2. **（可选，10 分钟）坐实 ROC 排除。** 改 `cm_srtp.c:369` 的 dump 条件为周期性，
    跑到冻结看 `seq`。按现有数据（起始 31394、80 pkt/s）预计冻结时 `seq` 在
    31394+80*250≈51400，离 65536 还远，预期不跨 0。
@@ -285,7 +287,7 @@ RTP 的推送**。这排除了「会话被回收 / NAT 超时 / 端口失效」�
 
 | 项 | 位置 |
 |---|---|
-| 断流与保活根因分析（11 个假设的完整实测记录） | `docs/断流与保活根因分析.md`（已重写） |
+| 断流与保活根因分析（12 个假设的完整实测记录） | `docs/断流与保活根因分析.md`（已重写） |
 | 实验工具 7 个 | `work/get_ticket.py`、`longplay{,2}.js`、`sdp_probe.js`、`pencg_shape.js`、`no_input_probe2.js`、`poll_probe.js`、`pencg_auth_probe.js` |
 | 两条「会话结束」路径的完整取证 | `docs/断流与保活根因分析.md` §4（含 `op:"close"` 的 6 行真实时刻表） |
 | `errcode` 速查表 | 同上（403 / 1213 / 1811 / 1288 / 0+normal） |
