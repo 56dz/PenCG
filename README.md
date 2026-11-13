@@ -11,7 +11,7 @@
 ![platform](https://img.shields.io/badge/X6%20Pro-RK3562-03C47E)
 ![runtime](https://img.shields.io/badge/Falcon-QuickJS%20%2B%20Vue2-03C47E)
 ![media](https://img.shields.io/badge/DTLS--SRTP-self--built-03C47E)
-![version](https://img.shields.io/badge/version-1.1.0-1E2831)
+![version](https://img.shields.io/badge/version-1.1.1-1E2831)
 ![license](https://img.shields.io/badge/license-GPL--3.0-1E2831)
 
 </div>
@@ -23,6 +23,9 @@
 <img src="sponsor.png" width="360" alt="赞助码">
 
 **如果 PenCG 对你有用，欢迎扫码赞助 —— 你的赞助是我更新的动力**
+
+微信扫码后可以在赞赏页**留言**：想要什么功能、遇到什么问题、希望先修哪个 bug，都可以直接写在里面。
+留言我会看，也会按大家的反馈决定优先级。
 
 </div>
 

@@ -5,6 +5,7 @@
 
 # native 编译产物
 libs/*.so
+libs/pencg_cap
 *.o
 *.a
 *.d

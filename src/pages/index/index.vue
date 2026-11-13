@@ -36,6 +36,20 @@
         <div class="retry-btn"><text class="retry-text">重试</text></div>
       </div>
 
+      <!-- 赞助码：整块替换内容区（不做浮层，理由见公告条上方的注释） -->
+      <div v-else-if="sponsorOn" class="ih-spon-full ih-fade">
+        <image class="ih-spon-full-img" :src="sponsorImg" :width="200" :height="200"></image>
+        <div class="ih-spon-full-side">
+          <text class="ih-spon-full-title">如果 PenCG 对你有用</text>
+          <text class="ih-spon-full-desc">欢迎扫码赞助 —— 你的赞助是我更新的动力</text>
+          <text class="ih-spon-full-hint">用微信扫左侧赞赏码</text>
+          <text class="ih-spon-full-leave">微信扫码后可以在赞赏页留言 —— 想要什么功能、遇到什么问题，都可以直接写上</text>
+          <div class="ih-spon-full-btn" @click="closeSponsor">
+            <text class="ih-spon-full-btn-text">返回</text>
+          </div>
+        </div>
+      </div>
+
       <!-- 首页：横幅 + 多行模块 -->
       <scroller v-else :key="fadeKey" class="body ih-fade">
         <div v-if="errText" class="ih-err" @click="reload">
@@ -51,7 +65,21 @@
           </div>
         </div>
 
-        <!-- 公告 -->
+        <!-- 公告第一位：赞助（置顶，点击展开赞赏码）
+             ★ 布局约定：本运行时禁用 position:absolute / z-index，
+             所以"弹层"一律做成"整块替换内容区"（见下方 sponsorOn 分支）。 -->
+        <div class="ih-spon-row" @click="openSponsor">
+          <text class="ih-spon-tag">赞助</text>
+          <div class="ih-spon-thumb-wrap">
+            <image class="ih-spon-thumb" :src="sponsorImg" :width="32" :height="32"></image>
+          </div>
+          <div class="ih-spon-box">
+            <text class="ih-spon-text">{{ sponsorNotice }}</text>
+          </div>
+          <div class="ih-spon-more"><text class="ih-spon-more-text">查看</text></div>
+        </div>
+
+        <!-- 系统公告（原第一位，现退到赞助下方，弱化显示） -->
         <div v-if="notice" class="ih-notice-row">
           <text class="ih-notice-tag">公告</text>
           <div class="ih-notice-box"><text class="ih-notice-text">{{ noticeText }}</text></div>
@@ -114,6 +142,7 @@ import { restoreSession, isLoggedIn, sessionVersionAsync, sessionAge, logout } f
 import { navTo, takeTabParam } from '../../services/nav.js';
 import { logInfo, logWarn } from '../../services/log.js';
 import logoImg from '../../assets/logo.png';
+import sponsorImg from '../../assets/sponsor.png';
 import MineBody from '../../components/mine-body.vue';
 import { DEV_AUTOSTART, DEV_LOGOUT } from '../../dev-autostart.js';
 
@@ -159,6 +188,9 @@ export default {
       bannerCls: 'ih-bn3',
       imgCls: 'ih-img3',
       noticeText: '',     // JS 硬截断后的公告
+      sponsorImg: sponsorImg,
+      sponsorOn: false,   // 赞助码是否占满内容区
+      sponsorNotice: 'PenCG 是个人项目，喜欢可以请作者喝杯奶茶 · 赞赏页能留言提需求',
       barY: -1,           // 手势起点 pageY
       barMoved: 0,
       swipeLock: false,
@@ -716,6 +748,13 @@ export default {
     openGame(g) {
       navTo('detail', { code: g.code, name: g.name });
     },
+    openSponsor() {
+      this.sponsorOn = true;
+      logInfo('[index] 打开赞助码');
+    },
+    closeSponsor() {
+      this.sponsorOn = false;
+    },
     openBanner(b) {
       if (b.gameCode) {
         navTo('detail', { code: b.gameCode, name: b.gameName });
@@ -1147,5 +1186,142 @@ export default {
   flex-basis: 0%;
   flex-direction: column;
   overflow: hidden;
+}
+/* ---------------- 赞助公告（置顶第一位，点击展开赞赏码） ----------------
+   布局说明：整条高度 30px（比系统公告的 24px 高一档，视觉上排在第一位），
+   从左到右 = 金色「赞助」标签 + 34px 赞赏码缩略图 + 一行文案 + 右侧「查看」。
+   缩略图直接复用 mine-body 里那张 320x320 的 assets，运行时缩到 34px，
+   不额外增加包体。整块可点，点击后由 sponsorOn 分支整块替换内容区。
+   ★ 不要给这里加 position:absolute / z-index：本运行时禁用绝对定位。 */
+.ih-spon-row {
+  height: 40px;
+  flex-direction: row;
+  align-items: center;
+  margin-top: 3px;
+  padding-left: 6px;
+  padding-right: 6px;
+  border-radius: 6px;
+  background-color: @card-background-color;
+  border-width: 1px;
+  border-color: @gold;
+}
+
+.ih-spon-tag {
+  font-size: 11px;
+  color: #1E2831;
+  background-color: @gold;
+  border-radius: 3px;
+  padding-left: 4px;
+  padding-right: 4px;
+  margin-right: 6px;
+}
+
+.ih-spon-thumb-wrap {
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  margin-right: 8px;
+}
+
+.ih-spon-thumb {
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  background-color: #FFFFFF;
+}
+
+.ih-spon-box {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0;
+  height: 18px;
+  overflow: hidden;
+}
+
+.ih-spon-text {
+  font-size: 12px;
+  line-height: 18px;
+  color: @text-color;
+}
+
+.ih-spon-more {
+  width: 46px;
+  height: 20px;
+  border-radius: 10px;
+  background-color: @accent;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+}
+
+.ih-spon-more-text {
+  font-size: 11px;
+  color: #FFFFFF;
+}
+
+/* 赞助码整块页：左图右字，垂直居中，吃掉 topbar 以下的全部高度 */
+.ih-spon-full {
+  width: 100%;
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+}
+
+.ih-spon-full-img {
+  width: 200px;
+  height: 200px;
+  border-radius: 8px;
+  background-color: #FFFFFF;
+}
+
+.ih-spon-full-side {
+  flex-direction: column;
+  justify-content: center;
+  margin-left: 22px;
+  width: 300px;
+}
+
+.ih-spon-full-title {
+  font-size: 15px;
+  color: @text-color-strong;
+}
+
+.ih-spon-full-desc {
+  font-size: 12px;
+  color: @text-color;
+  margin-top: 10px;
+}
+
+.ih-spon-full-hint {
+  font-size: 11px;
+  color: @accent-blue;
+  margin-top: 10px;
+}
+
+/* 留言提示：金色，和「赞助」标签同色系；比 hint 低一档字号 */
+.ih-spon-full-leave {
+  font-size: 11px;
+  line-height: 16px;
+  color: @gold;
+  margin-top: 8px;
+}
+
+.ih-spon-full-btn {
+  width: 96px;
+  height: 32px;
+  border-radius: 8px;
+  background-color: @ctrl-background;
+  justify-content: center;
+  align-items: center;
+  margin-top: 16px;
+}
+
+.ih-spon-full-btn-text {
+  font-size: 13px;
+  color: @text-color;
 }
 </style>

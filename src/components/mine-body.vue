@@ -45,6 +45,7 @@
         <text class="mb-spon-title">如果 PenCG 对你有用</text>
         <text class="mb-spon-desc">欢迎扫码赞助 —— 你的赞助是我更新的动力</text>
         <text class="mb-spon-hint">用微信扫左侧赞赏码</text>
+        <text class="mb-spon-leave">微信扫码后可以在赞赏页留言 —— 想要什么功能、遇到什么问题，都可以直接写上</text>
         <div class="mb-spon-btn" @click="closeSponsor">
           <text class="mb-spon-btn-text">返回</text>
         </div>
@@ -1264,6 +1265,14 @@ export default {
   font-size: 10px;
   color: @accent-blue;
   margin-top: 10px;
+}
+
+/* 留言提示：比 hint 再退一档，但用金色（和赞助主题呼应），避免和蓝色链接混淆 */
+.mb-spon-leave {
+  font-size: 10px;
+  line-height: 15px;
+  color: @gold;
+  margin-top: 6px;
 }
 
 .mb-spon-btn {
