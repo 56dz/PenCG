@@ -3,7 +3,7 @@
     <div class="proof">
       <text class="pt">webp 原图(应空白)</text>
       <image class="pimg" :src="proofWebp" :width="52" :height="52"></image>
-      <text class="pt">imgConv → file://</text>
+      <text class="pt">imgConv 转换 file://</text>
       <image class="pimg" :src="proofConv" :width="52" :height="52"></image>
       <text class="pt">png 对照(应出图)</text>
       <image class="pimg" :src="proofPng" :width="52" :height="52"></image>
@@ -573,7 +573,7 @@ export default {
         this.say(
           f1.indexOf('file://') === 0 && f1.indexOf('.png') > 0 && f2 === f1,
           'imgConv webp',
-          ms1 + 'ms→' + ms2 + 'ms ' + f1.slice(20)
+          ms1 + 'ms / ' + ms2 + 'ms ' + f1.slice(20)
         );
       } catch (e) {
         this.say(false, 'imgConv webp', String(e && e.message));
@@ -661,8 +661,8 @@ export default {
 }
 
 .pt {
-  font-size: 9px;
-  line-height: 11px;
+  font-size: 0.9375vw;
+  line-height: 1.1458vw;
   color: #8e96ab;
 }
 
@@ -685,13 +685,13 @@ export default {
 }
 
 .hdr-t {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: #f2f4f8;
   margin-right: 12px;
 }
 
 .hdr-s {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: #23b3e8;
 }
 
@@ -713,8 +713,8 @@ export default {
 }
 
 .ln {
-  font-size: 10px;
-  line-height: 12px;
+  font-size: 1.0417vw;
+  line-height: 1.25vw;
   color: #c8cede;
 }
 </style>

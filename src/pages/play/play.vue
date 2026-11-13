@@ -77,7 +77,7 @@
           <div class="p2-kbkey" @click="kbDigit('9')"><text class="p2-kbnum">9</text></div>
         </div>
         <div class="p2-kbrow">
-          <div class="p2-kbkey p2-kbdel" @click="kbDel"><text class="p2-kbnum">⌫</text></div>
+          <div class="p2-kbkey p2-kbdel" @click="kbDel"><text class="p2-kbnum">删</text></div>
           <div class="p2-kbkey" @click="kbDigit('0')"><text class="p2-kbnum">0</text></div>
           <div class="p2-kbkey p2-kbok" @click="kbOk"><text class="p2-kbok-text">确定</text></div>
         </div>
@@ -2389,7 +2389,7 @@ export default {
 
 .p2-name {
   height: 17px;
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color-strong;
   font-weight: 700;
 }
@@ -2407,7 +2407,7 @@ export default {
 }
 
 .p2-lstrip-text {
-  font-size: 9px;
+  font-size: 0.9375vw;
   color: @text-color-dim;
 }
 
@@ -2432,12 +2432,12 @@ export default {
 }
 
 .p2-ltime-label {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
 }
 
 .p2-ltime-value {
-  font-size: 15px;
+  font-size: 1.5625vw;
   color: @gold;
   font-weight: 700;
 }
@@ -2453,19 +2453,19 @@ export default {
 
 .p2-lmsg-main {
   height: 16px;
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color;
 }
 
 .p2-lmsg-main-err {
   height: 16px;
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @danger;
 }
 
 .p2-lmsg-sub {
   height: 14px;
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
   margin-top: 2px;
 }
@@ -2477,7 +2477,7 @@ export default {
 }
 
 .p2-lstat-text {
-  font-size: 9px;
+  font-size: 0.9375vw;
   color: @text-color-dim;
 }
 
@@ -2507,7 +2507,7 @@ export default {
 }
 
 .p2-mask-title {
-  font-size: 17px;
+  font-size: 1.7708vw;
   color: @text-color-strong;
   font-weight: 700;
   text-align: center;
@@ -2515,7 +2515,7 @@ export default {
 
 .p2-mask-dots {
   height: 22px;
-  font-size: 17px;
+  font-size: 1.7708vw;
   color: @accent;
   font-weight: 700;
   text-align: center;
@@ -2523,14 +2523,14 @@ export default {
 }
 
 .p2-mask-sub {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
   text-align: center;
   margin-top: 4px;
 }
 
 .p2-mask-err {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @danger;
   text-align: center;
   margin-top: 8px;
@@ -2568,7 +2568,7 @@ export default {
 }
 
 .p2-kbtitle {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color-strong;
 }
 
@@ -2584,7 +2584,7 @@ export default {
 }
 
 .p2-kbsys-text {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
@@ -2599,7 +2599,7 @@ export default {
 }
 
 .p2-kbval {
-  font-size: 15px;
+  font-size: 1.5625vw;
   color: @accent;
 }
 
@@ -2624,7 +2624,7 @@ export default {
 }
 
 .p2-kbnum {
-  font-size: 20px;
+  font-size: 2.0833vw;
   color: @text-color-strong;
 }
 
@@ -2639,7 +2639,7 @@ export default {
 }
 
 .p2-kbok-text {
-  font-size: 16px;
+  font-size: 1.6667vw;
   color: #FFFFFF;
 }
 
@@ -2700,18 +2700,18 @@ export default {
 }
 
 .p2-qbtn-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color;
 }
 
 .p2-qbtn-text-on {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: #FFFFFF;
   font-weight: 700;
 }
 
 .p2-qbtn-text-lock {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
@@ -2723,7 +2723,7 @@ export default {
 }
 
 .p2-rhint-text {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @gold;
 }
 
@@ -2735,13 +2735,13 @@ export default {
 
 .p2-rstat-main {
   height: 13px;
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @accent-blue;
 }
 
 .p2-rstat-dim {
   height: 12px;
-  font-size: 9px;
+  font-size: 0.9375vw;
   color: @text-color-dim;
   margin-top: 2px;
 }
@@ -2782,18 +2782,18 @@ export default {
 }
 
 .p2-act-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color;
 }
 
 .p2-act-text-on {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: #FFFFFF;
   font-weight: 700;
 }
 
 .p2-act-text-lock {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
 }
 
@@ -2803,7 +2803,7 @@ export default {
 }
 
 .p2-rfoot-text {
-  font-size: 9px;
+  font-size: 0.9375vw;
   color: @text-color-dim;
 }
 
@@ -2822,21 +2822,21 @@ export default {
 
 .p2-ctitle {
   height: 22px;
-  font-size: 16px;
+  font-size: 1.6667vw;
   color: @text-color-strong;
   font-weight: 700;
 }
 
 .p2-csub {
   height: 16px;
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   margin-top: 2px;
 }
 
 .p2-cplayed {
   height: 18px;
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @gold;
   margin-top: 8px;
 }

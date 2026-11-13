@@ -273,16 +273,24 @@ if (this.stallL1Timer) { clearTimeout(this.stallL1Timer); this.stallL1Timer = 0;
 
 ### 5.1 前置
 
-设备序列号（Lead 实测那台）：`9D91500007505171`。日志文件：`/userdata/applog/loli_s6_dev.txt`（`log.js` 只把 `console.error` 落盘，形如 `[2026-11-13 06:53:35.123][E][JS] [pencg][W] …`）。
+设备序列号（Lead 实测那台）：`9D91500007505171`。日志文件是 **miniapp 进程的 stdout**，
+文件名带启动时间戳、每次重启都换（`log.js` 只把 `console.error` 落盘，形如 `[2026-11-13 06:53:35.123][E][JS] [pencg][W] …`）。
+
+> **路径更正（2026-11-14 真机定论）**：本节早期版本写死 `/userdata/applog/loli_s6_dev.txt`，
+> **这是错的** —— 该文件实测只有 1 字节，是空文件；真日志在 `DictPen_YYYYMMDD_HHMMSS.log`。
 
 ```bash
-# 0) 清日志，拿到干净的起点
-./env/adb/adb.exe -s 9D91500007505171 shell "rm -f /userdata/applog/loli_s6_dev.txt"
+# 0) 解析当前日志文件并清空，拿到干净的起点（下面所有 grep 都用 $L）
+ADB="./env/adb/adb.exe -s 9D91500007505171"
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')
+echo "LOG=$L"
+$ADB shell "mv \"$L\" \"$L.bak\" 2>/dev/null; sync"
 
 # 1) 确认装的是新构建：起播 25 秒后 probe 行里应该已经出现 silent= / tries= 两个新字段
 #    （旧版本没有这两个字段。JS 是被打包进 .amr 的，不要试图在设备上找 src/services/media.js）
 ./env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -a 'play. probe' /userdata/applog/loli_s6_dev.txt | tail -3"
+  "grep -a 'play. probe' $L | tail -3"
 # 期望形如：... [play] probe stage=live v=1 screen=0(ON) phase=playing ws=open rx=1234 fps=30 kf=2 silent=0s tries=0 keep=on
 ```
 
@@ -292,7 +300,7 @@ if (this.stallL1Timer) { clearTimeout(this.stallL1Timer); this.stallL1Timer = 0;
 # 2) 起播后另开一个窗口，每 10 秒抓一次 rx（辅助观察，非必须）
 while true; do
   ./env/adb/adb.exe -s 9D91500007505171 shell \
-    "grep -a 'play. probe' /userdata/applog/loli_s6_dev.txt | tail -1"
+    "grep -a 'play. probe' $L | tail -1"
   sleep 10
 done
 ```
@@ -318,7 +326,7 @@ done
 
 ```bash
 ./env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -a 'stall' /userdata/applog/loli_s6_dev.txt | tail -30"
+  "grep -a 'stall' $L | tail -30"
 ```
 
 ### 5.4 关键判据：是"网关停推"还是"我这边断了"
@@ -328,7 +336,7 @@ done
 ```bash
 # 链 1：网关还通着吗（WS 断言 + 我们的心跳有没有被回显）
 ./env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -aE 'wsclose|ws=open|op=input' /userdata/applog/loli_s6_dev.txt | tail -20"
+  "grep -aE 'wsclose|ws=open|op=input' $L | tail -20"
 
 # 链 2：native 还在收包吗（只有一个平面在送 = 视频停了）
 ./env/adb/adb.exe -s 9D91500007505171 shell \
@@ -339,7 +347,7 @@ done
 
 # 链 4：native 侧有没有自己拆（看门狗 / 错误）
 ./env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -aE 'heartbeat lost|JS silent|tearing down|media loop exit' /userdata/applog/loli_s6_dev.txt | tail -10"
+  "grep -aE 'heartbeat lost|JS silent|tearing down|media loop exit' $L | tail -10"
 ```
 
 判读表：
@@ -357,7 +365,7 @@ done
 ```bash
 # 连续玩 5 分钟，检查误判：期望 0 条 stall detected
 ./env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -ac 'stall detected' /userdata/applog/loli_s6_dev.txt"
+  "grep -ac 'stall detected' $L"
 ```
 
 第二项回归：**切后台/回前台不应触发 stall**。
@@ -366,7 +374,7 @@ done
 # 游戏中按 Home 键 / 切走 → 等 30s → 切回来。
 # 期望：日志里有 enterBackground 与 onShow，但【没有】stall detected
 ./env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -aE 'stall|enterBackground|page onShow' /userdata/applog/loli_s6_dev.txt | tail -20"
+  "grep -aE 'stall|enterBackground|page onShow' $L | tail -20"
 ```
 
 第三项回归：**换画质**（`pickQuality` 会重建媒体会话，`rx` 会归零）。期望看到 `[play] stall: 媒体会话重启，rx 重新计数`（这一条只在 `stallTries > 0` 时打，正常换画质应该一条都没有），并且不触发 `stall detected`。

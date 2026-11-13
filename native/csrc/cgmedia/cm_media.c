@@ -106,11 +106,12 @@ static void emit_stat(cm_sess *s) {
                         (unsigned long long)s->stats.vid_nack_recovered,
                         (unsigned long long)s->stats.vid_relax);
             } else if (s->have_kf && s->stats.vid_au_drop > 0) {
-                CM_LOGW("#%d packet loss seen (lost=%llu auDrop=%llu dup=%llu reorder=%llu "
-                        "nack=%llu recov=%llu staleRtx=%llu relax=%llu) "
+                CM_LOGW("#%d packet loss seen (lost=%llu auDrop=%llu pDrop=%llu dup=%llu "
+                        "reorder=%llu nack=%llu recov=%llu staleRtx=%llu relax=%llu) "
                         "— broken AUs dropped, not shown",
                         s->id, (unsigned long long)s->stats.vid_lost,
                         (unsigned long long)s->stats.vid_au_drop,
+                        (unsigned long long)s->stats.vid_p_drop,
                         (unsigned long long)s->stats.vid_dup,
                         (unsigned long long)s->stats.vid_reorder,
                         (unsigned long long)s->stats.vid_nack_sent,
@@ -125,11 +126,12 @@ static void emit_stat(cm_sess *s) {
             "\"decode\":%llu,\"frames\":%llu,\"authFail\":%llu,\"bad\":%llu,"
             "\"kf\":%llu,\"pli\":%llu,\"w\":%d,\"h\":%d,\"fps\":%d,"
             "\"rxPkts\":%llu,\"rxStun\":%llu,\"rxKept\":%llu,\"rxDtls\":%llu,"
+            "\"consentSent\":%llu,\"consentResp\":%llu,"
             "\"rxOther\":%llu,\"aPkts\":%llu,\"aBytes\":%llu,"
             "\"auDrop\":%llu,\"gateDrop\":%llu,\"kfReq\":%llu,\"dup\":%llu,"
             "\"reorder\":%llu,\"spsInject\":%llu,\"rtcpIn\":%llu,\"rrSent\":%llu,"
             "\"nackSent\":%llu,\"nackReq\":%llu,\"nackRecovered\":%llu,"
-            "\"relax\":%llu,\"staleRtx\":%llu}",
+            "\"relax\":%llu,\"staleRtx\":%llu,\"pDrop\":%llu}",
             (unsigned long long)s->stats.rtp_rx,
             /* ★ 这里原来是硬编码 0，JS 侧看到的 lost 永远是 0，等于把
              * 「到底丢没丢包」这个最关键的信息扔掉了。现在用 RTP 层
@@ -147,6 +149,8 @@ static void emit_stat(cm_sess *s) {
             (unsigned long long)s->stats.rx_pkts,
             (unsigned long long)s->stats.rx_stun,
             (unsigned long long)s->stats.rx_kept,
+            (unsigned long long)s->ice_consent_count,
+            (unsigned long long)s->stats.rx_consent_resp,
             (unsigned long long)s->stats.rx_dtls,
             (unsigned long long)s->stats.rx_other,
             (unsigned long long)s->stats.audio_pkts,
@@ -169,7 +173,12 @@ static void emit_stat(cm_sess *s) {
             (unsigned long long)s->stats.vid_nack_req,
             (unsigned long long)s->stats.vid_nack_recovered,
             (unsigned long long)s->stats.vid_relax,
-            (unsigned long long)s->stats.vid_stale_rtx);
+            (unsigned long long)s->stats.vid_stale_rtx,
+            /* pDrop = 因为丢包整帧丢掉的 P 帧个数（L1）。
+             * 和 gateDrop 的区别：gateDrop 是「没关键帧所以不放行」，
+             * pDrop 是「有关键帧、只丢拼不全的某一帧」—— 后者增长但 fps
+             * 仍稳定，就是弱网下我们要的健康态。 */
+            (unsigned long long)s->stats.vid_p_drop);
     /* 每 10 秒打一次 PT 直方图（只打非零项），用来确认音频到底有没有到。 */
     {
         static uint64_t last_hist_ms = 0;
@@ -332,6 +341,12 @@ void cm_media_loop(cm_sess *s) {
          * 健康）指向服务端挂机 kickout 定时器。理由与完整分析见
          * docs/BUGFIX-bug1-rtcp-rr.md 与 cm_cmd.c 的 RR 段注释。 */
         cm_rtcp_tick(s);
+        /* ICE consent refresh（RFC 8445 §11）：每 2.5s 发一次带认证的
+         * Binding Request，证明「我们还在」。这是与官方客户端唯一的
+         * 周期性双向报文差异 —— 网关是 ice-lite，它自己会问我们，但
+         * consent 是反方向义务。不加这个，约 4m18s 后网关单方面停推。
+         * 内部按 next_ice_consent_ms 限速，每轮调无代价。 */
+        cm_ice_consent_tick(s);
         if (now - s->last_stat_ms >= STAT_INTERVAL_MS) {
             /* 每个统计周期顺手抽一次 bus：opusdec/alsasink/kmssink 的致命错误
              * 只会出现在这里，不打出来就是「有包没声/没画」排查黑洞。 */

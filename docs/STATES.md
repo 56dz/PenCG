@@ -233,7 +233,7 @@ adb shell "miniapp_cli start 8002026110200003 mine"; sleep 12
 #    截图应看到「还没有登录网易云游戏」+「登录已过期，请重新登录」
 adb shell "miniapp_cli capture /tmp/t1.png"
 # 4. 日志确认
-adb shell "grep -h '\[mine\]' /userdata/applog/loli_s6_dev.txt | tail -5"
+adb shell "P=\$(pidof miniapp); L=\$(readlink /proc/\$P/fd/1); grep -h '\[mine\]' \"\$L\" | tail -5"
 #    必须出现: [mine] token 失效，清除会话踢回未登录 status=401 code=1006
 ```
 

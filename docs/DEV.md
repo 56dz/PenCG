@@ -63,10 +63,19 @@ powershell -NoProfile -Command "& '.\env\adb\adb.exe' pull /tmp/x.png 'PenCG\out
 或直接在 PowerShell 里调 `powershell -File tools/deploy.ps1`（脚本内部无此问题）。
 
 ## 看设备日志
+日志文件**不能写死**：它是 miniapp 进程的 stdout，文件名带启动时间戳、每次重启都换。
 ```bash
-./env/adb/adb.exe shell "grep -h '\[pencg\]' /userdata/applog/loli_s6_dev.txt | tail -n 60"
+ADB="./env/adb/adb.exe -s 9D91500007505171"
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')   # 实测 /userdata/applog/DictPen_20261113_232219.log
+echo "LOG=$L"
+$ADB shell "grep -h '\[pencg\]' \"$L\" | tail -n 60"
 ```
-**落盘文件是 `/userdata/applog/loli_s6_dev.txt`**（`DictPen_*.log` 那个路径在本机不存在）。
+**`[pencg]`（JS）和 `[cgmedia]`（native）必落同一个文件** —— 两者都跟着 miniapp 进程的 stdout 走。
+
+> **路径更正（2026-11-14 真机定论）**：本段早期版本写「落盘文件是 `loli_s6_dev.txt`、
+> `DictPen_*.log` 在本机不存在」，**两句都是错的** —— `loli_s6_dev.txt` 实测只有 1 字节，
+> 是空文件；真日志正是 `DictPen_YYYYMMDD_HHMMSS.log`。
 
 **只有 `console.error` 会落盘**：X6 Pro 的 Falcon 运行时里 `console.warn` / `console.log`
 完全不写盘（全盘 `grep -a -c 'W][JS]'` 计数为 0）。因此：

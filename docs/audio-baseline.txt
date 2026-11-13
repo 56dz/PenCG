@@ -191,8 +191,11 @@ $ adb shell settings list system | grep -i vol   -> 空（没有 Android 音量�
 --------------------------------------------------------------------------------
 有：/bin/amixer、/bin/aplay、/bin/arecord、/bin/hal-audio、/usr/bin/gst-inspect-1.0
 没有：tinyplay、tinycap、logcat
-     （JS 日志只有 console.error 会落 /userdata/applog/loli_s6_dev.txt；
-       console.warn / console.log 不落盘，详见 docs/VERIFY-playbook.md §0）
+     （JS 日志只有 console.error 会落盘，落 miniapp 进程 stdout —— 用
+       P=$(pidof miniapp); readlink /proc/$P/fd/1 解析，实测形如
+       /userdata/applog/DictPen_YYYYMMDD_HHMMSS.log；console.warn / console.log
+       完全不落盘。注意 loli_s6_dev.txt 是 1 字节空文件，不是真日志。
+       详见 docs/VERIFY-playbook.md §0）
 
 gst-inspect-1.0 fdsink（GStreamer 1.22.0）属性全集：
   async / blocksize / enable-last-sample / fd / last-sample / max-bitrate /

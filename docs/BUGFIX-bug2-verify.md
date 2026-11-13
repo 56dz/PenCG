@@ -117,12 +117,17 @@ date "+%Y-%m-%d %H:%M:%S"
 ../env/adb/adb.exe devices
 ```
 
-**建议**：把 `/userdata/applog/loli_s6_dev.txt` 的一个快照记号记下来（行号），
+**建议**：先解析出当前日志文件，再把它的行数记成一个快照记号，
 后面用 `tail -n +行号` 只读新增部分。避免"把上一轮的成功日志当成这一轮的"。
 
 ```bash
-../env/adb/adb.exe -s 9D91500007505171 shell "wc -l /userdata/applog/loli_s6_dev.txt"
+# 日志文件是 miniapp 进程 stdout，文件名带时间戳，不能写死
+../env/adb/adb.exe -s 9D91500007505171 shell 'P=$(pidof miniapp); L=$(readlink /proc/$P/fd/1); echo "L=$L"; wc -l "$L"'
 ```
+
+> **路径更正（2026-11-14 真机定论）**：本文早期版本把日志写成
+> `/userdata/applog/loli_s6_dev.txt`，**这是错的** —— 该文件实测只有 1 字节、是空文件；
+> 真日志在 `DictPen_YYYYMMDD_HHMMSS.log`。下文统一用 `$L` 表示解析出来的路径。
 
 ### 1. 改开关 + 构建
 
@@ -174,11 +179,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/deploy.ps1 -Page index
 ```bash
 # 全部 pencg 日志
 ../env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -h '\[pencg\]' /userdata/applog/loli_s6_dev.txt | tail -n 80"
+  "grep -h '\[pencg\]' $L | tail -n 80"
 
 # 只取本次相关（登录态 + 开发钩子 + 导航）
 ../env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -hE '\[pencg\].*(\[login\]|\[auth\]|\[mine\]|\[index\]|\[nav\]|\[dev\])' /userdata/applog/loli_s6_dev.txt | tail -n 60"
+  "grep -hE '\[pencg\].*(\[login\]|\[auth\]|\[mine\]|\[index\]|\[nav\]|\[dev\])' $L | tail -n 60"
 ```
 
 > **只有 `console.error` 落盘**（`PenCG/src/services/log.js:1-9` 有实测记录）。
@@ -374,7 +379,7 @@ export const DEV_AUTOSTART = { page: 'login', delay: 2500, tab: 'mine', params: 
 
 ```
 [准备]
- 0. 记下 loli_s6_dev.txt 当前行数（记作 N）
+ 0. 记下当前日志文件（`$L`）的行数（记作 N）
  1. dev-autostart.js: DEV_LOGOUT={delay:3000}; DEV_AUTOLOGIN=null; DEV_AUTOSTART=null
  2. build + deploy(-NoBuild) + 冷启动 index
  3. 等 8s，grep 日志：应见 [dev] autologout 完成
@@ -411,8 +416,11 @@ export const DEV_AUTOSTART = { page: 'login', delay: 2500, tab: 'mine', params: 
 
 ```bash
 A=9D91500007505171
-L=/userdata/applog/loli_s6_dev.txt
 ADB=../env/adb/adb.exe
+# 日志文件不能写死，先解析（真日志在 DictPen_*.log，loli_s6_dev.txt 是空文件）
+P=$($ADB -s $A shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB -s $A shell "readlink /proc/$P/fd/1" | tr -d '\r')
+echo "LOG=$L"
 
 # ① 登录页有没有被拉起
 $ADB -s $A shell "grep -hE '\[pencg\].*(\[dev\] autostart fire|\[login\] ready)' $L | tail -n 5"

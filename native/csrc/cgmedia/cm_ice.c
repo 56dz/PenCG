@@ -170,6 +170,63 @@ done:
     return rc;
 }
 
+/* =====================================================================
+ * ICE consent refresh（RFC 8445 §11）
+ *
+ * 连通后网关（ice-lite）会周期发 Binding Request 给我们，我们在
+ * cm_stun_handle 里回 0x0101 —— 那只证明「它问、我们答」。consent 是反方向：
+ * **由我们主动证明自己还活着**。
+ *
+ * 浏览器侧真机实测（2026-11-13，20×5s getStats 采样）：
+ *   candidate-pair.consentRequestsSent  5 → 40   ≈ 每 2.5s 一次，单调递增
+ *   candidate-pair.responsesReceived    6 → 41   网关每次都回
+ * 同时 inbound-rtp.pliCount / nackCount 全程为 0，remote-inbound-rtp 缺失，
+ * 说明网关**不靠 RTCP 反馈判活**，唯一的周期双向报文就是这个 consent。
+ *
+ * 我们在 cm_ice_run 成功后立刻停发 STUN（见本文件头注释），因此这是与
+ * 官方客户端最大的行为差异。bug1（约 4m18s 后网关单方面停推 RTP、
+ * WS 仍 open、无任何 error/close op）的第一优先级修复就是补上它。
+ *
+ * 报文形态与初次连通完全一致：Binding Request + USERNAME + PRIORITY
+ * + ICE-CONTROLLING + USE-CANDIDATE + MESSAGE-INTEGRITY + FINGERPRINT。
+ * 不复用 with_change_req（CHANGE-REQUEST 只在探路阶段交替试）。
+ * ===================================================================== */
+#define ICE_CONSENT_INTERVAL_MS 2500
+#define ICE_CONSENT_LOG_INTERVAL_MS 30000
+
+void cm_ice_consent_tick(cm_sess *s) {
+    uint64_t now;
+
+    if (!s || s->sock < 0) return;
+    if (s->ice_state != CM_ICE_CONNECTED) return;
+    /* 凭据缺失说明还没走到 ICE，或有别的问题；不要发无效包打日志噪音 */
+    if (s->cfg.pwd[0] == '\0' || s->cfg.remote_ufrag[0] == '\0') return;
+
+    now = cm_now_ms();
+    /* next==0 表示第一次进来：立刻发一次，然后按周期走 */
+    if (s->next_ice_consent_ms && now < s->next_ice_consent_ms) return;
+    s->next_ice_consent_ms = now + ICE_CONSENT_INTERVAL_MS;
+
+    /* 与初次连通同形：沿用 cm_ice_run 最终协商的角色（多数网关 0=controlling，
+     * 部分媒体服回 487 后切到 1=controlled）。角色不一致会让网关把 consent
+     * 当成非法提名，宁可完全不发也不能发错。 */
+    if (ice_send_binding(s, s->cfg.pwd, /*with_change_req=*/0, s->ice_controlled) <= 0) {
+        CM_LOGW("#%d ICE consent send failed", s->id);
+        return;
+    }
+    s->ice_consent_count++;
+
+    /* 首条必打（确认通道真的起来了），之后 30s 一条，免得把 PLI/丢包埋掉 */
+    if (s->ice_consent_log_ms == 0 ||
+        now - s->ice_consent_log_ms >= ICE_CONSENT_LOG_INTERVAL_MS) {
+        s->ice_consent_log_ms = now;
+        CM_LOGI("#%d ICE consent sent (#%llu, every %dms) resp=%llu rxStun=%llu",
+                s->id, (unsigned long long)s->ice_consent_count, ICE_CONSENT_INTERVAL_MS,
+                (unsigned long long)s->stats.rx_consent_resp,
+                (unsigned long long)s->stats.rx_stun);
+    }
+}
+
 int cm_ice_run(cm_sess *s) {
     int attempt;
     const int max_attempts = 10;
@@ -240,6 +297,9 @@ int cm_ice_run(cm_sess *s) {
                             cm_sleep_ms(100);
                         }
                     }
+                    /* 记下最终角色：会话期 consent 必须沿用（见 cm_ice_consent_tick） */
+                    s->ice_controlled = controlled;
+                    s->next_ice_consent_ms = cm_now_ms() + ICE_CONSENT_INTERVAL_MS;
                     return 0;
                 } else if (type == 0x0111) {
                     int err = 0;
@@ -311,7 +371,17 @@ int cm_stun_handle(cm_sess *s, const unsigned char *pkt, int n,
     /* 我们只在意 Binding Request（0x0001）；响应（0x0101/0x0111）在 ICE
      * 阶段已由 cm_ice_run 消费，媒体期收到就忽略。 */
     if (type != 0x0001) {
-        CM_LOGD("#%d STUN type=0x%04x (ignored in keepalive path)", s->id, type);
+        /* ★ 媒体期收到 0x0101 = 网关回了我们主动发的 ICE consent。
+         * 这是判定「consent 通道是否真的双向可用」的唯一证据，必须计数，
+         * 否则我们只能看到自己发出去了、不知道有没有人理。 */
+        if (type == 0x0101) {
+            s->stats.rx_consent_resp++;
+            CM_LOGD("#%d consent response received (#%llu ok / #%llu sent)",
+                    s->id, (unsigned long long)s->stats.rx_consent_resp,
+                    (unsigned long long)s->ice_consent_count);
+        } else {
+            CM_LOGD("#%d STUN type=0x%04x (ignored in keepalive path)", s->id, type);
+        }
         return 1;
     }
 

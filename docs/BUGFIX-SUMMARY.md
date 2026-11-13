@@ -131,7 +131,7 @@
 
 **STALLGUARD 的验证状态：✅ 已真机验证（2026-11-13 18:34–18:35，终末地局，第 2 级自愈成功）。**
 
-真机原文（`[pencg]` 通道，日志 `/userdata/applog/loli_s6_dev.txt`）：
+真机原文（`[pencg]` 通道，日志 = miniapp 进程 stdout，实测 `P=$(pidof miniapp); readlink /proc/$P/fd/1` → `/userdata/applog/DictPen_20261113_*.log`）：
 ```
 18:34:51 [play] probe stage=live ... rx=29124 fps=0 silent=9s
 18:35:02 [play] stall detected: rx=29124 已 20s 未增长 → 尝试自愈（第 1 次：补发关键帧）
@@ -195,7 +195,7 @@
 **验证状态：✅ 已真机验证（2026-11-13 18:29，第 2 轮 PASS）。**
 
 真机路径用的是用户真实操作路径：`DEV_AUTOSTART = { page:"login", delay:10000, tab:"mine" }` （先 `setTab("mine")` 再跳 login，复现「在『我的』栏目里点登录」）+ `DEV_LOGOUT`（走生产 `logout()` 退回未登录）+ `DEV_AUTOLOGIN`（填表后调**生产** `submit()`）。
-关键日志（`/userdata/applog/loli_s6_dev.txt` 原文）：
+关键日志（miniapp 进程 stdout，实测为 `/userdata/applog/DictPen_20261113_*.log`；路径用 `P=$(pidof miniapp); readlink /proc/$P/fd/1` 定）：
 ```
 18:29:27.481 [dev] autologout 完成（盘上 pencg_session 已删）
 18:29:35.089 [mine] boot logged=false
@@ -343,7 +343,7 @@ RTP 层（`cm_rtp.c`）与出画层（`cm_gst.c`）的这一批改动**没有回
 
 **验证证据原文【现场】**
 
-来源：真机日志原文，设备 `9D91500007505171`，native 日志文件 **`/userdata/applog/DictPen_20261113_070039.log`**（取最新一份：`ls -t /userdata/applog/DictPen_*.log | head -1`）。
+来源：真机日志原文，设备 `9D91500007505171`，日志文件 **`/userdata/applog/DictPen_20261113_070039.log`**（该文件名带启动时间戳；正确取法是 `P=$(pidof miniapp); readlink /proc/$P/fd/1`，不要写死、也不要用 `ls -t` 猜）。
 取样命令：`grep -a 'audio snapshot\|audio restore\|aplay pid' /userdata/applog/DictPen_20261113_070039.log`
 
 原文（逐字，含前缀；共两轮退出）：
@@ -444,17 +444,25 @@ RTP 层（`cm_rtp.c`）与出画层（`cm_gst.c`）的这一批改动**没有回
 
 **Falcon 的 JS console 只有 `console.error` 会落盘。** `console.warn` 与 `console.log` **完全不落盘**。
 
-- 落盘文件：`/userdata/applog/loli_s6_dev.txt`
+- 落盘文件：**miniapp 进程 stdout 指向的文件**，用 `P=$(adb shell pidof miniapp); L=$(adb shell "readlink /proc/$P/fd/1")` 解析，实测为 `/userdata/applog/DictPen_YYYYMMDD_HHMMSS.log`（文件名带启动时间戳，每次重启都变）
 - 行格式：`[2026-11-12 22:15:24.947][E][JS] <正文>`
 - **中间的 `[E]` 是通道级别，恒为 E，不代表严重程度**。真正的级别只看行内 `[pencg][I|W|E]` 前缀。
-- 反证：全盘 `grep -a -c 'W][JS]' /userdata/applog/loli_s6_dev.txt` 计数为 **0**。
+- 反证：全盘 `grep -a -c 'W][JS]' "$L"` 计数为 **0**。
 - 代码已改：`PenCG/src/services/log.js:44` 无条件 `console.error(line)`，文件头 `:3-9` 记了本次实测；同类修正还有 `src/base-page.js:88/94`、`src/services/im.js:18`、`src/pages/diag/diag.vue:67/76/83/639`。
 - **典型误判**：日志一条都没有 ≠ 代码没跑，往往是日志通道用错了。本轮已经踩过一次（`BUGFIX-bug3-bug4-video.md` §一 的「命中数为 0」就是这个坑）。
+
+> **路径更正（2026-11-14 真机定论）**：本文档 11-12/13 版写的 `/userdata/applog/loli_s6_dev.txt` 是**错的** —— 该文件实测只有 1 字节，`grep -c pencg` / `grep -c cgmedia` 都是 0，是个空文件。同时 `docs/VERIFY-playbook.md`、`docs/BUGFIX-bug1-lifecycle.md`、`docs/AI-CODE-RULES.md`、`docs/BUG1-KEEPALIVE-PROTOCOL.md` 里的同一错误也已一并更正。§5.1 的改动记录表保留历史原文，另加反向更正说明。
 
 ### 3.2 native 日志通道
 
 - 前缀 **`[cgmedia]`**，来自 `cm_log()`（`PenCG/native/csrc/cgmedia/cm_util.c:19-29`：`fprintf(stdout, "[cgmedia] ")` + `vfprintf` + `fflush`），默认级别 `g_cm_log_level = 3`。
-- 落盘到 **`/userdata/applog/DictPen_*.log`，每次开机换新文件名**。取最新的一份：
+- 落盘到 **miniapp 进程 stdout 指向的文件**，实测形如 `/userdata/applog/DictPen_YYYYMMDD_HHMMSS.log`（文件名带启动时间戳，每次重启都换）。**准确取法**：解析进程的 fd 1，不要靠猜：
+
+  ```bash
+  ./env/adb/adb.exe -s 9D91500007505171 shell 'P=$(pidof miniapp); readlink /proc/$P/fd/1'
+  ```
+
+  必须拿到最新一份时（进程还没起来、或要看历史局）才退而用 `ls -t ... | head -1`：
 
   ```bash
   ./env/adb/adb.exe -s 9D91500007505171 shell 'ls -t /userdata/applog/DictPen_*.log | head -1'
@@ -462,7 +470,7 @@ RTP 层（`cm_rtp.c`）与出画层（`cm_gst.c`）的这一批改动**没有回
 
 - 真机实证：2026-11-13 取到的是 **`/userdata/applog/DictPen_20261113_070039.log`**，§2.5 的 audio 四条原文就是从这个文件里 `grep -a 'audio snapshot\|audio restore\|aplay pid'` 抓出来的。
 - 本地旁证【现场】：`.tmp/soak2.sh` 就是用 `ls -t ... | head -1` + `grep -a cgmedia` 采的，`.tmp/bug1-soak.log` 里 24 行 `[cgmedia]` 全部抓到了。
-- JS 与 native 是两条独立通道，**grep 时要分别 grep 两个文件**。
+- **`[pencg]` 与 `[cgmedia]` 必落同一文件**：JS 的 `console.error` 与 native 的 `fprintf(stdout)` 都跟着 miniapp 进程的 stdout 走，进程只有一个 stdout。所以「一边在 JS 日志、一边在 native 日志」的说法是错的 —— 只有一份文件，两种前缀。
 - 关于「落到哪个文件」的旧分歧：`BUGFIX-bug3-bug4-video.md` 步骤 -1 与 `BUGFIX-bug5-audio.md` 步骤 -1 写的「待现场确认」**已过时**，以本节为准（裁决记录见 §4.1 第 3 条）。
 
 ### 3.3 设备上不存在的东西
@@ -546,7 +554,7 @@ echo 0 > /sys/class/backlight/backlight/bl_power; hal-screen on; hal-screen keep
 | 7 | **`gst_buffer` PTS/DTS 未做** | 符号不存在、无头文件，明确跳过 | 收包抖动量会被 appsrc 当作帧间隔。与改动前行为一致，**无回归** |
 | 8 | **RTCP RR 收到方向为零** | `rtcpIn` 恒 0，网关从不回 RTCP | RR 只能单向使用（我们发、网关收）。是否真的让网关改善行为 **未验证** |
 | 9 | ~~文档内的自我矛盾（`DELTA_UNIT` / `get_pts`）~~ **已在原文档修正** | 已**裁决**并**落地修改**：`1u<<13` 为准（源码 `cm_gst.c:105` 已写死），`BUGFIX-bug3-bug4-video.md:482` 的 `1u<<4` 已于 2026-11-13 晚就地改为 `1u<<13` 并加纠错注记；`gst_buffer_get_pts/set_pts` 不存在，`:475-480` 那段已标注作废 | 见 §4.1 第 1、2 条。原文档已改，不会再有第二份照抄错版 |
-| 10 | 三份文档对 `[cgmedia]` 落盘去向的说法不一致 | 已**裁决**：落 `/userdata/applog/DictPen_*.log`，每次开机换名，`ls -t /userdata/applog/DictPen_*.log \| head -1` 取最新。`BUGFIX-bug1-freeze-verify.md:281` 是对的，另两份文档的「待现场确认」过时 | 见 §4.1。原文档未改 |
+| 10 | 三份文档对 `[cgmedia]` 落盘去向的说法不一致 | 已**裁决（2026-11-14 修订）**：落 miniapp 进程 stdout —— `P=$(pidof miniapp); readlink /proc/$P/fd/1`，与 JS 的 `[pencg]` **同一个文件**。旧稿两说（写死 `loli_s6_dev.txt`、或用 `ls -t DictPen_*.log \| head -1` 取最新）**均已作废**，`ls -t` 只在进程没起来、要看历史局时才作退路 | 见 §4.1 第 3 条与 §5.1.1。原文档未逐字改 |
 | 11 | **弱网冻结判据（`checkFreeze`）完全没有真机验证** | 代码在 `play.vue:1603`，常量 `:246-248`；验证方案 `BUGFIX-bug1-freeze-verify.md` 停留在「方案（未执行）」。设备本身造不出丢包（无 netem / 无 `iptables` / 无 `tcpdump`），场景要在路由器或 PC 热点侧造 | 判据是否真能触发、触发后能否自愈，**全部未知**。且没有正对照就无法区分「场景没造出来」和「判据是死的」 |
 
 ### 4.1 文档自我矛盾清单的裁决结果
@@ -557,7 +565,7 @@ echo 0 > /sys/class/backlight/backlight/bl_power; hal-screen on; hal-screen keep
 |---|---|---|---|---|
 | 1 | `GST_BUFFER_FLAG_DELTA_UNIT` 的位值 | **`1u << 13`** 正确；`1u << 4` 是 `GST_BUFFER_FLAG_LIVE`，语义相反 | 源码 `PenCG/native/csrc/cgmedia/cm_gst.c:105` 已写死 `1u << 13`；`GST_MINI_OBJECT_FLAG_LAST = 1<<4`，`DELTA_UNIT = FLAG_LAST << 9` | ❌ `BUGFIX-bug3-bug4-video.md:482` 的 `(1u << 4)` —— **2026-11-13 晚已在该文件就地改成 `1u << 13` 并加了纠错注记** |
 | 2 | `gst_buffer_get_pts` / `gst_buffer_set_pts` 是否存在 | **不存在**（真机 `libgstreamer-1.0.so.0` 1.22.0 与本地桩库均无此符号） | 逐名解析 `.dynsym` 确认；PTS 只能走 `gstbuffer.h` 结构体字段宏，该头文件不在工作区 | ❌ `BUGFIX-bug3-bug4-video.md:475-480` 建议用这两个 accessor 的做法，**该段建议整体作废**。PTS/DTS 是「明确跳过」，不是漏做。**2026-11-13 晚已在原处标注作废** |
-| 3 | `[cgmedia]` native 日志落在哪个文件 | **`/userdata/applog/DictPen_*.log`，每次开机换新文件名**。取最新一份：`ls -t /userdata/applog/DictPen_*.log \| head -1`，再 `grep -a '[cgmedia]'` | 真机实证：`DictPen_20261113_070039.log` 里就含有 §2.5 的 audio 四条原文 | ❌ `BUGFIX-bug3-bug4-video.md` 步骤 -1 与 `BUGFIX-bug5-audio.md` 步骤 -1 里的「落盘去向待现场确认」——**已确认，就是这个文件** |
+| 3 | `[cgmedia]` native 日志落在哪个文件 | **`/userdata/applog/DictPen_YYYYMMDD_HHMMSS.log`（2026-11-14 真机定论）**，与 JS 的 `[pencg]` **是同一个文件**（同一进程只有一份 stdout）。取法：`P=$(pidof miniapp); readlink /proc/$P/fd/1`；不要写死、也不要用 `ls -t` 猜 | 真机实证：`DictPen_20261113_070039.log` 含 §2.5 的 audio 四条原文；`DictPen_20261113_232219.log` 13.2MB 里 `[cgmedia]` 2236 行与 `[pencg]` 上万行同处一份文件 | ❌ 「写死 loli_s6_dev.txt」（1 字节空文件）与「`ls -t DictPen_*.log \| head -1` 取最新」（进程重启/时钟异常会拿错局）两种旧说法，均已作废 |
 | 4 | 一期停滞判据的触发条件（`freeze-verify` vs `stallguard` 口径不同） | **维持两文档并存，不做裁决**。`BUGFIX-bug1-freeze-verify.md:38` 称「一期按 `gateDrop` 连续增长 12s 写的」，而 `BUGFIX-bug1-stallguard.md`（571 行版）描述的是一期用 `rx` 判据；二期返工后的实际实现是**「fps 连续为 0 是主时钟，`gateDrop` 只作旁证」** | 以二期代码为准：`PenCG/src/pages/play/play.vue:1603` `checkFreeze()`、常量 `:246-248`；条件 D+F 是主时钟，E 只是「包还在进」的旁证 | 两份原文档均保留原文，此处**只记录口径差异与当前实现**，不改原文 |
 | 5 | ~~「`IDR without SPSPPS` / 码流损坏导致绿屏、马赛克」~~ | ❌ **已被 AU dump + ffmpeg 全链路验证推翻**。dump 出的码流（`/userdisk/miniapp/data/au.h264`，615675 B / 300 帧）用 ffmpeg 能解出 233 帧完整画面，`corrupt decoded frame` 全在片头 I 帧；硬解帧数与软解一致；`sync=false` 一改即好 | 四层定位与三组真机对照见 **§2.4.0**；被推翻的五条推断逐条列在 **§2.4.1** | ❌ 凡本文旧版与 `BUGFIX-bug3-bug4-video.md` 里「参数集缺失 / 码流损坏 / DPB 不重协商是根因」的说法 —— **不要照这个方向排查** |
 
@@ -573,9 +581,9 @@ echo 0 > /sys/class/backlight/backlight/bl_power; hal-screen on; hal-screen keep
 
 | 文件 | 一句话说明 |
 |---|---|
-| `README.md` | +1/-1：「只有 `console.warn`/`console.error` 落盘」改为「只有 `console.error` 落盘 + `loli_s6_dev.txt` + 行格式」 |
-| `docs/DEV.md` | 看日志段落重写：落盘文件改 `loli_s6_dev.txt`，说明只有 error 落盘、log.js 走 `console.error` |
-| `docs/STATES.md` | +1/-1：日志路径 `DictPen_*.log` → `loli_s6_dev.txt` |
+| `README.md` | +1/-1：「只有 `console.warn`/`console.error` 落盘」改为「只有 `console.error` 落盘 + `loli_s6_dev.txt` + 行格式」（**路径部分已作废，见 §5.1.1**） |
+| `docs/DEV.md` | 看日志段落重写：落盘文件改 `loli_s6_dev.txt`，说明只有 error 落盘、log.js 走 `console.error`（**路径部分已作废，见 §5.1.1**） |
+| `docs/STATES.md` | +1/-1：日志路径 `DictPen_*.log` → `loli_s6_dev.txt`（**已作废并回滚，见 §5.1.1**） |
 | `native/csrc/cgmedia/cm_cmd.c` | +408：RTCP RR（`cm_rtcp_tick` `:221`、`rr_fill_block`）+ RTCP Generic NACK（`cm_nack_tick` `:407`、`nack_pack_fci` `:355`）、`setAudio 0` 补音频还原（`:538`） |
 | `native/csrc/cgmedia/cm_gst.c` | +470：**bug6 修复 `restore-crtc=false`（`:255` 的 `KMS_SINK_PROPS`）**；**bug3/4 的真正修复 `KMS_SINK_PROPS` `sync=true` → `sync=false`（`:253-255`，`:220-252` 为防改回的长注释）**；bug5 音频快照/还原/aplay 四阶段；加固项 `ignore-error=false max-errors=16`、`DELTA_UNIT (1u<<13)`、分辨率变化 flush 重协商 |
 | `native/csrc/cgmedia/cm_media.c` | +237：看门狗两级判定 + `JS silent` 指纹、stat JSON 扩字段（`lost/auDrop/gateDrop/…/jitterMs/rrSent`）、RTCP 入包分类、fail→达标日志 |
@@ -596,6 +604,18 @@ echo 0 > /sys/class/backlight/backlight/bl_power; hal-screen on; hal-screen keep
 | `src/services/media.js` | +40：`requestKeyFrameBurst()`（`:530`）/ `clearKfBurst()`（`:523`）（STALLGUARD 的 L1 手段），`stopPlay()` 先清 burst（`:595`） |
 | `src/services/nav.js` | +59/-15：`setPendingTab`（`:46`）/`takeTabParam`（`:59`）改走 `$falcon`（`TAB_KEY` `:34`），模块变量降级为兜底 |
 | `src/services/screen.js` | 620 行改动：从 117 行重写为 589 行 —— 多后端探测、20s keep、亮度还原、`isScreenNotOn()` 唯一判据 |
+
+#### 5.1.1 反向更正（2026-11-14）：上表那三行「路径改动」本身就是错的，已回滚
+
+上表里 `README.md`、`docs/DEV.md`、`docs/STATES.md` 三行记的是：11-12/13 那轮把日志路径从 `DictPen_*.log` 改成了 `loli_s6_dev.txt`。
+
+**那次改动是错的。** 2026-11-14 真机定论：
+
+- `/userdata/applog/loli_s6_dev.txt` 实测只有 **1 字节**，`grep -c pencg` 与 `grep -c cgmedia` 都是 **0** —— 是个空文件。
+- 真正的日志由 `P=$(pidof miniapp); readlink /proc/$P/fd/1` 解析得到，实测为 `/userdata/applog/DictPen_20261113_232219.log`（13.2MB，`[cgmedia]` 2236 行 + 大量 `[pencg]` 行）。
+- 原因：JS 的 `console.error` 与 native 的 `fprintf(stdout)` **都跟 miniapp 进程的 stdout 走**，进程只有一个 stdout，所以两条通道必落同一文件；而这个文件名带启动时间戳，每次重启都换。
+
+**所以上表三行的描述作为历史记录保留，但它们指向的结论已作废** —— 正确的说法是「落盘文件 = miniapp 进程 stdout，用 `readlink` 定，形如 `DictPen_YYYYMMDD_HHMMSS.log`」。相关文档已在 2026-11-14 一并更正（见 §3.1、§3.2）。
 
 ### 5.2 新增（17）
 
@@ -623,7 +643,15 @@ echo 0 > /sys/class/backlight/backlight/bl_power; hal-screen on; hal-screen keep
 
 ## 6. 下一步建议（按优先级）
 
-1. **先验 bug2，成本最低、判决最明确。** 手动退出登录 → 密码登录 → 抓 `grep -a 'pencg' /userdata/applog/loli_s6_dev.txt | grep -a '\[mine\] refresh'`。出现 `logged=true` 即通过；同时确认冷启动**不**出现「会话版本 0 -> N」。
+1. **先验 bug2，成本最低、判决最明确。** 手动退出登录 → 密码登录 → 抓日志。先解析路径再 grep（`DictPen_*.log` 才是真日志，`loli_s6_dev.txt` 是空的）：
+
+   ```bash
+   P=$(./env/adb/adb.exe -s 9D91500007505171 shell pidof miniapp | tr -d '\r')
+   L=$(./env/adb/adb.exe -s 9D91500007505171 shell "readlink /proc/$P/fd/1" | tr -d '\r')
+   ./env/adb/adb.exe -s 9D91500007505171 shell "grep -a '\[pencg\]' \"$L\" | grep -a '\[mine\] refresh'"
+   ```
+
+   出现 `logged=true` 即通过；同时确认冷启动**不**出现「会话版本 0 -> N」。
 2. **给 bug1 装一个「自愈计数器」再做长跑。** 现在 STALLGUARD 是否生效完全没有记录。建议在 probe 行已有的 `tries=` 之外，加一条只在三级自愈真的走完时打的 WARN，然后长跑至少 30 分钟（超过 4m18s 窗口 7 次）。同时在家里网络（17:57 那次 7 分钟未复现）和弱网各跑一轮，才能判断它是否与网络条件相关。
 3. **bug3/bug4 已定案，剩下的只是「回归时怎么看」。** 判决已由用户目视完成（`sync=false`，见 §2.4.0）。以后改动出画层时，最快的回归指纹是 **DRM `fb` 编号是否在交替**（`sync=true` 时恒不变）；如果想做像素级比对，仍然值得解决「抓不到视频平面」这个前置问题，三条候选路径：① 给 `weston-screenshooter` 加 `CAP_SYS_ADMIN` 或用 root 起；② 找 `miniapp_cli captureFB` 返回 `-1` 的原因（权限？格式？）；③ 在 `kmssink` 下游插一个 `videoconvert ! jpegenc ! filesink` 的旁路，把解码器输出的帧直接落盘比对。③不依赖任何截屏能力，**最值得试**。
 4. **不要再往「码流 / 参数集 / DPB 重协商」方向排查 bug3/bug4。** 那五条推断已被 AU dump + ffmpeg 全链路验证推翻（§2.4.1），照那个方向改只会白做。`BUGFIX-bug3-bug4-video.md:475-482` 的两处错误与 PTS 论证段已于 2026-11-13 晚就地标注作废，文首也指向 `BUGFIX-bug3-bug4-gst.md` 的新 §7。**唯一要记住的一句：`KMS_SINK_PROPS` 里的 `sync=false` 不要改回 `true`。**

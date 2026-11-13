@@ -225,8 +225,9 @@ $ADB devices          # 设备 9D91500007505171
 日志取法（设备无 logcat，`console.warn/error` 落盘）：
 
 ```bash
-$ADB shell 'ls -t /userdata/applog/DictPen_*.log | head -1'
-$ADB shell 'grep -h "\[pencg\]" $(ls -t /userdata/applog/DictPen_*.log | head -1) | tail -80'
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')   # 实测 /userdata/applog/DictPen_YYYYMMDD_HHMMSS.log
+$ADB shell "grep -h '\[pencg\]' \"$L\" | tail -80"
 ```
 
 ### 4.1 hunk 1 验证：解码器错误策略生效

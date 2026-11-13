@@ -94,6 +94,32 @@ function parseSdp(sdp) {
       if (cur) cur.mid = l.slice('a=mid:'.length);
     } else if (l.startsWith('a=setup:')) {
       if (cur) cur.setup = l.slice('a=setup:'.length);
+    } else if (l.startsWith('a=extmap:')) {
+      /* RTP 头扩展声明，例如
+       *   a=extmap:9 urn:ietf:params:rtp-hdrext:transport-wide-cc-extensions-01
+       *   a=extmap:11/sendonly urn:...
+       * 数字是 id（1..14 单字节，256+ 走两字节），用来在 RTP 头里定位扩展块。
+       * 官方网关的视频段会声明 transport-cc / playout-delay / generic-frame-descriptor。 */
+      if (cur) {
+        const m = /^a=extmap:(\d+)(?:\/(\w+))?\s+(\S+)/.exec(l);
+        if (m) {
+          (cur.extmap = cur.extmap || []).push({ id: +m[1], dir: m[2] || '', uri: m[3] });
+        }
+      }
+    } else if (l.startsWith('a=rtcp-fb:')) {
+      /* RTCP 反馈能力，例如 `a=rtcp-fb:98 nack pli`、`a=rtcp-fb:* transport-cc`。
+       * answer 必须逐条回显自己支持的，否则网关不会发对应的反馈包 ——
+       * 对我们而言最要紧的是 transport-cc（网关据此判链路质量）与 nack/pli。 */
+      if (cur) {
+        const sp = l.slice('a=rtcp-fb:'.length);
+        const k = sp.indexOf(' ');
+        if (k > 0) {
+          (cur.rtcpFb = cur.rtcpFb || []).push({
+            pt: sp.slice(0, k),
+            name: sp.slice(k + 1),
+          });
+        }
+      }
     }
   }
   return out;
@@ -138,7 +164,15 @@ export function buildAnswer(offerSdp, our) {
     lines.push('m=' + m.kind + ' 9 ' + proto + ' ' + fmtStr);
     lines.push('c=IN IP4 0.0.0.0');
     lines.push('a=mid:' + mids[i]);
-    lines.push('a=recvonly');
+    /* ★ sendrecv 而不是 recvonly。
+     *
+     * 百度/网易这套网关是 ice-lite 的 SFU，官方浏览器客户端回的 answer 是
+     * `a=sendrecv`（2026-11-13 真机抓包 client-answer.sdp 逐段确认）。
+     * 只回 recvonly 时网关会把这条流当成「单向订阅」，会话期的 consent /
+     * TWCC 记账都按「对端不上行」处理；虽不必然导致断流，但与官方行为不一致
+     * 是 bug1 排查里少有的、可无损对齐的差异之一。
+     * 我们并不真的发 RTP（没实现编码器），sendrecv 只是声明能力。 */
+    lines.push('a=sendrecv');
     if (m.kind !== 'application') {
       lines.push('a=rtcp-mux');
       if (m.rtpmap) {
@@ -153,6 +187,35 @@ export function buildAnswer(offerSdp, our) {
       // 回显 fmtp（H.264 profile-level-id=42e01f / packetization-mode=1 等）
       if (m.fmtp) {
         for (const pt of Object.keys(m.fmtp)) lines.push('a=fmtp:' + pt + ' ' + m.fmtp[pt]);
+      }
+      /* ★ 回显 RTP 头扩展（a=extmap）。官方网关的视频段声明了
+       *   extmap:11 transport-wide-cc-extensions-01
+       *   extmap:12 playout-delay
+       *   extmap:13 generic-frame-descriptor-00
+       * Chrome 的 answer 是逐条原样回显的（同一次抓包确认）。
+       *
+       * 但 transport-cc 显式跳过：声明它 = 承诺「我会按 100ms 节奏发
+       * RTCP TWCC（PT=205 FMT=15）反馈」。native 侧目前还没有 TWCC 实现，
+       * 声明了却不发，网关的发送侧拥塞控制会把它当成「这个接收端一个包
+       * 都没收到」，反而更早降档/停推 —— 比不声明更糟。
+       * 等 cm_cmd.c 补上 TWCC 后再把 'transport-wide-cc' 从这个过滤表里去掉。 */
+      if (m.extmap) {
+        for (const x of m.extmap) {
+          if (x.uri.indexOf('transport-wide-cc') >= 0) continue;
+          lines.push('a=extmap:' + x.id + (x.dir ? '/' + x.dir : '') + ' ' + x.uri);
+        }
+      }
+      /* ★ 回显 RTCP 反馈（a=rtcp-fb）。网关 offer 里每个视频 PT 都带全套
+       *   ccm fir / nack / nack pli / goog-remb / rrtr / transport-cc
+       * 不回显 = 声明不支持，网关就不发对应的反馈，也不接受我们发。
+       * 会话期我们真正在用的是 nack/pli（cm_nack_tick / cm_kf_tick）和
+       * RR（cm_rtcp_tick），这几个必须回显。
+       * transport-cc 同上理由跳过，理由见上面对 extmap 的注释。 */
+      if (m.rtcpFb) {
+        for (const f of m.rtcpFb) {
+          if (f.name.indexOf('transport-cc') >= 0) continue;
+          lines.push('a=rtcp-fb:' + f.pt + ' ' + f.name);
+        }
       }
     }
     if (m.kind === 'application') lines.push('a=sctp-port:5000');

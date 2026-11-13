@@ -80,6 +80,14 @@ typedef struct {
     uint64_t rx_pkts;   /* socket 上读到的 datagram 总数 */
     uint64_t rx_stun;   /* 其中 STUN（ICE keepalive / 响应） */
     uint64_t rx_kept;   /* 我们回出去的 STUN Binding Success 个数 */
+    /* 我们主动发的 ICE consent（cm_ice_consent_tick）**被网关回复**的次数。
+     *
+     * 这个计数是判定「网关到底认不认我们的 consent」的唯一依据：
+     *   consentSent 涨、consentResp 不涨 → 包发出去了但没人理（端口/凭据错、
+     *     或网关根本不要求 consent），说明 consent 不是 bug1 的解
+     *   consentSent 与 consentResp 同步涨 → 通道是双向健康的，那 4m18s
+     *     停推就另有原因（回到 RTCP/TWCC 或服务端策略） */
+    uint64_t rx_consent_resp;
     uint64_t rx_dtls;   /* 其中 DTLS 记录（只喂给 OpenSSL） */
     uint64_t rx_rtp;
     uint64_t rx_rtcp;
@@ -139,6 +147,12 @@ typedef struct {
     /* 落在当前 AU seq 范围之外的重传包数（R2 修正后才有的计数）。
      * >0 说明缺口表 TTL 跨过了 AU 边界 —— 归零不影响功能，是健康信号。 */
     uint64_t vid_stale_rtx;
+    /* 因为丢包被整帧丢掉的 **P 帧 AU** 个数（不含 IDR：IDR 走 vid_au_drop）。
+     * L1 修好后它同时是「drop broken P AU」那行日志的限速计数器。
+     * 与 gateDrop 的区别：gateDrop 是「没关键帧，主动不放行」，
+     * pDrop 是「有关键帧、但这一帧拼不全所以只丢这一帧」—— 后者增长
+     * 说明丢包在发生但画面还能继续动（这是我们要的健康态）。 */
+    uint64_t vid_p_drop;
 
     /* ---- RTCP RR（RFC 3550 §6.4.1 / §A.3）的统计基础（cm_rtp.c 维护）----
      *
@@ -236,6 +250,24 @@ typedef struct cm_sess {
     int video_ok;
     int audio_ok;
     int video_w, video_h;
+
+    /* ---- ICE consent refresh（cm_ice.c 的 cm_ice_consent_tick）----
+     *
+     * 网关是 ice-lite，连通后**它自己也会周期发 Binding Request**（我们
+     * 在 cm_stun_handle 里回 0x0101）；但 RFC 8445 §11 的 consent 是双向义务，
+     * 浏览器侧实测 candidate-pair.consentRequestsSent 每 ~2.5s +1，
+     * 而我们在连通后立刻停发 STUN —— 这是与官方客户端最大的行为差异。
+     *
+     * 现场表现（bug1）：约 4m18s 后网关单方面停推 RTP，WS 仍 open、
+     * 我们的 WS 心跳仍被回显、没有任何 error/close op。
+     * 分析见 docs/断网根因-163CG复核.md。 */
+    uint64_t next_ice_consent_ms;  /* 下一次发 consent 的时刻（0 = 未启动） */
+    uint64_t ice_consent_count;    /* 已发出的 consent 个数（对账用） */
+    uint64_t ice_consent_log_ms;   /* 日志限速 */
+    /* 连通时协商定的角色（0=controlling，1=controlled）。部分媒体服回 487
+     * Role Conflict 后 cm_ice_run 会切到 controlled，consent 必须沿用同一角色，
+     * 否则会话期又发 USE-CANDIDATE 会被当成非法提名。 */
+    int ice_controlled;
 
     /* JS 侧 poll 心跳：js_poll() 每次调用都刷新。
      * 用来判断小程序是否还活着——退到后台 / 被系统冻结后 JS 定时器停摆，
@@ -344,6 +376,16 @@ int  cm_cfg_parse(cm_cfg *cfg, const char *json);
 
 /* ICE：创建 socket 并打 STUN，成功后 s->ice_state=CONNECTED（cm_ice.c） */
 int  cm_ice_run(cm_sess *s);
+/* ICE consent refresh（RFC 8445 §11，本实现按 2.5s 周期）。
+ *
+ * 网关 ice-lite 在连通后仍会周期发 Binding Request，我们回 0x0101 只能证明
+ * 「它问到了、我们活着」；而 consent 是**由发起方（我们）主动证明自己还在**。
+ * 浏览器侧 consentRequestsSent 每 ~2.5s +1，这是与官方客户端唯一的
+ * 周期性双向报文差异 —— 不加这个，约 4m18s 后网关会单方面停推 RTP。
+ *
+ * 由 cm_media_loop 每轮调用（内部按 next_ice_consent_ms 限速，不阻塞）。
+ * 未连通 / 无 pwd 时直接返回，安全幂等。 */
+void cm_ice_consent_tick(cm_sess *s);
 /* DTLS：在已有 socket 上做握手 + 导出 SRTP key（cm_dtls.c） */
 int  cm_dtls_run(cm_sess *s);
 int  cm_dtls_get_km(cm_sess *s, unsigned char *km_out, int cap);

@@ -436,7 +436,7 @@ export default {
 }
 
 .back-t {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color;
 }
 
@@ -455,7 +455,7 @@ export default {
 }
 
 .search-txt {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color-strong;
   lines: 1;
 }
@@ -475,7 +475,7 @@ export default {
 }
 
 .go-t {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @btn-text-on-accent;
 }
 
@@ -489,7 +489,7 @@ export default {
 }
 
 .hint-t {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @accent-blue;
   lines: 1;
 }
@@ -542,7 +542,7 @@ export default {
 }
 
 .sec-title {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color-strong;
   flex-grow: 1;
   flex-shrink: 1;
@@ -551,7 +551,7 @@ export default {
 }
 
 .sec-sub {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
@@ -580,13 +580,13 @@ export default {
 }
 
 .chip-t {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color;
   lines: 1;
 }
 
 .empty-text {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
@@ -601,7 +601,7 @@ export default {
 }
 
 .clear-t {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
 }
 
@@ -654,13 +654,13 @@ export default {
 }
 
 .lcard-name {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color;
   lines: 1;
 }
 
 .lcard-sum {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   lines: 1;
 }
@@ -683,7 +683,7 @@ export default {
 }
 
 .more-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color;
 }
 
@@ -697,7 +697,7 @@ export default {
 }
 
 .state-text {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color-dim;
   lines: 1;
 }
@@ -718,7 +718,7 @@ export default {
 }
 
 .retry-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @btn-text-on-accent;
 }
 </style>

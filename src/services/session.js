@@ -85,7 +85,7 @@ export async function applyTicket(opts) {
   const size = o.size || GAME_SIZE[o.gameType === 'pc' ? 'pc' : 'mobile'];
   const quality = o.quality || 'low';
 
-  // ⚠️ region 必须按游戏查，不能写死。
+  // region 必须按游戏查，不能写死。
   // 实测：手游区是 gh*/zmd*（ghnfs/ghzcs/gxbxa/ghbtj…），端游区是 pc*/at*
   // （pchnry_d/pchdxzty_d…）。给端游传手游 region 时服务端回
   // 404 {"errcode":1288,"errmsg":"no region avail, please do speed test again"}，

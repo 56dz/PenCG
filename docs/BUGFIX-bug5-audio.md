@@ -417,12 +417,20 @@ void cm_audio_route_restore(cm_sess *s) {
 
 X6 Pro 的 Falcon 运行时里，JS 的 `console` **只有 `console.error` 会写盘**；
 `console.warn` / `console.log` 完全不落盘（全盘 `grep -a -c 'W][JS]'` 计数为 0）。
-落盘文件是 **`/userdata/applog/loli_s6_dev.txt`**（不是 `DictPen_*.log`）。
+落盘文件是 **miniapp 进程的 stdout**，文件名带启动时间戳、每次重启都换，**不能写死**：
 
 ```bash
 ADB="./env/adb/adb.exe -s 9D91500007505171"
-$ADB shell "grep -a -n 'pencg' /userdata/applog/loli_s6_dev.txt | tail -50"
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')   # 实测 /userdata/applog/DictPen_20261113_232219.log
+echo "LOG=$L"
+$ADB shell "grep -a -n 'pencg' $L | tail -50"
 ```
+
+> **路径更正（2026-11-14 真机定论）**：本节早期版本写的
+> `/userdata/applog/loli_s6_dev.txt` **是错的** —— 该文件实测只有 **1 字节**，
+> `grep -c pencg` / `grep -c cgmedia` 都是 0，是空文件。
+> 真日志在 `DictPen_YYYYMMDD_HHMMSS.log`（当时 `/userdata/applog/DictPen_20261113_232219.log`，13.2MB）。
 
 行形态固定：
 
@@ -446,10 +454,10 @@ $ADB shell "grep -a -n 'pencg' /userdata/applog/loli_s6_dev.txt | tail -50"
 [cgmedia] aplay pid=2412 exited on EOF after 10 ms
 ```
 
-- native 输出是否也落进 `loli_s6_dev.txt`、还是只进 `stdout`（取决于 Falcon 怎么接 `miniapp` 的 stdout）
-  **待现场确认**。现场若只看到 JS 侧 `[pencg]` 行、一条 `[cgmedia]` 都没有，
-  先按「native 走了另一路输出」排查，**不要直接判定修复没生效**。
-- 建议的抓取方式（两条通道一起看）：`grep -a -e '\[pencg\]' -e '\[cgmedia\]'`。
+- native 输出**和 JS 的 `console.error` 必落同一个文件**（2026-11-14 已确认）：两者都跟着
+  miniapp 进程的 stdout 走，一个进程只有一个 stdout。所以不是「两路输出」，是**一份文件两种前缀**。
+- 因此抓取时两条前缀一起 grep 同一个 `$L`：`grep -a -e '\[pencg\]' -e '\[cgmedia\]' "$L"`。
+  若一条 `[cgmedia]` 都没有，先回本节确认 `$L` 取对了，**不要直接判定修复没生效**。
 
 > 前置（假设已在 `haas-x6pro/` 目录、`ADB=./env/adb/adb.exe`、设备号 `9D91500007505171`）：
 
@@ -508,12 +516,12 @@ $ADB shell "amixer -c 0 cget name='Playback Path' | grep -o 'values=[0-9,]*' | t
 #    期望：回到 values=0 (OFF)  ← 修复前会一直留在 2 (SPK)
 ```
 
-日志应能看到完整的收尾链（`/userdata/applog/loli_s6_dev.txt`）。
-**注意通道**：这些行来自 native `cm_log()`，前缀是 `[cgmedia]` 而不是 `[pencg]`
-（见 §4 步骤 -1），所以两条通道一起抓：
+日志应能看到完整的收尾链（写在 `$L` 里，见 §4 步骤 -1）。
+**注意通道**：这些行来自 native `cm_log()`，前缀是 `[cgmedia]` 而不是 `[pencg]`，
+但两者落在**同一个文件**，所以两条前缀一起抓即可：
 
 ```bash
-$ADB shell "grep -a -h -e '\[cgmedia\]' -e '\[pencg\]' /userdata/applog/loli_s6_dev.txt | grep -E 'audio (snapshot|restore)|aplay pid=' | tail -20"
+$ADB shell "grep -a -h -e '\[cgmedia\]' -e '\[pencg\]' $L | grep -E 'audio (snapshot|restore)|aplay pid=' | tail -20"
 ```
 
 期望（顺序可能出现 EOF 或 SIGTERM 之一；`[cgmedia]` 前缀以真机为准，**待现场确认**）：
@@ -560,7 +568,7 @@ $ADB shell "amixer -c 1 cget numid=54 | grep -o 'values=[0-9,]*' | tail -1"
 
 # 用有道查词扫一个词，确认音频行为符合当前系统音量
 $ADB shell "ps | grep -i SoundPlayer"      # 确认 SoundPlayer 在跑（它是查词的发音进程）
-$ADB shell "grep -h '\[pencg\]' /userdata/applog/loli_s6_dev.txt | tail -5"
+$ADB shell "grep -h '\[pencg\]' \"$L\" | tail -5"
 #    期望：PenCG 的进程已经退出，日志里没有新的 pencg 行（说明我们没有残留进程在写声卡）
 ```
 

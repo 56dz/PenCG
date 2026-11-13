@@ -468,7 +468,7 @@ export default {
 }
 
 .back-t {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color;
 }
 
@@ -484,7 +484,7 @@ export default {
 }
 
 .topbar-title {
-  font-size: 17px;
+  font-size: 1.7708vw;
   color: @text-color-strong;
   lines: 1;
 }
@@ -499,7 +499,7 @@ export default {
 }
 
 .topbar-sub {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
   lines: 1;
 }
@@ -541,13 +541,13 @@ export default {
 }
 
 .hero-name {
-  font-size: 16px;
+  font-size: 1.6667vw;
   color: @text-color-strong;
   lines: 1;
 }
 
 .hero-sum {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
   lines: 1;
 }
@@ -574,7 +574,7 @@ export default {
 }
 
 .chip-t {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
 }
 
@@ -605,13 +605,13 @@ export default {
 }
 
 .stat-v {
-  font-size: 15px;
+  font-size: 1.5625vw;
   color: @accent-blue;
   lines: 1;
 }
 
 .stat-k {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
   margin-top: 1px;
   lines: 1;
@@ -635,13 +635,13 @@ export default {
 }
 
 .hist-t {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   lines: 1;
 }
 
 .act-hint {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @accent-blue;
   lines: 1;
 }
@@ -662,7 +662,7 @@ export default {
 }
 
 .q-label {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color;
   margin-right: 8px;
   width: 30px;
@@ -684,7 +684,7 @@ export default {
 }
 
 .q-t {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
@@ -700,7 +700,7 @@ export default {
 }
 
 .sec-title {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color-strong;
   flex-grow: 1;
   flex-shrink: 1;
@@ -708,7 +708,7 @@ export default {
 }
 
 .sec-sub {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
 }
 
@@ -723,14 +723,14 @@ export default {
 }
 
 .desc-line {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
   height: 17px;
   lines: 1;
 }
 
 .desc-empty {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
 }
 
@@ -745,7 +745,7 @@ export default {
 }
 
 .state-text {
-  font-size: 14px;
+  font-size: 1.4583vw;
   color: @text-color-dim;
   lines: 1;
 }
@@ -762,7 +762,7 @@ export default {
 }
 
 .retry-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @btn-text-on-accent;
 }
 </style>

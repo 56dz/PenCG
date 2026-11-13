@@ -251,7 +251,7 @@ t1 22:46:30 | screen_state:0 sys_br:20 bl_br:32 map2brightness:32 get_screen_sta
 `keep #N ... state=<raw>(<name>)`，其中 `state` 就是 `getScreenState()` 的原始返回值。因此：
 
 1. 用现成包，让设备自然进入 `[Idle]` 270s（调暗）与 300s（断电）——**不需要任何新代码**；
-2. 之后取 `/userdata/applog/loli_s6_dev.txt`，`grep -a "keep #"` 即可读到那两次的 `state=` 原始值；
+2. 之后取 miniapp 进程的日志（`P=$(pidof miniapp); L=$(readlink /proc/$P/fd/1)`，实测形如 `/userdata/applog/DictPen_YYYYMMDD_HHMMSS.log`），`grep -a "keep #" "$L"` 即可读到那两次的 `state=` 原始值（**不要用 `loli_s6_dev.txt`，那是 1 字节空文件**）；
 3. 判定：若调暗时出现 `state=3(DIM)`、断电时出现 `state=1(OFF)` → 现有判据成立，bug1 守卫有效，可以不改；若调暗时仍是 `state=0(ON)`、断电时是 `state=4(...)` → JSAPI 与 HAL 不同源，判据按 §7 改。
 
 在拿到这条日志之前，**§7 的 `n !== 0` 判据是无需额外信息的稳妥选择**（它不依赖 3 是否存在）。
@@ -319,13 +319,21 @@ function isScreenNotOn(st, bright) {
 
 ### 8.1 落地通道（先确认，否则 grep 全是空的）
 
-按 `PenCG/docs/BUGFIX-bug1-lifecycle.md:355-392` §6.0：Falcon 里 JS **只有 `console.error` 会写盘**，`console.warn`/`console.log` 完全不落盘；落盘文件是 **`/userdata/applog/loli_s6_dev.txt`**（`DictPen_*.log` 在本机不存在）；行首级别恒为 `[E]`，真实级别看行内 `[pencg][W]`。PenCG 所有日志经 `PenCG/src/services/log.js:44` 的 `console.error(line)`，满足条件。
+按 `PenCG/docs/BUGFIX-bug1-lifecycle.md` §6.0：Falcon 里 JS **只有 `console.error` 会写盘**，`console.warn`/`console.log` 完全不落盘；行首级别恒为 `[E]`，真实级别看行内 `[pencg][W]`。PenCG 所有日志经 `PenCG/src/services/log.js:44` 的 `console.error(line)`，满足条件。
+
+**落盘文件不能写死**：它是 miniapp 进程的 stdout，文件名带启动时间戳、每次重启都换。
 
 ```bash
-./env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -a -n -E 'pencg.*(keep #|app onHide|onHide 但屏幕|onStop 但屏幕|probe stage)' \
-   /userdata/applog/loli_s6_dev.txt | tail -80"
+ADB="./env/adb/adb.exe -s 9D91500007505171"
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')   # 实测 /userdata/applog/DictPen_20261113_232219.log
+echo "LOG=$L"
+$ADB shell "grep -a -n -E 'pencg.*(keep #|app onHide|onHide 但屏幕|onStop 但屏幕|probe stage)' \"$L\" | tail -80"
 ```
+
+> **路径更正（2026-11-14 真机定论）**：本节早期版本写「落盘文件是 `loli_s6_dev.txt`、
+> `DictPen_*.log` 在本机不存在」，**两句都反了** —— `loli_s6_dev.txt` 实测只有 1 字节，
+> 是空文件；真日志正是 `DictPen_YYYYMMDD_HHMMSS.log`。
 
 ### 8.2 需要制造的三段屏幕状态（同一局内连续采样）
 

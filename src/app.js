@@ -2,12 +2,28 @@ import { BasePage } from './base-page.js';
 import { stopPlay, mediaState, currentGameCode, inputBusy } from './services/media.js';
 import { stopGame } from './services/session.js';
 import { getScreenState, screenStateName, isScreenNotOn } from './services/screen.js';
+import { bootProfile, FALLBACK_WIDTH, FALLBACK_HEIGHT } from './services/device_profile.js';
 
 // 逻辑画布宽度来自设备 profile（真机截屏 + cfg.json 证实）：
 //   有道 X6 Pro ：Falcon UI 合成面横向条带 960x266，物理面板 480x960（direction=270）
+//   有道 X7 Pro ：参考项目实测合成面 936x280（部分固件报 960x280）—— **PenCG 未验证**
 // setViewPort(W) 把 W 个设计像素铺满合成面宽度，因此 W 必须等于合成面宽度，
 // 否则整页被等比缩放且**纵向裁掉底部**。
-const DESIGN_WIDTH = 960;
+//
+// 所以这里不再写死 960，改为**在 onLaunch 里同步**问一次 device_profile：
+//   · 探测成功（$falcon.env 报出可信的视口尺寸）→ 用实测宽度；
+//   · 探测失败/不可信 → bootProfile() 内部已经退回 FALLBACK_WIDTH=960，
+//     也就是说「读不到」与「改动前」完全等价，绝不会因为探测出错而整页缩放。
+//
+// 为什么不在模块顶层求值，而是拖到 onLaunch：
+//   顶层求值发生在 App 类实例化之前，此时框架可能还没跑完
+//   JQuickFalconEnv::init()，$falcon.env 存在但字段为空 —— 那样会静默落到
+//   兜底 960，探测永远「看起来是好的却不生效」。onLaunch 是 setViewPort
+//   唯一有效的时机，也是 env 一定已就绪的最早时机，两边对齐。
+//   仍然必须是**同步**取值：storage 之类的异步通道在这里来不及
+//   （参考项目 PenBili 踩过这个坑）。
+let DESIGN_WIDTH = FALLBACK_WIDTH;
+let BOOT = null;
 
 class App extends $falcon.App {
   constructor() {
@@ -16,8 +32,34 @@ class App extends $falcon.App {
 
   onLaunch(options) {
     super.onLaunch(options);
+    try {
+      BOOT = bootProfile();
+      DESIGN_WIDTH = BOOT.cfg.width > 0 ? BOOT.cfg.width : FALLBACK_WIDTH;
+    } catch (e) {
+      BOOT = null;
+      DESIGN_WIDTH = FALLBACK_WIDTH;
+    }
     this.setViewPort(DESIGN_WIDTH);
     $falcon.useDefaultBasePageClass(BasePage);
+    /* 每次启动都留一条设备档案日志：这是机型适配唯一的现场证据。
+     * 判据：source=env 说明 $falcon.env 真的读到了可信视口；source=fallback
+     * 说明探测没成（或因闸门判为不可信被丢弃），此时行为与本改动前一致。
+     * source=custom 表示用了 $falcon.env.custom.pencgDesignWidth 覆盖；
+     * source=force 表示有人把 device_profile.js 的 FORCE_WIDTH 写死了。 */
+    try {
+      const d = (BOOT && BOOT.device) || null;
+      console.error('[pencg][I] [device] width=' + DESIGN_WIDTH +
+        ' height=' + ((BOOT && BOOT.cfg.height) || FALLBACK_HEIGHT) +
+        ' source=' + ((BOOT && BOOT.source) || 'exception') +
+        ' model=' + ((BOOT && BOOT.model) || '-') +
+        ' raw=' + (d ? (d.width + 'x' + d.height) : 'null') +
+        ' envModel=' + ((d && d.model) || '-') +
+        ' platform=' + ((d && d.platform) || '-') +
+        ' api=' + ((d && d.apiVersion) || '-') +
+        ' note=' + ((BOOT && BOOT.note) || 'bootProfile 抛异常') +
+        (BOOT && BOOT.layoutFixed ? ' ★layoutFixed(base.less 仍是 960 布局)' : ''));
+    } catch (e) {}
+    try { console.error('[pencg][life] app onLaunch viewport=' + DESIGN_WIDTH); } catch (e) {}
   }
 
   onShow() {

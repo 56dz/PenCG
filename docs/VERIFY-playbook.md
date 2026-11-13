@@ -17,8 +17,8 @@ Lead 2026-11-12 22:15 在 X6 Pro 上实测：
 
 | 调用 | 是否落盘 | 证据 |
 |---|---|---|
-| `console.error(...)` | ✅ 落盘 | `/userdata/applog/loli_s6_dev.txt` 里有对应行 |
-| `console.warn(...)` | ❌ **完全不落盘** | 全盘 `grep -a -c 'W][JS]' /userdata/applog/loli_s6_dev.txt` = **0** |
+| `console.error(...)` | ✅ 落盘 | miniapp 进程 stdout 里有对应行 |
+| `console.warn(...)` | ❌ **完全不落盘** | 全盘 `grep -a -c 'W][JS]' "$L"` = **0** |
 | `console.log(...)` | ❌ **完全不落盘** | 同上 |
 
 **这是本项目最容易踩的坑**：改回 `console.warn` 之后，日志不是"级别低了"，
@@ -27,8 +27,23 @@ Lead 2026-11-12 22:15 在 X6 Pro 上实测：
 
 ### 0.2 落盘路径与行格式
 
+落盘文件 = **miniapp 进程的 stdout**，文件名带启动时间戳，每次重启都换，**不能写死**：
+
+```bash
+ADB="./env/adb/adb.exe -s 9D91500007505171"
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')   # 实测 /userdata/applog/DictPen_20261113_232219.log
+echo "LOG=$L"
 ```
-文件：/userdata/applog/loli_s6_dev.txt
+
+> **路径更正（2026-11-14 真机定论）**：本手册早期版本（以及四份 BUGFIX 文档）
+> 把落盘文件写成 `/userdata/applog/loli_s6_dev.txt`，**这是错的** ——
+> 该文件实测只有 **1 字节**，`grep -c pencg` / `grep -c cgmedia` 都是 0，是个空文件。
+> 真日志在 `DictPen_YYYYMMDD_HHMMSS.log`。**先 `readlink` 再 grep，不要写死、也不要只靠 `ls -t` 猜。**
+
+行格式：
+
+```
 行格式：[2026-11-12 22:15:24.947][E][JS] [pencg][W] [screen] keep #3 backend=... ok bright=113
         └──────────┬────────────┘ └┬┘ └┬┘ └────┬────┘ └───────────────┬──────────────────┘
               落盘时间戳         级别 来源  PenCG 级别前缀       PenCG 正文
@@ -37,7 +52,7 @@ Lead 2026-11-12 22:15 在 X6 Pro 上实测：
 最常用的读日志命令（**任何一节都从这里开始**）：
 
 ```bash
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a -n 'pencg' /userdata/applog/loli_s6_dev.txt | tail -50"
+./env/adb/adb.exe -s 9D91500007505171 shell "P=\$(pidof miniapp); L=\$(readlink /proc/\$P/fd/1); echo LOG=\$L; grep -a -n 'pencg' \$L | tail -50"
 ```
 
 三条铁律：
@@ -63,10 +78,10 @@ fflush(stdout);
 ```
 
 - 前缀是 **`[cgmedia]`**，不是 `[pencg]`，默认级别 `g_cm_log_level = 3`（即 `CM_LOGD` 不打）。
-- 它和 JS console **是两条完全独立的通道**，与上面的 `console.error` 规则无关。
-- 它是否也落进 `loli_s6_dev.txt`（取决于 Falcon 如何接 `miniapp` 的 stdout）：
-  **待现场确认**。
-- 所以抓日志时两条一起抓：`grep -a -e '\[pencg\]' -e '\[cgmedia\]'`。
+- **它和 JS 的 `console.error` 必落同一个文件**：两者都跟着 miniapp 进程的 stdout 走，
+  而一个进程只有一个 stdout（2026-11-14 已确认）。所以**不是两条通道两个文件**，
+  是**一个文件两种前缀**。
+- 抓日志时两条前缀一起抓：`grep -a -e '\[pencg\]' -e '\[cgmedia\]' "$L"`。
 
 ### 0.4 进场三条命令（每次都跑）
 
@@ -77,19 +92,22 @@ ADB="./env/adb/adb.exe -s 9D91500007505171"
 # ① 设备在线
 $ADB shell 'echo ok'
 
-# ② 清日志（本次唯一会"写"设备的动作，只动日志文件）
-$ADB shell "rm -f /userdata/applog/loli_s6_dev.txt"
+# ② 解析当前日志文件并清空（本次唯一会"写"设备的动作，只动日志文件）
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')
+echo "LOG=$L"
+$ADB shell "mv \"$L\" \"$L.bak\" 2>/dev/null; sync"
 
 # ③ 通道自检：随便触发一次 PenCG 操作（如切到「我的」），再数计数
-$ADB shell "grep -a -c 'pencg' /userdata/applog/loli_s6_dev.txt"
+$ADB shell "grep -a -c 'pencg' $L"
 ```
 
 **③ 的计数为 0 就是通道问题，不是代码问题。** 先修通道（确认装的是含
 `console.error` 的新包、确认 `log.js:44`），再去怀疑逻辑 —— 否则后面每一条判据
 都会"看起来没生效"。
 
-> `DictPen_*.log` 这个路径在本机**不存在**，四份 BUGFIX 文档里凡是出现它的地方
-> 都属于历史误写，已统一改为 `loli_s6_dev.txt`。
+> **路径更正（2026-11-14）**：`/userdata/applog/loli_s6_dev.txt` 实测是 **1 字节空文件**，
+> 真日志在 `DictPen_YYYYMMDD_HHMMSS.log`。早期版本本文档把两者说反了，已全部更正。
 
 ---
 
@@ -106,7 +124,7 @@ $ADB shell "grep -a -c 'pencg' /userdata/applog/loli_s6_dev.txt"
 
 ### 操作 → 应出现日志串
 
-| 操作 | 应出现（`loli_s6_dev.txt` 内 grep） | 判据 |
+| 操作 | 应出现（`$L` 内 grep） | 判据 |
 |---|---|---|
 | 冷启动进游戏页 | `[screen] probe 形态=... → 命中/miss(...)` ×6，然后 `[screen] 后端探测结论：采用 <name> 能力[keep=1 ...]` | **出现 `后端探测结论：全部未命中` 就是红色警报**：六条回退全不通，保活是空转，bug1 修了等于没修（对应断言 V1） |
 | 游戏在播，不碰屏幕 | 每 20s 一行 `[screen] keep #N backend=... ok bright=... state=0(ON) always=on closeScreen=1080s ok` | `N` **必须单调涨**；出现两段交错的 N（1,1,2,2…）= 定时器泄漏 |
@@ -153,7 +171,7 @@ $ADB shell "pidof miniapp"; $ADB shell "pidof aplay"
 
 ### 前置条件
 
-- 设备 `9D91500007505171`，已验证在线；清过 `loli_s6_dev.txt`。
+- 设备 `9D91500007505171`，已验证在线；清过 `$L`（见 §0.4）。
 - 起始状态必须是**未登录**：手动在设备上「我的」→ 退出登录。
   ⚠ **不要**用 adb 改 `preferences.json`（值是「JSON 字符串里再套一层 JSON」，
   必须 pull → `json.loads` 校验 → push，`HANDOFF.md` L68-77 明确禁用 sed）。
@@ -183,7 +201,7 @@ $ADB shell "pidof miniapp"; $ADB shell "pidof aplay"
 
 | 检查 | 命令 | 通过标准 |
 |---|---|---|
-| 导航没塌陷（没多压一层页） | `$ADB shell "grep -a '\[nav\]' /userdata/applog/loli_s6_dev.txt \| tail -n 20"` | 有 `closePageByName login`，**不应**有 `[nav] 无法关闭页面 name=login`（那是 `navTo('index')` 兜底被触发） |
+| 导航没塌陷（没多压一层页） | `$ADB shell "grep -a '\[nav\]' $L \| tail -n 20"` | 有 `closePageByName login`，**不应**有 `[nav] 无法关闭页面 name=login`（那是 `navTo('index')` 兜底被触发） |
 | 会话变化能被无刷新感知 | 停在「推荐」→ 从其它入口登录 → **不点任何东西**等 2.5~5s | 界面自动切到「我的」；日志有 `[index] 会话版本 ...` 或 `[mine] session 版本变化 ...` |
 | **防回归（最容易踩的坑）** | 已登录状态下杀小程序 → 冷启动 | 启动后停在**「推荐」**，不被自动拽到「我的」。若冷启动出现「会话版本 **0 -> N**，本地登录态 false -> true」，说明 `isLoggedIn()` 翻转保护失效 —— **这是必须修的回归** |
 | 退出登录也同步 | 已登录停在「我的」→ 点退出登录 → 确认 | 提示变「未登录」，其它栏目点回来仍是未登录（版本号 bump 生效，不会复活旧会话） |
@@ -297,11 +315,13 @@ plane[76]: Esmart1-win0
   可用 `still no IDR` 告警与其他故障区分。
 - **一条 `[cgmedia]` 都没有** → 先用 `P=$(adb shell pidof miniapp); adb shell "readlink /proc/$P/fd/1"`
   确认这个进程的 stdout 指向哪个文件，再去那个文件里 grep，别直接判定补丁没编译进去。
-  **结论（已真机定论）**：`[cgmedia]` 走 `cm_util.c` 的 `fprintf(stdout, ...)`，落进**当前
-  miniapp 进程的 stdout**；该 stdout 指向哪个文件取决于进程怎么起的，实测有时是
-  `/userdata/applog/loli_s6_dev.txt`，有时是 `/userdata/applog/DictPen_YYYYMMDD_HHMMSS.log`。
-  JS 的 `[pencg]` 同理（`console.error` 也跟进程 stdout 走）。**两者落在同一个文件里**，
-  不是一个 JS 文件一个 native 文件；想知道是哪个，只能看 `readlink /proc/<pid>/fd/1`。
+  **结论（已真机定论 2026-11-14）**：`[cgmedia]` 走 `cm_util.c` 的 `fprintf(stdout, ...)`，落进**当前
+  miniapp 进程的 stdout**；该 stdout 指向哪个文件取决于进程怎么起的。`[pencg]`（`console.error`）同理。
+  **两者永远落在同一个文件里**，不是一个 JS 文件一个 native 文件。
+  实测（X6 Pro，1.2.0）：`/userdata/applog/loli_s6_dev.txt` 是 **1 字节空文件**，
+  真正的日志在 `/userdata/applog/DictPen_20261113_232219.log`（13.2MB，`[cgmedia]` 2236 行、
+  `[pencg]` 上万行）。所以**别默认去 `loli_s6_dev.txt` 找**，先跑
+  `P=$(adb shell pidof miniapp); adb shell "readlink /proc/$P/fd/1"` 拿真实路径。
 
 ### 仍未证实的点（待现场确认）
 
@@ -413,7 +433,7 @@ grep -rn "console\.warn\|console\.log" PenCG/src/
 |---|---|---|
 | `PenCG/src/services/log.js:7` | `// console.warn 与 console.log **完全不落盘**（全盘 grep 不到一行 [W][JS]）。` | ✅ 正确，是这次教训的书面记录 |
 | `PenCG/src/services/log.js:9` | `// 若改回 console.warn，真机上所有 PenCG 日志会静默消失（这个坑踩过一次）。` | ✅ 正确 |
-| `PenCG/src/services/screen.js:67` | `// console.log 不落盘（真机只有 console.warn / console.error 进 /userdata/applog/），` | ⚠️ **内容已过时/错误**：`console.warn` 并不落盘。仅注释，不影响运行；建议后续修正为「只有 `console.error` 落盘，走 `/userdata/applog/loli_s6_dev.txt`」 |
+| `PenCG/src/services/screen.js:67` | `// console.log 不落盘（真机只有 console.warn / console.error 进 /userdata/applog/），` | ⚠️ **内容已过时/错误**：`console.warn` 并不落盘；且路径不是固定文件。仅注释，不影响运行；建议后续修正为「只有 `console.error` 落盘，落 miniapp 进程 stdout（`readlink /proc/$(pidof miniapp)/fd/1`）」 |
 
 结论：
 1. `PenCG/src/` 下**没有**任何 `console.warn(...)` / `console.log(...)` 的运行时调用，
@@ -426,6 +446,13 @@ grep -rn "console\.warn\|console\.log" PenCG/src/
 - `PenCG/README.md:197` 仍写「只有 `console.warn` / `console.error` 进 `/userdata/applog/`」—— **错误**，
   且不在 `PenCG/docs/` 写作用域内，未改，登记在此。
 - `PenCG/docs/audio-baseline.txt:193` 原写「console.warn/error 落 `/userdata/applog/DictPen_*.log`」，
-  路径与通道两处都过时 —— 已在本次一并修正为 `loli_s6_dev.txt` + 仅 `console.error`。
-- `PenCG/docs/STATES.md:236` 的 `grep -h '\[mine\]' /userdata/applog/DictPen_*.log` 已随本次统一替换
-  改为 `loli_s6_dev.txt`（路径已修，行内级别前缀写法未动）。
+  路径与通道两处都过时 —— 已在本次一并修正为「仅 `console.error` 落盘」。
+
+> **2026-11-14 再更正**：上面这条 11-13 的「修正」本身只对了「仅 error 落盘」这一半，
+> 路径半句还是错的。当时的判断是「`DictPen_*.log` 不存在、真日志在 `loli_s6_dev.txt`」，
+> **事实正好相反**：`loli_s6_dev.txt` 是 1 字节空文件，`DictPen_*.log` 才是真日志。
+> 现在统一的说法是「落盘文件 = miniapp 进程 stdout（`readlink /proc/$(pidof miniapp)/fd/1`），
+> 实测形如 `DictPen_YYYYMMDD_HHMMSS.log`」，见 §0.2。凡是还写着 `loli_s6_dev.txt`
+> 作为**落盘目标**的地方都已改成 `$L`。
+- `PenCG/docs/STATES.md:236` 的 `grep -h '\[mine\]'` 原用 `DictPen_*.log`，11-13 被误改成
+  `loli_s6_dev.txt`；正确做法是按 §0.2 先解析 `$L` 再 grep。

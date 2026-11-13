@@ -310,11 +310,14 @@ ADB="./env/adb/adb.exe -s 9D91500007505171"
 # 0) 确认设备在线、时间同步
 $ADB shell 'date'
 
-# 1) 找到当前主日志（★ 轮转极快，必须每局开始时重新取一次文件名）
-$ADB shell 'ls -t /userdata/applog/DictPen_*.log | head -1'
+# 1) 找到当前主日志（★ 不要写死文件名，也不要只靠 ls -t 猜）
+#    正确做法：解析 miniapp 进程的 stdout 指向
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')
+echo "LOG=$L"
 
-# 2) 开跑前清一次计数器（只读统计用；不改设备状态）
-$ADB shell 'ls -la /userdata/applog/loli_s6_dev.txt 2>/dev/null'
+# 2) 开跑前确认日志已存在且非空（只读统计用；不改设备状态）
+$ADB shell "ls -la \"$L\""
 
 # 3) 起播：用 dev-autostart（唯一能自动进 play 页的方式）
 #    PenCG/src/dev-autostart.js:17  DEV_AUTOSTART = { page:'play', delay:4000,
@@ -325,7 +328,9 @@ $ADB shell 'ls -la /userdata/applog/loli_s6_dev.txt 2>/dev/null'
 **每 20 秒采一次 probe**（probe 行本身就是现成的采样器，`PenCG/src/pages/play/play.vue:1364-1379`）：
 
 ```bash
-LOG=$($ADB shell 'ls -t /userdata/applog/DictPen_*.log | head -1' | tr -d '\r')
+# 每局开始前重新解析一次（进程重启后 $P/$L 会变）
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+LOG=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')
 while true; do
   date '+%H:%M:%S'
   $ADB shell "grep -a -o 'probe stage=.*' $LOG | tail -1"

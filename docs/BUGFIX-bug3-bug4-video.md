@@ -19,7 +19,10 @@ UDP → 自写 STUN/DTLS-SRTP → RTP 拆包 → `appsrc` → `h264parse` → `m
 > 事后补充（2026-11-12 晚真机复测）：那次「命中数为 0」**不是代码没跑，是取证通道用错了**。
 > 当时 `PenCG/src/services/log.js` 还在走 `console.warn`，而 X6 Pro 的 Falcon 运行时里
 > **只有 `console.error` 会写盘**，`console.warn` / `console.log` 完全不落盘，所以日志根本没产生。
-> 正确路径是 `/userdata/applog/loli_s6_dev.txt`，不是 `DictPen_*.log`。详见 **§五 步骤 -1**。
+> 正确做法是用 `P=$(pidof miniapp); readlink /proc/$P/fd/1` 解析出**当前进程**的日志文件
+> 再 grep，不要写死文件名。详见 **§五 步骤 -1**。
+> （2026-11-14 再更正：当时说「正确路径是 `loli_s6_dev.txt`、不是 `DictPen_*.log`」也是错的 ——
+> 实测 `loli_s6_dev.txt` 只有 1 字节、是空文件，`DictPen_*.log` 才是真日志。）
 >
 > ⚠️ **定案（2026-11-13 20:35）：bug3/bug4 的真正根因是 `kmssink` 的 `sync=true`，已改为
 > `sync=false`（`PenCG/native/csrc/cgmedia/cm_gst.c:253-255`），两个游戏已由用户目视确认修好。
@@ -767,11 +770,20 @@ caps 变化：不够，需要 flush（= §三 hunk 3）。**
 > 而当时 `PenCG/src/services/log.js` 走的是 `console.warn`（现已在 `log.js:44` 改为 `console.error`），
 > 所以那批日志**根本没有产生**，不是「没有命中」。
 
-落盘文件是 **`/userdata/applog/loli_s6_dev.txt`**（不是 `DictPen_*.log`）。
+落盘文件是 **miniapp 进程的 stdout**，文件名带启动时间戳、每次重启都换，**不能写死**：
 
 ```bash
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a -n 'pencg' /userdata/applog/loli_s6_dev.txt | tail -50"
+ADB="./env/adb/adb.exe -s 9D91500007505171"
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')   # 实测 /userdata/applog/DictPen_20261113_232219.log
+echo "LOG=$L"
+$ADB shell "grep -a -n 'pencg' $L | tail -50"
 ```
+
+> **路径更正（2026-11-14 真机定论）**：本节早期版本写的
+> `/userdata/applog/loli_s6_dev.txt` **是错的** —— 该文件实测只有 **1 字节**，
+> `grep -c pencg` / `grep -c cgmedia` 都是 0，是空文件。
+> 真日志在 `DictPen_YYYYMMDD_HHMMSS.log`（当时 `/userdata/applog/DictPen_20261113_232219.log`，13.2MB）。
 
 行形态固定：
 
@@ -784,8 +796,9 @@ caps 变化：不够，需要 flush（= §三 hunk 3）。**
 - **落盘级别恒为 `[E]`**（底层通道是 `console.error`），跟严重程度无关。
 - **真正的级别只看行内 `[pencg][I|W|E]`**；本节下文示例里的 `[pencg][W]` 在设备上是 `...[E][JS] [pencg][W] ...`。
 - 下文步骤 2~4 里 grep 的都是 **native 侧 `[cgmedia]`** 字符串（`SPS reports` / `stat` / `PLI sent` 等），
-  它们走 `cm_log()` → `fprintf(stdout)`，是**另一条独立通道**；是否也落进 `loli_s6_dev.txt`
-  **待现场确认**。JS 侧（`[pencg][video]` / `[play]`）一定在 `loli_s6_dev.txt` 里。
+  它们走 `cm_log()` → `fprintf(stdout)`。**它们和 JS 的 `[pencg]` 必落同一个文件** ——
+  两者都跟 miniapp 进程的 stdout 走，一个进程只有一个 stdout（2026-11-14 已确认）。
+  所以就在同一个 `$L` 里 grep 两种前缀，不用找第二个文件。
 
 > 前提：`cd /d/Users/Daniel/code/DSH/x6pro/haas-x6pro`（下文 `./env/adb/adb.exe` 均相对此目录）
 > 设备序列号 `9D91500007505171`。**本节的命令全部只读，不改设备状态。**
@@ -810,13 +823,13 @@ caps 变化：不够，需要 flush（= §三 hunk 3）。**
 ```bash
 # 每次（重）连、每次切画质都打一条。看 WxH / profile / level 三个值，
 # profile 66=Baseline, 77=Main, 100=High
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a 'SPS reports' /userdata/applog/loli_s6_dev.txt | tail -20"
+./env/adb/adb.exe -s 9D91500007505171 shell "grep -a 'SPS reports' $L | tail -20"
 
 # 变化时会额外打一条（本次修好了旧版恒打 0 的 bug，现在能看出真实的前后值）
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a 'SPS profile changed' /userdata/applog/loli_s6_dev.txt | tail -20"
+./env/adb/adb.exe -s 9D91500007505171 shell "grep -a 'SPS profile changed' $L | tail -20"
 
 # 参数集补插是否被触发：>=1 说明网关确实没重发 SPS/PPS，补丁救回来了
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a 'injected cached parameter sets' /userdata/applog/loli_s6_dev.txt | tail -20"
+./env/adb/adb.exe -s 9D91500007505171 shell "grep -a 'injected cached parameter sets' $L | tail -20"
 ```
 
 **判据**：若「原神」和「终末地」的 `SPS reports` 里 `profile=` 或 level
@@ -833,7 +846,7 @@ bug 4 的差异有码流侧解释。若完全相同，则差异只在丢包率/�
 # 每 2 秒拉一次 stat（emit_stat 里加了 auDrop/gateDrop/kfReq/dup/reorder/spsInject/rtcpIn）
 # 连续采样 60 秒，存成 CSV 便于算增速
 for i in $(seq 1 30); do
-  ./env/adb/adb.exe -s 9D91500007505171 shell "grep -a '\"t\":\"stat\"' /userdata/applog/loli_s6_dev.txt | tail -1" \
+  ./env/adb/adb.exe -s 9D91500007505171 shell "grep -a '\"t\":\"stat\"' $L | tail -1" \
     >> /tmp/pencg_stat.log
   sleep 2
 done
@@ -851,7 +864,7 @@ wc -l /tmp/pencg_stat.log
 
 ```bash
 # 一次性看健康告警（补丁新增，每 10 秒最多一条）
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a -E 'still no IDR|packet loss seen' /userdata/applog/loli_s6_dev.txt | tail -30"
+./env/adb/adb.exe -s 9D91500007505171 shell "grep -a -E 'still no IDR|packet loss seen' $L | tail -30"
 ```
 
 `still no IDR (rx=... kfReq=... gateDrop=... auDrop=...) — gateway may be ignoring PLI`
@@ -864,7 +877,7 @@ wc -l /tmp/pencg_stat.log
 
 ```bash
 # 看每一发 PLI 的形态：srtcp（加密，正确）还是 plain（明文，几乎必被丢）
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a 'PLI sent' /userdata/applog/loli_s6_dev.txt | tail -20"
+./env/adb/adb.exe -s 9D91500007505171 shell "grep -a 'PLI sent' $L | tail -20"
 ```
 
 **判据**：如果全是 `plain`，说明 DTLS 导出的 SRTCP 密钥还没 ready，
@@ -1209,7 +1222,7 @@ bug 3 的「上一帧马赛克残留」是同一机制的下游：平面偶尔�
 **下次上高铁（高丢包）时才是这条改动的真正考场。** 那时要看的关键串是：
 
 ```bash
-./env/adb/adb.exe shell "grep -a -E 'NACK sent|AU repaired|stale retransmit|IDR starvation|consecutive P AU drops' /userdata/applog/loli_s6_dev.txt | tail -100"
+./env/adb/adb.exe shell "grep -a -E 'NACK sent|AU repaired|stale retransmit|IDR starvation|consecutive P AU drops' $L | tail -100"
 ```
 
 判据：

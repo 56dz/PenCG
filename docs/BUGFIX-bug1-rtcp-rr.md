@@ -445,12 +445,17 @@ $ADB shell sync
 ### 9.2 抓日志
 
 ```bash
-$ADB shell "grep -a -e '\[pencg\]' -e '\[cgmedia\]' /userdata/applog/loli_s6_dev.txt" > bug1-rr.txt
+# 日志文件不能写死：它是 miniapp 进程的 stdout（2026-11-14 真机定论）
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')
+echo "LOG=$L"
+$ADB shell "grep -a -e '\[pencg\]' -e '\[cgmedia\]' \"$L\"" > bug1-rr.txt
 ```
 
-`[cgmedia]` 前缀来自 `cm_util.c:19-29` 的 `cm_log()`（`fprintf(stdout, ...)`），
-它与 JS 的 `[pencg]` 是两条独立通道；是否落进 `loli_s6_dev.txt` 依
-`VERIFY-playbook.md:69,383,392` 仍标"待现场确认"。
+`[cgmedia]` 前缀来自 `cm_util.c:19-29` 的 `cm_log()`（`fprintf(stdout, ...)`）。
+**它和 JS 的 `[pencg]` 必落同一个文件**：两者都跟着 miniapp 进程的 stdout 走，
+进程只有一个 stdout（2026-11-14 已确认，原先「两条独立通道、落哪个文件待确认」的说法已作废）。
+顺带更正：`loli_s6_dev.txt` 实测只有 1 字节、是空文件，真日志在 `DictPen_YYYYMMDD_HHMMSS.log`。
 
 ### 9.3 必须看到的日志串
 
@@ -607,7 +612,7 @@ STALLGUARD 已经能检测（20s）+ 三级自愈（3 次）。如果 (A) 是真
 | 4 | `gameToken` 在我们代码里的来源字段 | **未验证**（还没在 offer 解析里定位） |
 | 5 | 入站 RTCP 是否真的存在（我们不解密，`CM_LOGD` 默认也不打） | **未验证**，需要 `setLogLevel 4` 后重测 |
 | 6 | `session.js:73-79` 注释里"服务端不下发单局时长限制" | **未验证**（只是没观察到） |
-| 7 | `[cgmedia]` 日志是否稳定落进 `/userdata/applog/loli_s6_dev.txt` | **未验证**（playbook 标记待现场确认） |
+| 7 | `[cgmedia]` 日志落哪个文件 | **已确认（2026-11-14）**：miniapp 进程 stdout，与 `[pencg]` **同一文件**；实测 `loli_s6_dev.txt` 是 1 字节空文件，真日志在 `DictPen_YYYYMMDD_HHMMSS.log` |
 | 8 | `cm_ice.c:225-230` 的 peer 切换是否会让 PLI/RR 发到旧地址 | **未验证**（代码读出来是这样，但没实测） |
 | 9 | RR 报文是否被网关接受（它不回 RTCP，无法从回包确认） | **无法验证**；只能从"没有 error/异常日志 + 停推时间没变"间接判断 |
 

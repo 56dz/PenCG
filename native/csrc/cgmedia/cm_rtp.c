@@ -826,7 +826,10 @@ static void flush_frame(cm_sess *s) {
     if (key && g_rtp.au_broken && g_rtp.au_hold_state == 0) {
         g_rtp.au_hold_state = 1;
         g_rtp.au_hold_until_ms = now + IDR_HOLD_MS;
-        CM_LOGD("#%d IDR AU incomplete (missing=%d), hold %dms for NACK retransmits",
+        /* L1：升到 LOGI。这行是「IDR 正在等重传」的唯一信号，
+         * 默认 log_level=3（WARN）时 CM_LOGD 不落盘，真机就完全看不到
+         * 重传窗口有没有在起作用。每 IDR 最多一行，不会刷屏。 */
+        CM_LOGI("#%d IDR AU incomplete (missing=%d), hold %dms for NACK retransmits",
                 s->id, g_rtp.au_missing, IDR_HOLD_MS);
         return; /* 保留 AU 状态，等 cm_rtp_flush_held 或补洞完成 */
     }
@@ -859,9 +862,19 @@ static void flush_frame(cm_sess *s) {
              * 只有**连续**丢到 DROP_STREAK_FORCE_KF 个 P 帧 AU，才说明参考帧
              * 链真的接不上（每个坏帧都在旧参考帧上累积误差），此时才降级等 IDR。 */
             g_rtp.drop_streak++;
-            CM_LOGD("#%d drop broken P AU (%llu bytes, missing=%d, streak=%d%s)",
-                    s->id, (unsigned long long)g_rtp.frame.len, g_rtp.au_missing,
-                    g_rtp.drop_streak, s->have_kf ? "" : ", already waiting IDR");
+            /* L1：升到 LOGI（弱网下这是判断「画面为什么卡一下」的主信号），
+             * 但要限速 —— 5~8% 丢包时每秒可能好几条。前 LOSS_LOG_MAX 条全打，
+             * 之后每 100 次打一条，保证「有数据可看」又不刷爆 /userdata。 */
+            s->stats.vid_p_drop++;
+            if (s->stats.vid_p_drop <= LOSS_LOG_MAX ||
+                (s->stats.vid_p_drop % 100u) == 0) {
+                CM_LOGI("#%d drop broken P AU (%llu bytes, missing=%d, streak=%d, "
+                        "total=%llu%s)",
+                        s->id, (unsigned long long)g_rtp.frame.len, g_rtp.au_missing,
+                        g_rtp.drop_streak,
+                        (unsigned long long)s->stats.vid_p_drop,
+                        s->have_kf ? "" : ", already waiting IDR");
+            }
             if (s->have_kf && g_rtp.drop_streak >= DROP_STREAK_FORCE_KF) {
                 s->have_kf = 0;
                 s->kf_starve_ms = 0;
@@ -991,7 +1004,9 @@ static void flush_frame(cm_sess *s) {
         if (g_rtp.au_sorted.len > 0) {
             base_p = g_rtp.au_sorted.p;
             base_n = (int)g_rtp.au_sorted.len;
-            CM_LOGD("#%d AU resequenced (%d segs, retransmits filled holes)", s->id, g_rtp.seg_n);
+            /* L1：升到 LOGI —— 说明 NACK 真的把乱序分片补回来了（重排生效）。 */
+            CM_LOGI("#%d AU resequenced (%d segs, retransmits filled holes)",
+                    s->id, g_rtp.seg_n);
         }
     }
 
@@ -1637,10 +1652,16 @@ void cm_rtp_on_packet(cm_sess *s, unsigned char *pkt, int len, const char *from_
                         }
                     }
                     s->stats.vid_nack_recovered++;
-                    CM_LOGD("#%d retransmit recovered seq=%u (%llu/%llu)",
-                            s->id, (unsigned)seq,
-                            (unsigned long long)s->stats.vid_nack_recovered,
-                            (unsigned long long)s->stats.vid_nack_req);
+                    /* L1：升到 LOGI 并限速。这是「NACK 到底有没有用」的直接
+                     * 证据（recovered/nack_req 的分子）。弱网下一旦生效会持续
+                     * 触发，所以只详细打前 LOSS_LOG_MAX 条，之后每 100 条汇总。 */
+                    if (s->stats.vid_nack_recovered <= LOSS_LOG_MAX ||
+                        (s->stats.vid_nack_recovered % 100u) == 0) {
+                        CM_LOGI("#%d retransmit recovered seq=%u (%llu/%llu)",
+                                s->id, (unsigned)seq,
+                                (unsigned long long)s->stats.vid_nack_recovered,
+                                (unsigned long long)s->stats.vid_nack_req);
+                    }
                     /* 落到下面正常处理：append 并按 seq 记录分片偏移。
                      * au_broken 保持原样，等 au_missing 归零时由 flush 清掉。 */
                 } else {

@@ -11,7 +11,7 @@
 ![platform](https://img.shields.io/badge/X6%20Pro-RK3562-03C47E)
 ![runtime](https://img.shields.io/badge/Falcon-QuickJS%20%2B%20Vue2-03C47E)
 ![media](https://img.shields.io/badge/DTLS--SRTP-self--built-03C47E)
-![version](https://img.shields.io/badge/version-1.1.1-1E2831)
+![version](https://img.shields.io/badge/version-1.2.0-1E2831)
 ![license](https://img.shields.io/badge/license-GPL--3.0-1E2831)
 
 </div>
@@ -197,7 +197,7 @@ Opus 帧    →  appsrc ! opusdec ! fdsink → aplay（扬声器 / bluealsa）
 - **Weex 默认 `flex-direction: column`**：不显式写 `row` 时 `justify-content` 管的是纵向
 - **不能把文案写成 method**：`{{ countText }}` 指向 `methods.countText` 时真机会把**函数源码**渲染出来
 - **`<input>` 不存在**：文本输入只能走 `global.startTextEdit`，或用自绘键盘
-- **只有 `console.error` 落盘**：`console.warn` 和 `console.log` 完全不落盘。落盘文件是 `/userdata/applog/loli_s6_dev.txt`，行格式 `[时间戳][E][JS] <正文>`（中间的 `[E]` 是通道级别，恒为 E，不代表严重程度）
+- **只有 `console.error` 落盘**：`console.warn` 和 `console.log` 完全不落盘。落盘文件是 miniapp 进程的 stdout（`P=$(pidof miniapp); readlink /proc/$P/fd/1`，实测形如 `/userdata/applog/DictPen_YYYYMMDD_HHMMSS.log`），行格式 `[时间戳][E][JS] <正文>`（中间的 `[E]` 是通道级别，恒为 E，不代表严重程度）
 - **`miniapp_cli capture` 在背光关闭时返回 `ret:0` 但只有 1086 字节纯白**：截前先 `hal-screen on`
 
 ## 文档
@@ -213,6 +213,20 @@ Opus 帧    →  appsrc ! opusdec ! fdsink → aplay（扬声器 / bluealsa）
 | [docs/PLATFORM.md](docs/PLATFORM.md) | X6 Pro 设备参数、Vue 方言铁律、布局算式 |
 | [docs/DEV.md](docs/DEV.md) | 构建 / 部署 / 看日志 / 截图 / adb 路径坑 |
 | [HANDOFF.md](HANDOFF.md) | 交接说明：当前状态、产物清单、必须记住的回归陷阱 |
+
+### 开发文档（规范与验证）
+
+应用市场 6 条新规的落地文档，以及日常开发要用的验证手册。
+
+| 文件 | 内容 |
+| :-- | :-- |
+| [docs/MARKET-COMPLIANCE.md](docs/MARKET-COMPLIANCE.md) | **合规总纲**：6 条新规逐条对照当前状态、整改清单、提交前自检 checklist |
+| [docs/AI-CODE-RULES.md](docs/AI-CODE-RULES.md) | **AI 生成软件规范**：绝对禁止项、日志规范、样式规范、跨页状态、审查清单、真实翻车案例 |
+| [docs/VW-VH-GUIDE.md](docs/VW-VH-GUIDE.md) | **vw / vh 使用指南**：真机 A/B 证据、`vw = px / 9.6` 换算表、禁用单位、哪些地方不该转 |
+| [docs/DEVICE-MATRIX.md](docs/DEVICE-MATRIX.md) | **多机型真机测试清单**：X6/X7 Pro 机型档案、32 项测试矩阵、字号与布局专项、记录模板 |
+| [docs/VERIFY-playbook.md](docs/VERIFY-playbook.md) | **验证手册**：5 个 bug 的真机验证清单、取证通道（只有 `console.error` 落盘） |
+| [docs/PLATFORM.md](docs/PLATFORM.md) | 平台硬约束：设备参数、Vue 方言铁律、JS 能力边界 |
+| [docs/DEV.md](docs/DEV.md) | 构建 / 部署 / 看日志 / 截图 / adb 路径坑 |
 
 把这些经验抽成平台级、可复用的开发笔记（去掉本项目业务逻辑，只留"在 X6 Pro 上怎么把音视频/实时流跑起来"），已单独开源：
 **[56dz/haasui-falcon-app-x6pro-skill](https://github.com/56dz/haasui-falcon-app-x6pro-skill)**

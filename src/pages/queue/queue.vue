@@ -413,7 +413,7 @@ export default {
 }
 
 .qtitle {
-  font-size: 18px;
+  font-size: 1.875vw;
   color: @text-color-strong;
   font-weight: 700;
 }
@@ -425,7 +425,7 @@ export default {
 }
 
 .qname {
-  font-size: 14px;
+  font-size: 1.4583vw;
   color: @text-color-dim;
 }
 
@@ -457,55 +457,55 @@ export default {
 }
 
 .cwait-label {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
 .cwait-value {
-  font-size: 22px;
+  font-size: 2.2917vw;
   color: @accent;
   font-weight: 700;
   margin-top: 2px;
 }
 
 .cwait-sub {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
   margin-top: 2px;
 }
 
 .crank-label {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
 .crank-value {
-  font-size: 22px;
+  font-size: 2.2917vw;
   color: @accent-blue;
   font-weight: 700;
   margin-top: 2px;
 }
 
 .crank-sub {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
   margin-top: 2px;
 }
 
 .ctime-label {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
 .ctime-value {
-  font-size: 22px;
+  font-size: 2.2917vw;
   color: @text-color-strong;
   font-weight: 700;
   margin-top: 2px;
 }
 
 .ctime-sub {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
   margin-top: 2px;
 }
@@ -519,17 +519,17 @@ export default {
 }
 
 .tipline {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
 .tipline-err {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @danger;
 }
 
 .tipline-ok {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @accent;
 }
 
@@ -560,7 +560,7 @@ export default {
 }
 
 .a2-text {
-  font-size: 14px;
+  font-size: 1.4583vw;
   color: #FFFFFF;
   font-weight: 700;
 }
@@ -572,7 +572,7 @@ export default {
 }
 
 .qfoot-text {
-  font-size: 9px;
+  font-size: 0.9375vw;
   color: @text-color-dim;
 }
 </style>

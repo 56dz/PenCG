@@ -328,15 +328,18 @@ if (b->is_video && b->pipeline) {
 ### V1（必做）确认拆除瞬间的 DRM 行为 —— 验证 H1/H2
 
 ```bash
+# 0) 变量（全文所有命令都用 $ADB / $L）
+ADB="./env/adb/adb.exe -s 9D91500007505171"
+
 # 1) 打开 DRM 调试（可写则成功；不可写说明这条路走不通）
-./env/adb/adb.exe -s 9D91500007505171 shell "echo 0x1f > /sys/module/drm/parameters/debug; cat /sys/module/drm/parameters/debug"
+$ADB shell "echo 0x1f > /sys/module/drm/parameters/debug; cat /sys/module/drm/parameters/debug"
 
 # 2) 起一局，确认健康
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a -A9 'Esmart1' /sys/kernel/debug/dri/0/summary"
+$ADB shell "grep -a -A9 'Esmart1' /sys/kernel/debug/dri/0/summary"
 #    期望：Esmart1-win0: ACTIVE，dst pos[107,244] rect[266x473]
 
 # 3) 复现：第二次 start
-./env/adb/adb.exe -s 9D91500007505171 shell "miniapp_cli start 8002026110200003 index"
+$ADB shell "miniapp_cli start 8002026110200003 index"
 
 # 4) 立刻看 plane_mask 与 dmesg
 ./env/adb/adb.exe -s 9D91500007505171 shell "cat /sys/kernel/debug/dri/0/summary | head -40"
@@ -352,11 +355,17 @@ if (b->is_video && b->pipeline) {
 ### V2 验证本次 JS 加固（归因日志）
 
 ```bash
+# 解析当前日志文件（不能写死：它是 miniapp 进程 stdout，名字带启动时间戳）
+ADB="./env/adb/adb.exe -s 9D91500007505171"
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')
+echo "LOG=$L"
+
 # 清基线（只读不了的写操作交给 Lead）
-./env/adb/adb.exe -s 9D91500007505171 shell ": > /userdata/applog/loli_s6_dev.txt"
+$ADB shell "mv \"$L\" \"$L.bak\" 2>/dev/null; sync"
 
 # 起局 → 正常玩 30s → 第二次 start
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a '\[play\] cleanup' /userdata/applog/loli_s6_dev.txt"
+$ADB shell "grep -a '\[play\] cleanup' $L"
 ```
 
 期望（改后）：
@@ -371,7 +380,7 @@ if (b->is_video && b->pipeline) {
 
 ```bash
 # 起局后，数一下 play 页被 mounted 了几次（boot 里会打 stage 变化）
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a -c '\[play\] page onShow' /userdata/applog/loli_s6_dev.txt"
+$ADB shell "grep -a -c '\[play\] page onShow' $L"
 # 再第二次 start，然后再数
 ```
 
@@ -383,7 +392,7 @@ if (b->is_video && b->pipeline) {
 同时检查 autostart 是否被触发两次：
 
 ```bash
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a '\[dev\] autostart' /userdata/applog/loli_s6_dev.txt"
+$ADB shell "grep -a '\[dev\] autostart' $L"
 ```
 
 出现两行 `[dev] autostart fire → play` 即证实「重复 start → 重复 autostart → 重复 navTo」。
@@ -391,7 +400,7 @@ if (b->is_video && b->pipeline) {
 ### V4 验证 `startPlay()` 泄漏修复
 
 ```bash
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a 'startPlay 前清理上一轮会话' /userdata/applog/loli_s6_dev.txt"
+$ADB shell "grep -a 'startPlay 前清理上一轮会话' $L"
 ```
 
 - 出现 = 确实存在「旧会话没被 stop 就重新 start」的路径（说明这个修复有实际价值）。
@@ -400,7 +409,8 @@ if (b->is_video && b->pipeline) {
 配合 native 侧确认没有孤儿会话：
 
 ```bash
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a -E 'media loop exit|box destroyed|video plane hidden' /userdata/applog/DictPen_*.log | tail -20"
+# native [cgmedia] 与 JS [pencg] 落在同一个 $L（见上文解析）
+$ADB shell "grep -a -E 'media loop exit|box destroyed|video plane hidden' \"$L\" | tail -20"
 ```
 
 ---

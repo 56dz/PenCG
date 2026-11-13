@@ -360,13 +360,17 @@ cd PenCG && node ../env/node_modules/aiot-vue-cli/src/cli.js -q -p
 
 X6 Pro 的 Falcon 运行时里，JS 的 `console` **只有一个方法会写盘：`console.error`**。
 `console.warn` 和 `console.log` 完全不落盘（全盘 `grep -a -c 'W][JS]'` 计数为 0）。
-所以看日志的第一条命令永远是：
+
+日志落盘文件是 **miniapp 进程的 stdout**，文件名带启动时间戳、每次重启都换，**不能写死**：
 
 ```bash
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a -n 'pencg' /userdata/applog/loli_s6_dev.txt | tail -50"
+ADB="./env/adb/adb.exe -s 9D91500007505171"
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')   # 实测形如 /userdata/applog/DictPen_20261113_232219.log
+echo "LOG=$L"
+$ADB shell "grep -a -n 'pencg' $L | tail -50"
 ```
 
-落盘文件是 **`/userdata/applog/loli_s6_dev.txt`**（不是 `DictPen_*.log`，那个路径在本机不存在）。
 每行的形态固定是：
 
 ```
@@ -384,12 +388,20 @@ X6 Pro 的 Falcon 运行时里，JS 的 `console` **只有一个方法会写盘�
    所以 `logInfo` / `logWarn` 打出来的东西一样会落盘 —— 只是行内前缀不同。
 
 > 校验通道是否通的快速办法：随便触发一次，然后
-> `grep -a -c 'pencg' /userdata/applog/loli_s6_dev.txt`，计数为 0 就是**通道问题**，不是代码没跑。
+> `$ADB shell "grep -a -c 'pencg' $L"`，计数为 0 就是**通道问题**，不是代码没跑。
 > 先确认这件事，再去怀疑逻辑。
 
-> native 层（`[cgmedia]`）走的是 `cm_log()` → `fprintf(stdout)`，是**另一条独立通道**，
-> 与上面的 JS console 无关；它是否也落进 `loli_s6_dev.txt` 待现场确认
-> （本文档只需关注 `[pencg]`）。
+> **路径更正（2026-11-14 真机定论）**：本节早期版本写的落盘文件
+> `/userdata/applog/loli_s6_dev.txt` 是**错的** —— 该文件实测只有 **1 字节**，
+> `grep -c pencg` 与 `grep -c cgmedia` 都是 0，是个空文件。
+> 真日志在 `DictPen_YYYYMMDD_HHMMSS.log`（当时为 `/userdata/applog/DictPen_20261113_232219.log`，
+> 13.2MB，`[cgmedia]` 2236 行 + 大量 `[pencg]` 行）。所以上面改成了先 `readlink` 再 grep。
+> 早先那句「不是 `DictPen_*.log`，那个路径在本机不存在」也是错的，一并作废。
+
+> native 层（`[cgmedia]`）走的是 `cm_log()` → `fprintf(stdout)`。
+> **它和 JS 的 `console.error` 必落同一个文件** —— 两者都跟着 miniapp 进程的 stdout 走，
+> 而一个进程只有一个 stdout（2026-11-14 已确认）。
+> 所以 grep 时可以在 `$L` 里同时用 `-e '\[pencg\]' -e '\[cgmedia\]'`，不用找第二个文件。
 
 > 前置：X6 Pro 在跑 PenCG `1.0.3`，`appid 8002026110200003`。
 > adb 在 `./env/adb/adb.exe`（MSYS Bash 下**不要**用 `adb pull /tmp/x.png`，
@@ -399,14 +411,20 @@ X6 Pro 的 Falcon 运行时里，JS 的 `console` **只有一个方法会写盘�
 
 ```bash
 cd /d/Users/Daniel/code/DSH/x6pro/haas-x6pro
-ADB=./env/adb/adb.exe
+ADB="./env/adb/adb.exe -s 9D91500007505171"
+
+# ★ 本节的 $L 是这样来的，后面所有命令都用它，不要写死文件名
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')
+echo "LOG=$L"
 ```
 
 ### 6.1 准备：清日志、确认基线
 
 ```bash
-# 1) 清掉旧日志，只留本次（注意：这是唯一会"写"设备的动作，只动日志文件）
-$ADB shell "rm -f /userdata/applog/loli_s6_dev.txt"
+# 1) 清日志（注意：这是唯一会"写"设备的动作，只动日志文件）
+#    实测 loli_s6_dev.txt 是 1 字节空文件，真日志在 $L 指向的 DictPen_*.log
+$ADB shell "P=\$(pidof miniapp); L=\$(readlink /proc/\$P/fd/1); echo \"L=\$L\"; mv \"\$L\" \"\$L.bak\" 2>/dev/null; sync; ls -l /userdata/applog/ | tail -3"
 
 # 2) 基线：确认 idle 配置与屏幕当前状态
 $ADB shell "cat /etc/input-event-daemon.conf"
@@ -432,8 +450,8 @@ snap() {
   $ADB shell "pidof miniapp"                          # 小程序进程还在吗
   $ADB shell "pidof aplay"                            # 音频还在吗
   $ADB shell "grep -a -A9 'Esmart1' /sys/kernel/debug/dri/0/summary"   # KMS 视频平面还在吗
-  $ADB shell "grep -a '\[pencg\]' /userdata/applog/loli_s6_dev.txt | tail -n 3"
-  $ADB shell "grep -a '\[cgmedia\]' /userdata/applog/loli_s6_dev.txt | tail -n 3"
+  $ADB shell "grep -a '\[pencg\]' $L | tail -n 3"
+  $ADB shell "grep -a '\[cgmedia\]' $L | tail -n 3"
 }
 for i in $(seq 1 24); do snap; sleep 15; done
 ```
@@ -443,7 +461,7 @@ for i in $(seq 1 24); do snap; sleep 15; done
 **第 1 步：保活到底有没有拿到后端（V1）**
 
 ```bash
-$ADB shell "grep -a -E '\[screen\] (probe|后端探测结论|保活启动)' /userdata/applog/loli_s6_dev.txt"
+$ADB shell "grep -a -E '\[screen\] (probe|后端探测结论|保活启动)' $L"
 ```
 
 - 期望看到 6 行 `[screen] probe 形态=... → 命中/miss(...)`，然后是
@@ -454,7 +472,7 @@ $ADB shell "grep -a -E '\[screen\] (probe|后端探测结论|保活启动)' /use
 **第 2 步：保活有没有在续（每 20s 一行，`keep #N` 的 N 必须单调涨）**
 
 ```bash
-$ADB shell "grep -a '\[screen\] keep #' /userdata/applog/loli_s6_dev.txt | tail -n 12"
+$ADB shell "grep -a '\[screen\] keep #' $L | tail -n 12"
 ```
 
 正常：
@@ -475,7 +493,7 @@ $ADB shell "grep -a '\[screen\] keep #' /userdata/applog/loli_s6_dev.txt | tail 
 
 ```bash
 $ADB shell "hal-screen state"      # 看 bl_br=5 / bl_power=0 或 4
-$ADB shell "grep -a '\[play\] probe' /userdata/applog/loli_s6_dev.txt | tail -n 3"
+$ADB shell "grep -a '\[play\] probe' $L | tail -n 3"
 ```
 
 看 `[play] probe` 那行里的 `screen=` 字段：
@@ -501,13 +519,13 @@ $ADB shell "pidof miniapp"
 $ADB shell "pidof aplay"
 
 # ④ JS 链（20s 一行）
-$ADB shell "grep -a '\[play\] probe' /userdata/applog/loli_s6_dev.txt | tail -n 20"
+$ADB shell "grep -a '\[play\] probe' $L | tail -n 20"
 
 # ⑤ 收尾是谁干的
-$ADB shell "grep -a '\[pencg\]\[life\]' /userdata/applog/loli_s6_dev.txt | tail -n 10"   # App 级 onHide
-$ADB shell "grep -a '\[play\] onHide 拆管线' /userdata/applog/loli_s6_dev.txt | tail -n 3"
-$ADB shell "grep -a 'JS heartbeat lost\|JS silent' /userdata/applog/loli_s6_dev.txt | tail -n 5"
-$ADB shell "grep -a '\[play\]' /userdata/applog/loli_s6_dev.txt | grep -a 'stage=' | tail -n 5"
+$ADB shell "grep -a '\[pencg\]\[life\]' $L | tail -n 10"   # App 级 onHide
+$ADB shell "grep -a '\[play\] onHide 拆管线' $L | tail -n 3"
+$ADB shell "grep -a 'JS heartbeat lost\|JS silent' $L | tail -n 5"
+$ADB shell "grep -a '\[play\]' $L | grep -a 'stage=' | tail -n 5"
 ```
 
 判读表：

@@ -499,11 +499,20 @@ libs 同步成功: ...\PenCG\.falcon_\libs
 
 X6 Pro 的 Falcon 运行时里，JS 的 `console` **只有 `console.error` 会写盘**；
 `console.warn` / `console.log` 完全不落盘（全盘 `grep -a -c 'W][JS]'` 计数为 0）。
-落盘文件是 **`/userdata/applog/loli_s6_dev.txt`**（不是 `DictPen_*.log`）。
+落盘文件是 **miniapp 进程的 stdout**，文件名带启动时间戳、每次重启都换，**不能写死**：
 
 ```bash
-./env/adb/adb.exe -s 9D91500007505171 shell "grep -a -n 'pencg' /userdata/applog/loli_s6_dev.txt | tail -50"
+ADB="./env/adb/adb.exe -s 9D91500007505171"
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')   # 实测 /userdata/applog/DictPen_20261113_232219.log
+echo "LOG=$L"
+$ADB shell "grep -a -n 'pencg' $L | tail -50"
 ```
+
+> **路径更正（2026-11-14 真机定论）**：本节早期版本写的
+> `/userdata/applog/loli_s6_dev.txt` **是错的** —— 该文件实测只有 **1 字节**，
+> `grep -c pencg` 为 0，是空文件。真日志在 `DictPen_YYYYMMDD_HHMMSS.log`，
+> 且 native `[cgmedia]` 与 JS `[pencg]` **必落同一文件**（都跟 miniapp 进程 stdout 走）。
 
 行形态固定：
 
@@ -519,7 +528,7 @@ X6 Pro 的 Falcon 运行时里，JS 的 `console` **只有 `console.error` 会�
 - PenCG 侧所有输出都经 `PenCG/src/services/log.js` 的 `push()` 走 `console.error`（`log.js:44`），
   所以 `logInfo` 打的行一样落盘。
 
-> 快速验证通道是否通：触发一次操作后 `grep -a -c 'pencg' /userdata/applog/loli_s6_dev.txt`，
+> 快速验证通道是否通：触发一次操作后 `$ADB shell "grep -a -c 'pencg' $L"`，
 > 计数为 0 说明是**取证通道**的问题，不是补丁没生效。
 
 `adb` 路径：`/d/Users/Daniel/code/DSH/x6pro/haas-x6pro/env/adb/adb.exe`
@@ -536,8 +545,14 @@ cd /d/Users/Daniel/code/DSH/x6pro/haas-x6pro
 # 确认设备在线
 ./env/adb/adb.exe devices
 
+# ★ 解析当前日志文件（后面所有 grep 都用这两个变量；真日志不在 loli_s6_dev.txt）
+ADB="./env/adb/adb.exe -s 9D91500007505171"
+P=$($ADB shell 'pidof miniapp' | tr -d '\r')
+L=$($ADB shell "readlink /proc/$P/fd/1" | tr -d '\r')
+echo "LOG=$L"
+
 # 清空旧日志，便于只看本次
-./env/adb/adb.exe shell "rm -f /userdata/applog/loli_s6_dev.txt"
+$ADB shell "mv \"$L\" \"$L.bak\" 2>/dev/null; sync"
 
 # 记下当前 pencg_session（此时应是已登录状态；下一步要清掉它来做「未登录→登录」）
 ./env/adb/adb.exe shell "cat /userdisk/miniapp/data/mini_app/pkg/8002026110200003/data/sharedpreferences/preferences.json" | grep -o 'pencg_session[^,]*'
@@ -567,7 +582,7 @@ HANDOFF.md L68-77 明确禁止 sed，必须 pull→`json.loads` 校验→push。
 
 ```bash
 # ① 看日志里四道防线的落点（哪一条生效了）
-./env/adb/adb.exe shell "grep -hE '\[pencg\].*(\[auth\]|\[mine\]|\[index\]|\[nav\])' /userdata/applog/loli_s6_dev.txt | tail -n 40"
+./env/adb/adb.exe shell "grep -hE '\[pencg\].*(\[auth\]|\[mine\]|\[index\]|\[nav\])' $L | tail -n 40"
 ```
 
 期望能看到（至少其中之一，且**后面紧跟** `[mine] refresh logged=true`）：
@@ -602,7 +617,7 @@ HANDOFF.md L68-77 明确禁止 sed，必须 pull→`json.loads` 校验→push。
 
 ```bash
 # ③ 反证：确认导航没有塌陷（没有多压一层页）
-./env/adb/adb.exe shell "grep -h '\[nav\]' /userdata/applog/loli_s6_dev.txt | tail -n 20"
+./env/adb/adb.exe shell "grep -h '\[nav\]' $L | tail -n 20"
 ```
 
 期望 `closePageByName login` 出现、**不应**出现 `navTo('index')` 兜底被触发
@@ -618,7 +633,7 @@ HANDOFF.md L68-77 明确禁止 sed，必须 pull→`json.loads` 校验→push。
 4. 期望：界面自动切到「我的」并显示资料。
 
 ```bash
-./env/adb/adb.exe shell "grep -hE '\[pencg\].*\[(index|mine)\].*(会话版本|版本变化|refresh logged)' /userdata/applog/loli_s6_dev.txt | tail -n 10"
+./env/adb/adb.exe shell "grep -hE '\[pencg\].*\[(index|mine)\].*(会话版本|版本变化|refresh logged)' $L | tail -n 10"
 ```
 
 ### 步骤 5：验证不误跳（防回归 —— 最容易踩的坑）
@@ -628,7 +643,7 @@ HANDOFF.md L68-77 明确禁止 sed，必须 pull→`json.loads` 校验→push。
 3. **期望：启动后停在「推荐」，不要被自动拽到「我的」。**
 
 ```bash
-./env/adb/adb.exe shell "grep -hE '\[pencg\].*\[index\].*会话版本' /userdata/applog/loli_s6_dev.txt | tail -n 20"
+./env/adb/adb.exe shell "grep -hE '\[pencg\].*\[index\].*会话版本' $L | tail -n 20"
 ```
 
 若冷启动就出现「会话版本 0 -> N，本地登录态 false -> true」，说明
@@ -642,7 +657,7 @@ HANDOFF.md L68-77 明确禁止 sed，必须 pull→`json.loads` 校验→push。
    （即版本号 bump 生效，不会从别的地方复活旧会话）。
 
 ```bash
-./env/adb/adb.exe shell "grep -hE '\[pencg\].*(\[auth\]|\[mine\])' /userdata/applog/loli_s6_dev.txt | tail -n 20"
+./env/adb/adb.exe shell "grep -hE '\[pencg\].*(\[auth\]|\[mine\])' $L | tail -n 20"
 ```
 
 ---

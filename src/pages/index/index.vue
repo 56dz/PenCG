@@ -778,7 +778,7 @@ export default {
 }
 
 .topbar-title {
-  font-size: 17px;
+  font-size: 1.7708vw;
   color: @text-color;
   width: 78px;
 }
@@ -799,7 +799,7 @@ export default {
 }
 
 .search-hint {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color-dim;
 }
 
@@ -840,7 +840,7 @@ export default {
 }
 
 .banner-name {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-strong;
 }
 
@@ -852,7 +852,7 @@ export default {
 }
 
 .notice-tag {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: #ffffff;
   background-color: @accent;
   border-radius: 3px;
@@ -862,7 +862,7 @@ export default {
 }
 
 .notice-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
   flex-grow: 1;
   flex-shrink: 1;
@@ -882,7 +882,7 @@ export default {
 }
 
 .mod-title {
-  font-size: 14px;
+  font-size: 1.4583vw;
   color: @text-color;
   flex-grow: 1;
   flex-shrink: 1;
@@ -890,7 +890,7 @@ export default {
 }
 
 .mod-count {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
@@ -946,16 +946,16 @@ export default {
 /* 说明：Weex 的 <text> 默认行高按字号 * 1.3~1.4 算，只给 height 会溢出到卡片外，
    必须显式写 line-height 才能压住。窄卡（74px）中文名只能放 6 个字，靠 lines:1 截断。 */
 .gcard-name {
-  font-size: 10px;
-  line-height: 12px;
+  font-size: 1.0417vw;
+  line-height: 1.25vw;
   color: @text-color;
   text-align: center;
   lines: 1;
 }
 
 .gcard-btn {
-  font-size: 10px;
-  line-height: 12px;
+  font-size: 1.0417vw;
+  line-height: 1.25vw;
   color: @accent;
   text-align: center;
   lines: 1;
@@ -999,13 +999,13 @@ export default {
 }
 
 .lcard-name {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color;
   lines: 1;
 }
 
 .lcard-sum {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   lines: 1;
 }
@@ -1028,7 +1028,7 @@ export default {
 }
 
 .more-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color;
 }
 
@@ -1042,7 +1042,7 @@ export default {
 }
 
 .state-text {
-  font-size: 14px;
+  font-size: 1.4583vw;
   color: @text-color-dim;
 }
 
@@ -1058,7 +1058,7 @@ export default {
 }
 
 .retry-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: #ffffff;
 }
 
@@ -1081,7 +1081,7 @@ export default {
 }
 
 .ih-tab-text {
-  font-size: 14px;
+  font-size: 1.4583vw;
   color: @text-color-dim;
   text-align: center;
 }
@@ -1153,7 +1153,7 @@ export default {
 }
 
 .ih-notice-tag {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: #FFFFFF;
   background-color: @accent;
   border-radius: 3px;
@@ -1171,8 +1171,8 @@ export default {
 }
 
 .ih-notice-text {
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 1.25vw;
+  line-height: 1.875vw;
   color: @text-color-dim;
 }
 
@@ -1207,7 +1207,7 @@ export default {
 }
 
 .ih-spon-tag {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: #1E2831;
   background-color: @gold;
   border-radius: 3px;
@@ -1240,8 +1240,8 @@ export default {
 }
 
 .ih-spon-text {
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 1.25vw;
+  line-height: 1.875vw;
   color: @text-color;
 }
 
@@ -1256,7 +1256,7 @@ export default {
 }
 
 .ih-spon-more-text {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: #FFFFFF;
 }
 
@@ -1286,26 +1286,26 @@ export default {
 }
 
 .ih-spon-full-title {
-  font-size: 15px;
+  font-size: 1.5625vw;
   color: @text-color-strong;
 }
 
 .ih-spon-full-desc {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color;
   margin-top: 10px;
 }
 
 .ih-spon-full-hint {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @accent-blue;
   margin-top: 10px;
 }
 
 /* 留言提示：金色，和「赞助」标签同色系；比 hint 低一档字号 */
 .ih-spon-full-leave {
-  font-size: 11px;
-  line-height: 16px;
+  font-size: 1.1458vw;
+  line-height: 1.6667vw;
   color: @gold;
   margin-top: 8px;
 }
@@ -1321,7 +1321,7 @@ export default {
 }
 
 .ih-spon-full-btn-text {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color;
 }
 </style>

@@ -14,7 +14,7 @@
 | 2 | 所以场景必须**在设备外面造**：路由器/PC 热点侧加丢包，或物理衰减（隔墙/裹锡纸）+ 设备自身 `wget` 抢占带宽。 | 强（设备只读探查已做完，见 §3） |
 | 3 | **判据要触发，光有"少量丢包"不够。** 必须达到"native 放行 P 帧之后画面依然解不出来"。native 的 `IDR_STARVE_RELAX_MS = 4000` 一到期就放行 P 帧，只要放行的 P 帧能解出画面，`fps` 立刻回到非 0，判据自行清零。真实触发窗口是**丢包率足够高、坏 AU 持续产生**（历史上高铁现场 5~8%）。 | 强（代码推演，见 §2） |
 | 4 | **必须有正对照**：用一版把 `FREEZE_GATE_MS` 临时压到 3000 的调试构建，证明"判据能跑、日志能落盘、自愈能发起"。否则"没看到 freeze 日志"永远分不清是"场景没造出来"还是"判据是死的"。 | 强（这是本文最重要的方法论要求） |
-| 5 | 判读时要同时看**三方**：JS 日志（`[pencg]`）、native 日志（`[cgmedia]`）、DRI 平面状态。只看 JS 日志会把 native 的兜底误判成"判据失效"。 | 强（两条通道都跟进程 stdout 走，**落在同一个文件**里；到底是 `loli_s6_dev.txt` 还是 `DictPen_YYYYMMDD_HHMMSS.log`，现场用 `P=$(pidof miniapp); readlink /proc/$P/fd/1` 定，已真机定论） |
+| 5 | 判读时要同时看**三方**：JS 日志（`[pencg]`）、native 日志（`[cgmedia]`）、DRI 平面状态。只看 JS 日志会把 native 的兜底误判成"判据失效"。 | 强（两条通道都跟进程 stdout 走，**必落同一文件**；实测 `loli_s6_dev.txt` 是 1 字节空文件、真日志在 `DictPen_*.log`，现场用 `P=$(pidof miniapp); readlink /proc/$P/fd/1` 定，已真机定论） |
 
 ---
 
@@ -152,17 +152,25 @@ cd /d/Users/Daniel/code/DSH/x6pro/haas-x6pro && ./env/adb/adb.exe -s 9D915000075
 
 ```bash
 D=/d/Users/Daniel/code/DSH/x6pro/haas-x6pro
-# JS 日志：转到新文件，避免混进旧数据（不删，只 rotate）
-$D/env/adb/adb.exe -s 9D91500007505171 shell 'mv /userdata/applog/loli_s6_dev.txt /userdata/applog/loli_s6_dev.txt.bak 2>/dev/null; sync; ls -l /userdata/applog/ | grep -E "loli|DictPen"'
+# 真正要 rotate 的是 DictPen_*.log（loli_s6_dev.txt 实测是 1 字节空文件，顺手一起移）
+$D/env/adb/adb.exe -s 9D91500007505171 shell 'P=$(pidof miniapp); L=$(readlink /proc/$P/fd/1); mv "$L" "$L.bak" 2>/dev/null; sync; ls -l /userdata/applog/ | grep -E "loli|DictPen" | tail -3'
 ```
 
-> **两个通道落在同一个文件里（已真机定论）**：
-> JS 的 `[pencg]`（`logWarn` → `console.error`）与 native 的 `[cgmedia]`
-> （`CM_LOGW/CM_LOGI` → `fprintf(stdout)`）都跟着 **miniapp 进程的 stdout** 走。
-> stdout 指向哪个文件取决于进程怎么起的，实测**有时是 `/userdata/applog/loli_s6_dev.txt`，
-> 有时是 `/userdata/applog/DictPen_YYYYMMDD_HHMMSS.log`**。
-> 唯一可靠做法：先 `P=$(pidof miniapp)` 再 `readlink /proc/$P/fd/1` 拿到实际文件，
-> 然后去那个文件里 grep 两个前缀。下面命令里的路径若不存在，就换成 readlink 给出的那个。
+> **两个通道落在同一个文件里（已真机定论 2026-11-14）**：
+> JS 的 `[pencg]`（`console.error`）与 native 的 `[cgmedia]`（`fprintf(stdout)`）
+> 都跟着 **miniapp 进程的 stdout** 走，**必落同一文件**。
+> 实测（X6 Pro / 1.2.0）：`/userdata/applog/loli_s6_dev.txt` 是 **1 字节空文件**，
+> 真正的日志是 `/userdata/applog/DictPen_YYYYMMDD_HHMMSS.log`（当时 13.2MB，
+> `[cgmedia]` 2236 行、`[pencg]` 上万行）。
+> **所以先解析路径再 grep，不要写死 `loli_s6_dev.txt`：**
+>
+> ```bash
+> P=$($D/env/adb/adb.exe -s 9D91500007505171 shell pidof miniapp | tr -d '\r')
+> L=$($D/env/adb/adb.exe -s 9D91500007505171 shell "readlink /proc/$P/fd/1" | tr -d '\r')
+> echo "log = $L"   # 实测形如 /userdata/applog/DictPen_20261114_003451.log
+> ```
+>
+> 下面命令里的 `$L` 就是这个值。
 
 ### 5.2 起播 + 确认基线正常
 
@@ -170,7 +178,7 @@ $D/env/adb/adb.exe -s 9D91500007505171 shell 'mv /userdata/applog/loli_s6_dev.tx
 
 ```bash
 $D/env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -a '\[play\] probe' /userdata/applog/loli_s6_dev.txt | tail -3"
+  "grep -a '\[play\] probe' $L | tail -3"
 # 期望：stage=live v=1 ... gateDrop=0 auDrop=0 frozen=0s tries=0
 # 若有 frozen=Ns 一直涨 → 判据有 bug，先停下来看 §8
 ```
@@ -192,11 +200,11 @@ D=/d/Users/Daniel/code/DSH/x6pro/haas-x6pro
 
 # ① JS 侧：probe + freeze 日志
 $D/env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -a -E '\[play\] (probe|freeze|stall)' /userdata/applog/loli_s6_dev.txt | tail -20"
+  "grep -a -E '\[play\] (probe|freeze|stall)' $L | tail -20"
 
 # ② native 侧：闸门/放行/坏 AU
 $D/env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -a '\[cgmedia\]' /userdata/applog/DictPen_2026*.log | grep -aE 'still no IDR|IDR starvation|waiting for first IDR|packet loss seen|drop broken' | tail -20"
+  "grep -a '\[cgmedia\]' $L | grep -aE 'still no IDR|IDR starvation|waiting for first IDR|packet loss seen|drop broken' | tail -20"
 
 # ③ 平面状态：确认视频平面还在活跃（不是熄屏/被摘）
 $D/env/adb/adb.exe -s 9D91500007505171 shell \
@@ -250,10 +258,10 @@ cd PenCG && node ../env/node_modules/aiot-vue-cli/src/cli.js -q -p
 ```bash
 D=/d/Users/Daniel/code/DSH/x6pro/haas-x6pro
 $D/env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -a -c '\[play\] freeze' /userdata/applog/loli_s6_dev.txt"
+  "grep -a -c '\[play\] freeze' $L"
 # 期望：0（或极少，且伴随真实的 fps=0）
 $D/env/adb/adb.exe -s 9D91500007505171 shell \
-  "grep -a '\[play\] probe' /userdata/applog/loli_s6_dev.txt | grep -a -v 'frozen=0s' | tail -5"
+  "grep -a '\[play\] probe' $L | grep -a -v 'frozen=0s' | tail -5"
 # 期望：空。正常播放 frozen 必须恒为 0s
 ```
 
@@ -281,8 +289,8 @@ $D/env/adb/adb.exe -s 9D91500007505171 shell \
 | **`wpa_cli disconnect` 测不出二期** | 断网 → `rx` 不涨 → E 条件 false → 二期判据按设计让路，日志会走一期的 `stall detected` | 测二期只能用"丢包"方式，不能用"断网"方式 |
 | **键盘/输入法是假冻结** | 系统键盘弹出会 `hideVideoPlane()`（`PenCG/src/pages/play/play.vue:2092`），native 把平面缩成 1x1，还有切到"等首个 IDR"的重置。这段 `fps=0` 是我们自己造成的 | 已在 `checkFreeze` 加 `videoHidden` 守卫（`PenCG/src/pages/play/play.vue:1608-1621`）并在摘平面时清空全零段。**验证时不要开键盘**，若开了要确认没产生 freeze 日志 |
 | **熄屏会污染结果** | 270s 无操作会 `hal-screen down`（见 `PenCG/docs/BUGFIX-bug1-lifecycle.md`） | 测试时每 1~2 分钟摸一下屏幕，或先确认 `screen=0(ON)` |
-| **`/userdata` 只有 55M 可用** | 日志会轮转，长时间跑可能丢历史 | 实验前删旧备份：`rm /userdata/applog/loli_s6_dev.txt.bak` |
-| **不知道该 grep 哪个文件** | `[cgmedia]` 走 `fprintf(stdout)`，`[pencg]` 走 `console.error`，**两者都跟着 miniapp 进程的 stdout**，可能落 `loli_s6_dev.txt` 也可能落 `DictPen_*.log` | 先 `P=$(pidof miniapp); readlink /proc/$P/fd/1` 拿实际文件，再在那个文件里同时 grep 两个前缀 |
+| **`/userdata` 实测 123M 总 / 剩 54M，`applog` 已占 24M**（单文件 13.2MB，那是开了 `gstdebug.txt` 才会这么快） | 我们**没有任何轮转机制**，长时间跑会写满 | 实验前删旧备份 `rm /userdata/applog/*.bak`；**实验后务必删掉 `/userdisk/miniapp/data/` 下的 `gstdebug.txt`、`dumpau.txt`、`softdec.txt`**，否则日志会一直按调试速率涨 |
+| **不知道该 grep 哪个文件** | `[cgmedia]` 走 `fprintf(stdout)`，`[pencg]` 走 `console.error`，**两者都跟着 miniapp 进程的 stdout、必落同一文件**。实测 `loli_s6_dev.txt` 是 **1 字节空文件**，真日志在 `DictPen_*.log` | 先 `P=$(pidof miniapp); readlink /proc/$P/fd/1` 拿实际文件（§5.1 的 `$L`），再在那个文件里同时 grep 两个前缀 |
 | **测完忘记删 netem** | 会持续影响用户 | §5.5 的 `tc qdisc del` |
 | **早期版本可能开着 `wget`** | 忘记 kill 会一直占带宽 | §4 方案 C 结尾那条 kill 命令 |
 

@@ -526,7 +526,7 @@ export default {
 }
 
 .kb-title {
-  font-size: 15px;
+  font-size: 1.5625vw;
   color: @text-color-strong;
 }
 
@@ -534,14 +534,14 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   margin-left: 10px;
   lines: 1;
 }
 
 .kb-val {
-  font-size: 15px;
+  font-size: 1.5625vw;
   color: @accent;
   margin-right: 10px;
   max-width: 260px;
@@ -557,7 +557,7 @@ export default {
 }
 
 .kb-close-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
 }
 
@@ -600,7 +600,7 @@ export default {
 }
 
 .kb-key-text {
-  font-size: 16px;
+  font-size: 1.6667vw;
   color: @text-color;
 }
 
@@ -633,19 +633,19 @@ export default {
 }
 
 .brand-name {
-  font-size: 19px;
+  font-size: 1.9792vw;
   color: @text-color;
   margin-top: 10px;
 }
 
 .brand-sub {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @accent-blue;
   margin-top: 3px;
 }
 
 .brand-tip {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   margin-top: 8px;
 }
@@ -681,7 +681,7 @@ export default {
 }
 
 .mtab-text {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color-dim;
 }
 
@@ -693,7 +693,7 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   text-align: right;
   lines: 1;
@@ -708,7 +708,7 @@ export default {
 
 .flabel {
   width: 52px;
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
 }
 
@@ -723,7 +723,7 @@ export default {
 }
 
 .cc-text {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @accent-blue;
 }
 
@@ -746,12 +746,12 @@ export default {
 }
 
 .field-val {
-  font-size: 14px;
+  font-size: 1.4583vw;
   color: @text-color;
 }
 
 .field-ph {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
 }
 
@@ -766,7 +766,7 @@ export default {
 }
 
 .swap-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
 }
 
@@ -785,7 +785,7 @@ export default {
 }
 
 .sms-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @accent-blue;
 }
 
@@ -803,7 +803,7 @@ export default {
 }
 
 .go-text {
-  font-size: 15px;
+  font-size: 1.5625vw;
   color: #FFFFFF;
 }
 
@@ -811,14 +811,14 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @danger;
   margin-left: 10px;
   lines: 2;
 }
 
 .tip {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   margin-top: 6px;
   lines: 1;
@@ -835,7 +835,7 @@ export default {
 }
 
 .toast-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @accent-blue;
 }
 </style>

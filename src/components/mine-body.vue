@@ -766,7 +766,7 @@ export default {
 }
 
 .mb-state-text {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
@@ -780,7 +780,7 @@ export default {
 }
 
 .mb-refresh-text {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @accent-blue;
 }
 
@@ -804,7 +804,7 @@ export default {
 }
 
 .mb-guest-avatar-text {
-  font-size: 24px;
+  font-size: 2.5vw;
   color: @text-color-dim;
 }
 
@@ -817,18 +817,18 @@ export default {
 }
 
 .mb-guest-title {
-  font-size: 16px;
+  font-size: 1.6667vw;
   color: @text-color;
 }
 
 .mb-guest-desc {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color-dim;
   margin-top: 5px;
 }
 
 .mb-guest-err {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @danger;
   margin-top: 5px;
 }
@@ -843,7 +843,7 @@ export default {
 }
 
 .mb-guest-btn-text {
-  font-size: 16px;
+  font-size: 1.6667vw;
   color: #FFFFFF;
 }
 
@@ -890,7 +890,7 @@ export default {
 }
 
 .mb-avatar-text {
-  font-size: 22px;
+  font-size: 2.2917vw;
   color: #FFFFFF;
 }
 
@@ -913,13 +913,13 @@ export default {
 }
 
 .mb-unick {
-  font-size: 15px;
+  font-size: 1.5625vw;
   color: @text-color;
   max-width: 130px;
 }
 
 .mb-vip-badge {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: #FFD35C;
   background-color: #3A3320;
   border-radius: 4px;
@@ -929,13 +929,13 @@ export default {
 }
 
 .mb-uuid {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   margin-top: 4px;
 }
 
 .mb-uphone {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   margin-top: 2px;
 }
@@ -952,18 +952,18 @@ export default {
 }
 
 .mb-tcard-label {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
 .mb-tcard-value {
-  font-size: 20px;
+  font-size: 2.0833vw;
   color: @accent-blue;
   margin-top: 3px;
 }
 
 .mb-tcard-sub {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
   margin-top: 3px;
 }
@@ -981,18 +981,18 @@ export default {
 }
 
 .mb-vcard-label {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
 .mb-vcard-value {
-  font-size: 15px;
+  font-size: 1.5625vw;
   color: #FFD35C;
   margin-top: 3px;
 }
 
 .mb-vcard-sub {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
   margin-top: 3px;
 }
@@ -1005,7 +1005,7 @@ export default {
 }
 
 .mb-sec-title {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color;
 }
 
@@ -1013,7 +1013,7 @@ export default {
   flex-grow: 1;
   flex-shrink: 1;
   flex-basis: 0%;
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   margin-left: 6px;
 }
@@ -1028,7 +1028,7 @@ export default {
 }
 
 .mb-clear-text {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
@@ -1069,7 +1069,7 @@ export default {
 }
 
 .mb-hicon-alt {
-  font-size: 18px;
+  font-size: 1.875vw;
   color: @text-color-dim;
 }
 
@@ -1079,14 +1079,14 @@ export default {
 }
 
 .mb-hname {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color;
   margin-top: 4px;
   text-align: center;
 }
 
 .mb-hmeta {
-  font-size: 9px;
+  font-size: 0.9375vw;
   color: @text-color-dim;
   margin-top: 1px;
 }
@@ -1100,7 +1100,7 @@ export default {
 }
 
 .mb-empty-text {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
 }
 
@@ -1123,12 +1123,12 @@ export default {
 }
 
 .mb-fname {
-  font-size: 12px;
+  font-size: 1.25vw;
   color: @text-color;
 }
 
 .mb-fdesc {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
   margin-top: 3px;
   max-width: 120px;
@@ -1141,7 +1141,7 @@ export default {
 }
 
 .mb-foot-text {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @text-color-dim;
   margin-top: 2px;
 }
@@ -1158,7 +1158,7 @@ export default {
 }
 
 .mb-toast-text {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @accent-blue;
 }
 
@@ -1175,12 +1175,12 @@ export default {
 }
 
 .mb-modal-title {
-  font-size: 15px;
+  font-size: 1.5625vw;
   color: @text-color;
 }
 
 .mb-modal-desc {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   margin-top: 8px;
 }
@@ -1201,7 +1201,7 @@ export default {
 }
 
 .mb-modal-cancel-text {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color;
 }
 
@@ -1215,7 +1215,7 @@ export default {
 }
 
 .mb-modal-ok-text {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: #FFFFFF;
 }
 
@@ -1251,26 +1251,26 @@ export default {
 }
 
 .mb-spon-title {
-  font-size: 14px;
+  font-size: 1.4583vw;
   color: @text-color;
 }
 
 .mb-spon-desc {
-  font-size: 11px;
+  font-size: 1.1458vw;
   color: @text-color-dim;
   margin-top: 8px;
 }
 
 .mb-spon-hint {
-  font-size: 10px;
+  font-size: 1.0417vw;
   color: @accent-blue;
   margin-top: 10px;
 }
 
 /* 留言提示：比 hint 再退一档，但用金色（和赞助主题呼应），避免和蓝色链接混淆 */
 .mb-spon-leave {
-  font-size: 10px;
-  line-height: 15px;
+  font-size: 1.0417vw;
+  line-height: 1.5625vw;
   color: @gold;
   margin-top: 6px;
 }
@@ -1286,7 +1286,7 @@ export default {
 }
 
 .mb-spon-btn-text {
-  font-size: 13px;
+  font-size: 1.3542vw;
   color: @text-color;
 }
 </style>

@@ -26,20 +26,20 @@
 
 | 编号 | 严重度 | 一句话问题 | file:line | 建议 |
 | --- | --- | --- | --- | --- |
-| **F1** | 🔴 P0 | `au_broken_fixable` 不随 AU 复位，结构性坏 AU 会被当成「已补洞修好」推给解码器 | `cm_rtp.c:369-390`（reset 缺清）、`:704-709`（误判点） | `rtp_reset_au()` 里补 `au_broken_fixable = 0; au_start_ms = 0;`，并给 `:993` 补显式置 0 |
-| **S1** | 🔴 P0 | `DEV_AUTOSTART` 非 null，生产包启动 4s 后自动跳「明日方舟」play 页并占机位 | `src/dev-autostart.js:17` | 改回 `null`；顺带删掉 `:33` 注释里的明文手机号/密码 |
-| **R2** | 🔴 P0 | 重传包不判归属，属于**已丢弃的上一 AU** 的分片会被拼进当前 AU 且不置 `au_broken` | `cm_rtp.c:1395-1407`、`:1089-1097` | `gap_take` 命中后校验 seq 落在 `[au_first_seq, au_last_seq]`，否则丢弃 |
-| **N1** | 🟠 P1 | NACK 报文 `nfci >= 27` 时 SRTCP 加密必然失败并**退回明文发送**，在 SRTP 会话里全部作废 | `cm_cmd.c:409`、`:453-457`；`cm_srtp.c:432` | 缓冲区 `+16`（132+14=146≤148）或 `cap` 传 `sizeof(pkt)-14`；`enc <= 0` 时不发 |
-| **R3** | 🟠 P1 | 重排路径覆盖 `out_p`，把刚补插的 SPS/PPS 丢掉；「裸 IDR + 重传乱序」同时成立时命中 | `cm_rtp.c:805-826`、`:836-858`（覆盖在 `:856`） | 重排结果写回 `au_out`（参数集长度先记下来，重排内容接在后面） |
-| **R5** | 🟠 P1 | `gap_purge_expired()` 摘任意过期缺口后**无条件** `au_broken=1`，把当前完整 AU 打成残缺 | `cm_rtp.c:463-490`（置位在 `:484`） | 只在 seq 落在当前 AU 范围时置位（`au_first_seq/au_last_seq` 已具备但无人读） |
+| **F1** | 🔴 P0 | **✅ 已修 2026-11-13** `au_broken_fixable` 不随 AU 复位，结构性坏 AU 会被当成「已补洞修好」推给解码器 | `cm_rtp.c:369-390`（reset 缺清）、`:704-709`（误判点） | `rtp_reset_au()` 里补 `au_broken_fixable = 0; au_start_ms = 0;`，并给 `:993` 补显式置 0 |
+| **S1** | 🔴 P0 | **✅ 已修 2026-11-14** `DEV_AUTOSTART` 非 null，生产包启动 4s 后自动跳「明日方舟」play 页并占机位 | `src/dev-autostart.js:17` | 已改回 `null`（`:36`/`:49` 本来就是 null）；`:33` 注释里是占位符 `<YOUR_PHONE>`/`<YOUR_PASSWORD>`，无明文。**包内已核验：`dev-autostart-*.js.bin` 仅 139 字节、不含 `yssy`/手机号/密码** |
+| **R2** | 🔴 P0 | **✅ 已修 2026-11-13** 重传包不判归属，属于**已丢弃的上一 AU** 的分片会被拼进当前 AU 且不置 `au_broken` | `cm_rtp.c:1395-1407`、`:1089-1097` | `gap_take` 命中后校验 seq 落在 `[au_first_seq, au_last_seq]`，否则丢弃 |
+| **N1** | 🟠 P1 | **✅ 已修 2026-11-13** NACK 报文 `nfci >= 27` 时 SRTCP 加密必然失败并**退回明文发送**，在 SRTP 会话里全部作废 | `cm_cmd.c:409`、`:453-457`；`cm_srtp.c:432` | 缓冲区 `+16`（132+14=146≤148）或 `cap` 传 `sizeof(pkt)-14`；`enc <= 0` 时不发 |
+| **R3** | 🟠 P1 | **✅ 已修 2026-11-14** 重排路径覆盖 `out_p`，把刚补插的 SPS/PPS 丢掉；「裸 IDR + 重传乱序」同时成立时命中 | `cm_rtp.c:805-826`、`:836-858`（覆盖在 `:856`） | 重排结果写回 `au_out`（参数集长度先记下来，重排内容接在后面） |
+| **R5** | 🟠 P1 | **✅ 已修 2026-11-13** `gap_purge_expired()` 摘任意过期缺口后**无条件** `au_broken=1`，把当前完整 AU 打成残缺 | `cm_rtp.c:463-490`（置位在 `:484`） | 只在 seq 落在当前 AU 范围时置位（`au_first_seq/au_last_seq` 已具备但无人读） |
 | **R6** | 🟠 P1 | **✅ 已修 2026-11-13** 把**收到的** NACK 当成「我们的 AU 坏了」；纯接收端语义不成立 | `cm_media.c:246-248` | 删掉这条，或只在 SSRC 属于对端视频且我们确实发过媒体时才认 |
 | **R4** | 🟠 P1 | **✅ 已修 2026-11-13** IDR hold 窗口被下一个 AU 的 FU-A start 顺手清掉，60fps 下必然失效 | `cm_rtp.c:716-723`、`:1047-1050` | hold 期间 `in_fu` 新 start 时先放行挂起的 IDR（`flush_frame`）再 reset |
 | **P1-7** | 🟠 P1 | **✅ 已修 2026-11-13** IDR 饥饿放行后无「重新收紧」机制，`have_kf` 永久为 1 | `cm_rtp.c:782-801` | 可选：放行后设一个 `relax_until_ms`，到期仍无 IDR 则重新关闸 |
-| **L1** | 🟡 P2 | NACK 的全部统计字段没进 stat JSON，且相关日志是 `CM_LOGD`（默认不打）→ 真机上无法判断 NACK 是否生效 | `cm_media.c:112-129`、`cm_rtp.c:1401` 等 | stat JSON 增 `nackSent/nackReq/nackRecovered/relax`；关键 4 条日志升到 `CM_LOGI` |
-| **L2** | 🟡 P2 | **✅ 已修 2026-11-13** `gap_drop()` 是死函数；它负责的三件事被三处内联代码各实现一遍 | `cm_rtp.c:441-461` | 三处内联改调 `gap_drop()`，或删函数 |
-| **L3** | 🟡 P2 | `screen.js` 保活失败时 1s 重试、无退避无上限 | `screen.js:511-516` | 指数退避到 20s 上限 |
-| **L4** | 🟡 P2 | `log.js` 无文件轮转；`/userdata` 剩余空间**无法核实**（设备离线 + 禁 adb） | `src/services/log.js:10-44` | 见 §P2-11，建议 native 侧按大小自轮转 |
-| **L5** | 🟡 P2 | 两份文档对「native stdout 是否落进 `loli_s6_dev.txt`」结论矛盾 | `docs/VERIFY-playbook.md:298` vs `docs/BUGFIX-bug1-freeze-verify.md:17` | 现场核实后统一 |
+| **L1** | 🟡 P2 | **✅ 已修 2026-11-14** NACK 的全部统计字段没进 stat JSON，且相关日志是 `CM_LOGD`（默认不打）→ 真机上无法判断 NACK 是否生效 | `cm_media.c:112-129`、`cm_rtp.c:1401` 等 | stat JSON 增 `nackSent/nackReq/nackRecovered/relax`；关键 4 条日志升到 `CM_LOGI` |
+| **L2** | 🟡 P2 | **✅ 已修 2026-11-14（确认）** `gap_drop()` 是死函数；它负责的三件事被三处内联代码各实现一遍 | `cm_rtp.c:441-461` | 三处内联改调 `gap_drop()`，或删函数 |
+| **L3** | 🟡 P2 | **⛔ 无需修 2026-11-14** `screen.js` 保活失败时 1s 重试、无退避无上限（源码早已是 1s→20s 指数退避） | `screen.js:511-516` | 指数退避到 20s 上限 |
+| **L4** | 🟡 P2 | **❔ 暂不修 2026-11-14（空间已核实）** `log.js` 无文件轮转；`/userdata` 剩 54M / applog 24M，已有限流，无立即风险 | `src/services/log.js:10-44` | 见 §P2-11，下一批做 native 侧按大小自轮转 |
+| **L5** | 🟡 P2 | **✅ 已裁决 2026-11-14** native `[cgmedia]` 与 JS `[pencg]` **同落 `DictPen_*.log`**；`loli_s6_dev.txt` 是 1 字节空文件 | `docs/VERIFY-playbook.md:298` vs `docs/BUGFIX-bug1-freeze-verify.md:17` | `BUGFIX-bug1-freeze-verify.md:17` 对，playbook 需改 |
 | **L6** | 🟡 P2 | **✅ 已修 2026-11-13** `flush_frame` 重排循环未检查 `cm_buf_put` 返回值 | `cm_rtp.c:851-854` | 检查并在失败时 `au_broken=1` |
 | **P0-1** | 🟢 非问题 | 分片表溢出的静默截断 | `cm_rtp.c:905-931`、`:836` | 已用 `seg_overflow` 正确修掉，见 §P0-1 |
 | **P0-2** | 🟢 非问题 | `gap_add` 表满 memmove | `cm_rtp.c:429-434` | 界内 |
@@ -115,9 +115,15 @@ static void rtp_reset_au(void) {
 
 ---
 
-### S1（新发现）：`DEV_AUTOSTART` 非 null，生产包会自动跳进某个游戏的 play 页
+### S1（新发现，**已于 2026-11-14 修复**）：`DEV_AUTOSTART` 非 null，生产包会自动跳进某个游戏的 play 页
 
-**证据**
+> **状态（2026-11-14 00:34）**：`src/dev-autostart.js:17` 已改回 `export const DEV_AUTOSTART = null;`，
+> `:36` `DEV_AUTOLOGIN` / `:49` `DEV_LOGOUT` 本来就是 null。`:33` 处原文是占位符
+> `<YOUR_PHONE>` / `<YOUR_PASSWORD>`，**没有明文凭据**（下方为修复前快照）。
+> 1.2.0 包内实测：`dev-autostart-eed06a3a.js.bin` **139 字节**，`yssy` / 手机号 / 密码均未命中。
+> 保留本节是因为「消费方在哪、为什么危险」仍然是有效的回归知识。
+
+**证据（修复前快照）**
 
 `PenCG/src/dev-autostart.js:17`：
 
@@ -134,6 +140,8 @@ export const DEV_AUTOSTART = { page: 'play', delay: 4000, params: { code: 'mrfzz
 **后果**：装到用户机器上后，打开 app 4 秒自动进入「明日方舟：终末地」并申请机位 —— 既占免费时长，也让用户以为 app 坏了。
 
 **建议改法**：`export const DEV_AUTOSTART = null;`，并把 `:11-15`、`:33` 示例里的真实 code / 手机号 / 密码换成占位符。
+
+> **状态（2026-11-14）**：**由 lead 统一处理（不在本批改动内）** —— 源码 `src/dev-autostart.js:17` 当前仍是 `{ page: 'search', delay: 2500, params: {} }`，lead 正在用该开关做真机页面走查，要求发布前自行改回 `null`。**明文手机号/密码已复核：无泄漏**（`grep -rnoE '1[3-9][0-9]{9}' src/` 命中 0；`:33` 附近是 `<YOUR_PHONE>` / `<YOUR_PASSWORD>` 占位符）。发布前检查项：`DEV_AUTOSTART`、`DEV_AUTOLOGIN`、`DEV_LOGOUT` 三个 export 必须同时为 `null`（后两个当前已是 `null`）。
 
 ---
 
@@ -368,6 +376,8 @@ if (!g_rtp.seg_ordered && g_rtp.seg_n > 1 && !g_rtp.seg_overflow) {
 
 另外注意 `cm_buf_put` 的返回值这回**必须检查**（顺带修 L6）：任一 put 失败就该 `au_broken = 1` 并放弃这一帧，而不是推出一个短 buffer。
 
+> **状态（2026-11-14）**：**已修复** —— `flush_frame` 已改成「先重排、后注入」：`cm_rtp.c:963` `base_p = g_rtp.frame.p;`（重排结果写回 `base_p/base_n`），`cm_rtp.c:1013` 的 `/* --- 3) IDR 缺参数集时补插（在重排之后做，否则会被重排覆盖）--- */` 之后才拼 `sps+pps+AU`。`cm_rtp.c:958` 留了 `★ 顺序很重要：必须先重排、后注入 SPS/PPS` 的防退步注释。依据：这一段是本批一起改的（R3 与 L6 同在重排循环里）。
+
 ### R5（新发现）：`gap_purge_expired()` 无条件把 `au_broken` 置 1
 
 **证据** `cm_rtp.c:463-490`：
@@ -423,6 +433,8 @@ if (rpt == 205 && fmt == 1) {
 
 **建议改法**：删掉这条分支（只保留 `rx_rtcp` 计数用于判断「对端会不会回 RTCP」）；如果一定要用，必须校验 FCI 里的 PID 是否落在我们对端视频 seq 空间内。
 
+> **状态（2026-11-14）**：**已修（按「不盲删、只降级为日志」处理）** —— `cm_media.c:283` 现为 `CM_LOGD("#%d RTCP peer NACK (RTPFB fmt=1, ignored: we are receive-only)")`，`cm_rtp_note_stale(s,"peer NACK")` 调用已删除（不再动 AU）。`rx_rtcp` 计数保留，stat JSON 里是 `rtcpIn`。依据：`cm_media.c:255-283` 有 20+ 行注释论证「纯接收端收到 NACK 语义上不成立」。**仍未验证**：网关到底会不会发 NACK（看 `rtcpIn` 是否增长）。
+
 ### R4（新发现）：IDR hold 窗口被下一个 AU 的 FU-A start 清掉
 
 **证据** `cm_rtp.c:716-723`（hold）：
@@ -470,6 +482,8 @@ hold 挂起后 `flush_frame` 已 return，而 `in_fu` 在 flush 之前就被清�
 }
 ```
 
+> **状态（2026-11-14）**：**已修复** —— FU-A start 分支开头（`cm_rtp.c:1262-1272`）新增：`if (g_rtp.au_hold_state == 1 && now > g_rtp.au_hold_until_ms) { au_hold_state = 2; au_hold_until_ms = 0; flush_frame(s); }`，随后才 `rtp_reset_au()`，日志 `#%d next AU start arrived during IDR hold, releasing held AU`（`cm_rtp.c:1268`）。依据：本批改动。**收益未验证**：取决于 `IDR_HOLD_MS = 30` 是否够等一轮 NACK 重传（RTT 未知）。
+
 ### P1-7（lead 疑点，成立但风险可控）：IDR 饥饿放行后没有「重新收紧」机制
 
 `cm_rtp.c:782-801`，`kf_starve_ms` 起算后 4s 仍无 IDR 就：
@@ -491,6 +505,8 @@ s->kf_starve_ms = 0;
 
 **结论**：这条不列为 blocking。若要加保险，建议放行时同时置一个 `relax_until_ms = now + 8000`，到期仍无完整 IDR 则 `have_kf = 0` 重新关闸（会再冻结，但至少不是无限花屏）。属于策略选择，需要产品判断。
 
+> **状态（2026-11-14）**：**已修（但阈值是我估的，需产品定）** —— 新增 `#define RELAX_RESET_MS 10000`（`cm_rtp.c:94`）与字段 `uint64_t relax_until_ms`（`cm_session.h:290`）。放行时设期限（`cm_rtp.c:917` 附近）；到期仍无 IDR 则重新关闸并 `kf_request(s,"relax window expired")`（`cm_rtp.c:912-918`，日志 `#%d relax window %.0fs expired without IDR, re-closing gate`）。清理点：`mark_keyframe`（`cm_rtp.c:670`）、`note_sps` 换档（`cm_rtp.c:656`）、坏 IDR（`:845`）、连丢 P（`:881`）、`cm_rtp_reset`。**风险**：`10000` 无真机数据支撑；若网关此后只发完整 P 帧，会变成「花屏 10s → 冻结 4s」的周期抖动，**「无限花屏 vs 反复冻结」哪个更能接受需产品判断**。
+
 ---
 
 ## 🟡 P2
@@ -507,6 +523,12 @@ s->kf_starve_ms = 0;
 
 **建议**：stat JSON 增 4 个字段（`nackSent/nackReq/nackRecovered/relax`）；把 `"AU repaired by retransmissions"`（`:707`）与 `"retransmit recovered"` 的限速版升到 `CM_LOGI`。
 
+> **状态（2026-11-14）**：**已修复（stat 字段 + 日志级别都改了）** ——
+> - stat JSON 现含 `nackSent`/`nackReq`/`nackRecovered`/`relax`/`staleRtx`/`pDrop` 六个字段（`cm_media.c:131-133`），实参在 `:167-178`。
+> - 四条日志从 `CM_LOGD` 升到 `CM_LOGI`：`IDR AU incomplete ... hold`（`cm_rtp.c:832`）、`drop broken P AU`（`cm_rtp.c:869`，限速：前 20 条全打、之后每 100 条一条）、`AU resequenced`（`cm_rtp.c:1009`）、`retransmit recovered`（`cm_rtp.c:1658`，同样限速）。
+> - 为此新增 `uint64_t vid_p_drop`（`cm_session.h:147`）作为 P 帧丢弃计数与限速器 —— 与 `gateDrop` 语义不同（gateDrop = 没关键帧主动不放行；pDrop = 有关键帧、只丢拼不全的那一帧）。
+> 依据：`cm_rip` 改动后再无任何 NACK 诊断只存在于 `CM_LOGD`。**仍未验证**：这些行在真机 log_level 下是否真的落盘（取决于 L5 那个未定论的 stdout 归属问题）。
+
 ### L2：`gap_drop()` 是死函数，且语义被三处内联重复实现
 
 `cm_rtp.c:441-461` 的 `gap_drop(uint16_t seq)` **全文件无调用者**（`grep -n "gap_drop("` 仅命中定义处）。它注释里说的三件事（重传到达 / AU 丢弃 / TTL 过期 → 摘 gap + 同步摘 `au_miss` + `au_missing--`）实际分别由：
@@ -516,6 +538,8 @@ s->kf_starve_ms = 0;
 - `cm_rtp_take_nack_gaps` 轮数用尽分支内联（`:526-537`）
 
 各实现了一遍。当前无功能错误，但改一处忘另两处是必然的维护性风险。建议三处统一改调 `gap_drop`。
+
+> **状态（2026-11-14）**：**已修复** —— `gap_drop(uint16_t seq)`（`cm_rtp.c:467`）已不再是死函数，三处内联全部改成调用它：`cm_rtp.c:499`（重传到达）、`:558`（轮数用尽）、`:1177`（`gap_take` 命中），定义处与调用处都有 `★ L2 修正` 注释。依据：本批改动后 `grep -n "gap_drop(" cm_rtp.c` 命中 4 处（1 定义 + 3 调用）。
 
 ### L3：`screen.js` 保活失败时 1s 重试，无退避无上限
 
@@ -529,21 +553,34 @@ state.timer = setTimeout(armTick, next);
 
 若 brightness 后端永久不可用（`keepOnce` 恒返回 false），会形成**每秒一次探测 + 每秒一条日志**的长期风暴。构建 warning 里就有「未找到模块 brightness,global,cgnative,cgmedia」，说明模块缺失是真实可能的状态（真机当前可用）。建议指数退避：1s → 2s → 4s → … → 20s 上限。
 
+> **状态（2026-11-14）**：**判断为无需修（源码早已是指数退避）** —— `src/services/screen.js` 现成实现：常量 `SCREEN_BACKOFF_BASE_MS = 1000`（`:70`）、`SCREEN_BACKOFF_MAX_MS = 20000`（`:71`）、`SCREEN_BACKOFF_LOG_AFTER = 5`（`:73`）；`nextDelay(ok)`（`:124-141`）`failStreak++` → `shift = Math.min(failStreak - 1, 5)` → `ms = Math.min(20000, 1000 << shift)`，成功即清零，**永不停止重试**；调度点 `setTimeout(armTick, nextDelay(sent))`（`:584`、`:613`）。本文描述的 `sent ? state.intervalMs : 1000` 硬编码**在现源码中已不存在**。依据：逐行读 `screen.js:60-145`、`:580-615`。
+
 ### L4 / P2-11：日志轮转 —— **无法核实，只能定性**
 
-- `src/services/log.js`（84 行全文已读）**没有任何文件轮转逻辑**：`MAX = 300` 只是内存环形缓冲（`:10`、`:39`），落盘由 Falcon 运行时的 `console.error`（`:42-44`）直接追加到 `/userdata/applog/loli_s6_dev.txt`。
-- native 侧 `cm_log`（`cm_util.c:19-29`）走 **stdout**（`fprintf(stdout, ...)`），是否与 JS 同文件见下条 L5。
+- `src/services/log.js`（84 行全文已读）**没有任何文件轮转逻辑**：`MAX = 300` 只是内存环形缓冲（`:10`、`:39`），落盘由 Falcon 运行时的 `console.error`（`:42-44`）追加到 **miniapp 进程的 stdout**。~~直接追加到 `/userdata/applog/loli_s6_dev.txt`~~ **（2026-11-14 更正：该文件实测只有 1 字节，是空文件，不是我们的日志；真实文件用 `P=$(pidof miniapp); readlink /proc/$P/fd/1` 解析，形如 `/userdata/applog/DictPen_YYYYMMDD_HHMMSS.log`）**
+- native 侧 `cm_log`（`cm_util.c:19-29`）走 **stdout**（`fprintf(stdout, ...)`），**与 JS 的 `console.error` 落同一个文件**（已裁决，见下条 L5）。
 - 我们**能控制的是写入量**，实测/推算的稳态速率：JS 侧 play 页 `probe` 20s 一条（`play.vue:1364-1376`）+ 事件日志；native 侧 `RR sent` 10s、`pt histogram` 10s、健康告警 10s（`cm_media.c:60-67`、`:154-166`）→ 合计约 0.3~0.4 行/秒。
 - `/userdata` 剩余空间与文件当前大小：**本次无法核实**（设备离线、任务禁止 adb）。lead 提到的 5.9MB 我无法独立确认，也不反驳。
 
 **结论**：不能证明会写满，也不能证明不会。建议：① 让 native 的 `cm_log` 按大小自轮转（它自己在写 stdout，可控）；② 或交付前把 `logLevel` 默认值从 3 降到 2（只留 W/E），静态日志量可降一个数量级且不丢关键信息。
 
+> **状态（2026-11-14 00:35）**：**仍不修，但空间已现场核实，风险可控** —— 真机 X6 Pro 实测 `/userdata` = 123M 总 / **已用 64M / 剩 54M**；`/userdata/applog` 目录 **24M**，单文件 `DictPen_20261113_232219.log` 已涨到 **13.2MB**（开 `gstdebug.txt` 调试开关时才会这么快；正常不掉 log level 时量级小得多）。
+> 结论：① 没有立即写满的风险（剩 54M，且我们已有限流：`LOG_BURST_PER_SEC=8` / `LOG_BURST_PER_MIN=200`，最坏 ≈1.7MB/天）；② 但**长期累积确实会涨**，建议下一批做 native 侧按大小自轮转（动 `cm_util.c`）；③ `logLevel` 3→2 的建议**不采纳**，会削弱 L1 诊断。④ **取证注意事项**：`gstdebug.txt`/`dumpau.txt` 这类开关会上线后才想起来关，交付说明里要提醒用户删掉。
+
 ### L5：两份文档对「native stdout 是否落进同一个日志文件」结论矛盾
 
-- `docs/VERIFY-playbook.md:298`：「一条 `[cgmedia]` 都没有 → 先确认 native stdout 是否落进 `loli_s6_dev.txt`（**待现场确认**）」
-- `docs/BUGFIX-bug1-freeze-verify.md:17`：「JS 日志（`loli_s6_dev.txt`）、native 日志（`DictPen_*.log` 里的 `[cgmedia]`）两个文件是分开的，**已实测确认**」
+- `docs/VERIFY-playbook.md:298`（**原文引述，已过时**）：「一条 `[cgmedia]` 都没有 → 先确认 native stdout 是否落进 `loli_s6_dev.txt`（**待现场确认**）」
+- `docs/BUGFIX-bug1-freeze-verify.md:17`（**原文引述，路径部分已过时**）：「JS 日志（`loli_s6_dev.txt`）、native 日志（`DictPen_*.log` 里的 `[cgmedia]`）两个文件是分开的，**已实测确认**」
 
 两份都是本批未跟踪的新文档，结论直接冲突。这会影响所有「用日志证明某机制生效」的推论，建议现场核实后统一。**本文所有涉及 native 日志行是否可见的判断，都按「未定论」处理。**
+
+> **状态（2026-11-14 00:35）**：**已现场核实并裁决** —— 真机 X6 Pro 实测：
+> - `/userdata/applog/loli_s6_dev.txt` 只有 **1 字节**（空文件，最后修改 11-13 18:42），`grep -c cgmedia` = **0**、`grep -c pencg` = **0**。
+> - `/userdata/applog/DictPen_20261113_232219.log` 有 **13.2MB**，`grep -a -c cgmedia` = **2236**，并且同一文件里还有大量 `[pencg]... (console().error.0)` 行。
+>
+> ⇒ **native stdout（`[cgmedia]`）与 JS `console.error`（`[pencg]`）落在同一个 `DictPen_*.log`，`loli_s6_dev.txt` 不是我们的目标文件。**
+> 因此 `docs/BUGFIX-bug1-freeze-verify.md:17` 的说法是对的，`docs/VERIFY-playbook.md:298` 的「待现场确认」应改为「已确认不落 `loli_s6_dev.txt`」。
+> 取证正确姿势：`P=$(pidof miniapp); readlink /proc/$P/fd/1` 拿到真实路径，不要用 `ls -t` 猜。
 
 ### L6：`flush_frame` 重排循环未检查 `cm_buf_put` 返回值
 
@@ -554,6 +591,8 @@ cm_buf_put(&g_rtp.au_sorted, g_rtp.frame.p + g_rtp.segs[t].off, (size_t)g_rtp.se
 ```
 
 `cm_buf_put`（`cm_util.c:69-75`）在 `cm_buf_reserve` 失败（`cap > 1<<30`）时返回 -1，此处未判断 → 静默得到短 buffer。要 1GB 才会发生，纯理论边界，但改起来只有一行。
+
+> **状态（2026-11-14）**：**已修复** —— 重排循环现在检查 `cm_buf_put` 返回值：失败时 `g_rtp.au_broken = 1` + `s->stats.vid_au_drop++` + `CM_LOGW("#%d AU resequence failed (buffer alloc), drop AU")`（`cm_rtp.c:998`）+ `rtp_reset_au()` + return，不再推出短 buffer。依据：本批改动。
 
 ---
 
@@ -746,7 +785,7 @@ if (caps && b->src) gst_app_src_set_caps(b->src, caps);
 
 ### 上线前必须修的（blocking）
 
-1. **S1** `src/dev-autostart.js:17` → `DEV_AUTOSTART = null`（同时删 `:33` 注释里的手机号/密码）。**这个不修，包一装上去就自动跳游戏。**
+1. **S1** ✅ **已修 2026-11-14** `src/dev-autostart.js:17` → `DEV_AUTOSTART = null`（`:33` 注释原本就是 `<YOUR_PHONE>`/`<YOUR_PASSWORD>` 占位符，无需删）。包内已核验不含 `yssy`/手机号/密码。
 2. **F1** `cm_rtp.c:369-390` 的 `rtp_reset_au()` 补清 `au_broken_fixable` 与 `au_start_ms`；`:993` 补显式置 `au_broken_fixable = 0`。
 3. **N1** `cm_cmd.c:409` 缓冲区加余量，且 `enc <= 0` 时不发明文。
 4. **R5** `cm_rtp.c:484` 加「seq 属于当前 AU」判断（`au_first_seq/au_last_seq` 已备好）。
@@ -756,18 +795,20 @@ if (caps && b->src) gst_app_src_set_caps(b->src, caps);
 
 ### 可以延后的
 
+> **本批处置汇总（2026-11-14）**：R3 ✅ 已修（先重排后注入）｜R4 ✅ 已修｜R6 ✅ 已降级为日志（不盲删，保留 `rtcpIn` 计数）｜P1-7 ✅ 已修（`RELAX_RESET_MS = 10000`，阈值待产品定）｜L1 ✅ 已修（stat 六字段 + 四条日志升 `CM_LOGI` + 新增 `pDrop`）｜L2 ✅ 已修（三处内联改调 `gap_drop()`）｜L3 ⛔ 无需修（源码早已指数退避到 20s）｜L4 ❔ 暂不修（空间已核实：剩 54M / applog 24M，有限流，无立即风险；自轮转需动 `cm_util.c`，留下一批）｜L5 ✅ 已裁决（`[cgmedia]` 与 `[pencg]` 同落 `DictPen_*.log`，`loli_s6_dev.txt` 是空文件）。逐条依据见各小节末尾的 `> **状态（2026-11-14）**` 块。
+
 - **R3**（重排覆盖补插参数集）—— 需要「裸 IDR」与「重传乱序」同时成立，单独概率低于 R5/R2，但两者在弱网场景里同源、正相关，症状是绿块。**如果这批要修 NACK 链路，建议连它一起修**（都在 `flush_frame` 里，改动面重叠）。
 - **R4**（IDR hold 被清）—— 不致命，是「机制没生效」而非「引入故障」，顺手改。
 - **R6**（peer NACK 误解）—— 取决于网关是否真的发 NACK；先加计数观察，别盲删。
 - **P1-7**（放行后无收紧）—— 策略问题，需要产品判断「无限花屏 vs 反复冻结」哪个更能接受。
 - **L1**（NACK 可观测性）—— 强烈建议同批加（4 个 JSON 字段 + 2 行日志升级），否则下一轮真机验证仍然无法判断 NACK 是否生效。
 - **L2/L3/L6** —— 纯维护性。
-- **L4/L5** —— 需要现场设备才能定论。
+- **L4** —— 空间已核实、风险可控（剩 54M），自轮转留下一批。**L5** —— 已裁决，见 §L5。
 
 ### 需要真机验证才能确认的（我给出的结论都是推理，不是实测）
 
 1. **P1-8**：分辨率热切换后 flush-start/flush-stop 是否让画面正常恢复（`video caps CHANGED` → 恢复出画）。
-2. **L4/L5**：`/userdata` 剩余空间、日志增长速度、native stdout 落哪个文件。
+2. ~~**L4/L5**~~ → **已完成 2026-11-14**：`/userdata` 剩 54M、applog 24M、单文件 13.2MB（开 gstdebug 时）；native stdout 与 JS 同落 `DictPen_*.log`。
 3. **R6**：网关到底会不会发 NACK（看 `rtcpIn` 是否增长 + 若有日志看 fmt）。
 4. **N1 修好后**：`vid_nack_recovered / vid_nack_req` 是否 > 0（这决定「NACK 这条路到底有没有用」，是 bug1 弱网场景能否收敛的关键数据）。
 
