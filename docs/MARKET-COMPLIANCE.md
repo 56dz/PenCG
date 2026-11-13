@@ -99,18 +99,20 @@ function dots(n) {
 
 **历史遗留（已清理）**：`PenCG/src/pages/diag/diag.vue` 曾经有一组「符号 N」测试行，直接渲染 `😀🎮🔥📱` 等真 emoji，用于验证设备字体缺字时的表现。该组已于本轮删除。当前 `diag.vue` 共 720 行，**已无任何 emoji**。
 
-**待确认的连带风险**：`diag` 页仍注册在 `PenCG/src/app.json:10`（`"diag": "pages/diag/diag.js"`），`PenCG/src/services/nav.js:13` 也有路由名 `diag`。需要确认它在**普通用户路径上不可达**（无 UI 入口），否则作为一个开发者诊断页出现在商店包里，本身也是审核风险。**【待确认】**
+**diag 页可达性（2026-11-14 已确认：普通用户路径不可达）**：`diag` 页仍注册在 `PenCG/src/app.json:10`（`"diag": "pages/diag/diag.js"`），`PenCG/src/services/nav.js:13` 也有路由名 `diag`，但全 UI 扫描（`grep -o "navTo('[a-z]*'"` 全部 8 个调用方）只有 `detail/index/login/mine/play/queue/search` 七个目标，**无任何 `navTo('diag')` 调用**；唯一能到达 diag 的通道是 `src/dev-autostart.js` 的 `DEV_AUTOSTART`（量产恒为 `null`，见规则 3 的 S1）。左侧导航（`index.vue` 的 tab 列表）也不含 diag。结论：普通用户无法进入该页，审核风险解除（保留注册是为开发者真机排障，符合「诊断页不出现在用户路径」的要求）。
+
+**emoji 序列终扫（2026-11-14）**：`U+2300–U+23FF` / `U+FE0F` / `U+1F000–U+1FAFF` 三段在 `PenCG/src`（js+vue+less 全量）命中 **0**；`session.js` 的 `⚠️` 已不存在（前轮已清）。
 
 ### 1.3 整改动作
 
 | 项 | 动作 | 状态 |
 | :-- | :-- | :-- |
 | diag 页 emoji 测试行 | 删除 | **已完成** |
-| `session.js:88` 的 `⚠️` | 清掉（仅为降低审计噪声） | 待做（低优先） |
+| `session.js:88` 的 `⚠️` | 清掉（仅为降低审计噪声） | **已完成**（终扫 0 命中，2026-11-14） |
 | `play.vue:80` 的 `⌫` | 真机走查；方块则换 PNG / 文字 | **已完成**（实测 tofu → 已换中文「删」） |
 | `login.vue:107` 的 `●` | 真机走查；建议直接改 `*` | **无需修**（实测正常渲染，保留） |
 | U+2300–U+23FF 区段全量排查 | 新增硬规则并扫全仓 | **已完成**（`PenCG/src` 命中 0） |
-| diag 页可达性 | 确认无普通用户入口 | 待确认 |
+| diag 页可达性 | 确认无普通用户入口 | **已确认（2026-11-14）：无 `navTo('diag')`，仅 DEV_AUTOSTART 可达（量产 null）** |
 
 ---
 
@@ -395,7 +397,7 @@ $ unzip -l 8002026110200003.1_1_1.amr | grep -i "deploy\|adb"
 | 3 | 8 处 `line-height` 转 vw | 规则 2 | **已完成** | `grep "line-height:[^;]*px"` = 0 |
 | 4 | `⌫` / `●` 真机走查 | 规则 1 | **已完成** | `⌫` 实测 tofu → 已换中文「删」；`●` 实测正常 → 保留 |
 | 5 | `login.vue` 掩码改 `*` | 规则 1 | **不需要** | `●` 实测正常渲染，无改的必要 |
-| 6 | diag 页入口可达性确认 | 规则 1/3 | 待确认 | 全仓无 UI 入口 |
+| 6 | diag 页入口可达性确认 | 规则 1/3 | **已完成（2026-11-14）** | 全 UI 无 `navTo('diag')`，仅 DEV_AUTOSTART（量产 null）可达 |
 | 7 | 资源按需加载 | 规则 3 | **通过（2026-11-14 审计）** | 图片不进 JS bundle（`images/<md5>.png` 独立文件）、页面按页拆 `*.js.bin`；唯一待优化项 `fixWebpIcons` 串行探测已记入 §3.4「需真机验证」，不阻断提审 |
 | 8 | 未修 6 条审查项（R4/P1-7/L2/L3/L4/L6） | 规则 3 | **已修**（本轮补齐） | `grep -rn "REVIEW" src native` 逐条关闭 |
 | 9 | 机型探测代码 | 规则 4 | **已写，已真机验证（结论为否定，见 §4.2）** | `PenCG/src/services/device_profile.js` 存在；启动打 `[device] width=... source=...` |
