@@ -143,40 +143,25 @@ grep -rn "installAmr|miniapp_cli" PenCG/
 
 PenBili 在 `updater.js` 里自己定义 `APP_VERSION`；PenCG 已经有唯一来源 `services/version.js`，所以 `updater.js` 改成 `import { APP_VERSION } from './version.js'` 并 `export { APP_VERSION }` 转出，避免出现两份版本号。
 
-### 4.5 没有 `test/` 目录
+### 4.5 主机侧单测
 
-PenBili 有 `test/run.js` 做 Node 侧断言；PenCG 没有测试目录，所以没有加单测文件。但纯逻辑函数仍然是可测的（见 §3 第 4 条），临时验证可以直接 `node -e "import(...)"`。
+纯逻辑部分有单测：`bash PenCG/tools/updtut/run.sh`（76 条断言，只需要 node，
+不需要设备）。做法是把真实的 `src/services/updater.js` 复制出来、只把
+`net/log/storage/version` 换成 stub，所以**被测的是仓库里那份代码**，改完
+`updater.js` 重跑即可，不需要同步任何模型。
 
----
+覆盖范围与变异测试记录见 `PenCG/tools/updtut/README.md`。其中两条断言是被
+变异测试逼出来的，值得记住：
 
-## 5. 自动安装待 native 支持（要做的事）
+- **`PenCG.amr` 在资产列表里排第二位时也必须被选中**。真实发布时
+  GitCode/GitHub 会把源码包（`v1.2.3.zip` / `.tar.gz` / `.tar.bz2` / `.tar`）
+  排在 `.amr` 前面，一旦资产挑选退化成 `assets[0]`，用户下到的就是源码压缩包。
+  v1.2.3 首发时就踩过这个坑，重传过一次资产。
+- **`bodyLines` 的连续空行压缩**。不压的话，发布说明里的大段空行会在 266px
+  高的 scroller 上白吃好几行。
 
-如果以后要让「立即更新」真的能一键装完，需要**另一条工作线**在 native 侧加一个接口（本次不改 native 代码，那是并行的另一个人的范围）：
-
-1. 在 `PenCG/native/csrc/cgnative/cgnative.c` 里照抄 `PenBili/native/csrc/jsapi_player2.c` 的 `js_install_amr`（约 495-555 行）：
-   - `access(path, R_OK)` 先检查文件存在且可读；
-   - `argv = {"/bin/miniapp_cli", "install", path, NULL}`；
-   - `pb2_run(argv, out, 512, 60000)` —— **PenCG 没有这个 helper**，需要自己拼。
-   - 判定成功：`strstr(out, "\"ret\": 0") || strstr(out, "\"ret\":0")`；
-   - 返回 `{ok, rc, out, code:'INSTALL_FAILED', error:'miniapp_cli install failed'}`。
-
-   > `pb2_run` 在 PenCG 侧的对应物是 `img_ffmpeg_to_png`（`cgnative.c` 约 2844-2895 行）那套
-   > `fork` + `execl` + 轮询的模式，**不能直接照抄 popen/waitpid 语义**，原因写在那个函数的
-   > 注释里：设备上的宿主进程把 `SIGCHLD` 设成了 `SIG_IGN`（`/proc/<pid>/status` 的 SigIgn
-   > 含 `0x10000`），子进程被内核自动回收，`waitpid()` 立刻返回 `-1/ECHILD`。
-   > 所以必须「把子进程 stdout/stderr 重定向到一个临时文件，然后轮询文件内容/大小」，
-   > 退出码只能当参考（`ECHILD` 不算失败）。`miniapp_cli` 的返回值就是 stdout 上的
-   > JSON（实测它是个走 `/var/run/miniapp-dbg.socket` 的 HTTP 客户端），所以把 stdout
-   > 落到临时文件里再 `strstr("\"ret\": 0")` 是可行路径。
-2. 把 `installAmr` 加进 `CG_EXPORTS` 宏（约 3004-3029 行那个列表）。
-3. JS 侧只需改 `updater.js` 的 `installAmr()`：把函数体末尾那段注释掉的实现打开（已经写好，用 `loadNative()` 拿模块再调 `mod.installAmr(filePath)`），并把 `updateCapability().canInstall` 改成真实探测。
-4. 重新构建 `libjsapi_cgnative.so` 并随 amr 一起发布。**已核实**：`native/build-net.ps1` 的产物会被打进 amr，`8002026110200003.1_2_3.amr` 里就有 `libs/libjsapi_cgnative.so` 与 `libs/libjsapi_cgmedia.so`（共 27 个 entry）。所以 so 是**随包走**的，不存在「系统级 so 与包不匹配」的问题；唯一的限制是**第一次**带 installAmr 的版本仍然要手动装一次（因为老版本的 so 里没有这个接口，它自己没法把自己装上去）。从下一个版本开始才能真正一键更新。
-
-**在 native 补上之前，用户看到的行为是**：点「下载安装包」→ 下载完成 → 弹窗停在「安装包已下载到设备」并显示路径（`/userdisk/miniapp/downloaded/<md5>`）→ 用户需要自己用 adb 或其它方式装。
-
----
-
-## 6. 如何发布
+运行时行为（`fetchLatestRelease` / `downloadFileToDisk` / `installAmr`）需要
+真机验证，不属于这个单测的范围。
 
 ### 6.1 版本号
 
