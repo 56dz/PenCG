@@ -544,7 +544,14 @@ static void au_on_slice_done(cm_sess *s, int marker) {
         flush_frame(s);
         return;
     }
-    if (marker && g_rtp.au_slices <= 1 && !g_rtp.au_multislice) {
+    if (!marker) {
+        /* 没有 marker：只是某个切片（或某个分片）结束了，帧还没结束。
+         * 什么都不做 —— 继续攒，等下一个 first_mb==0 或超时兜底。
+         * 这里绝不能计入 au_joined，否则这个数字就不再表示「我们真的
+         * 把被 marker 切碎的帧接回来过几次」。 */
+        return;
+    }
+    if (g_rtp.au_slices <= 1 && !g_rtp.au_multislice) {
         /* 单 slice 帧的常态：marker 就是帧边界，零额外延迟。 */
         flush_frame(s);
         return;
