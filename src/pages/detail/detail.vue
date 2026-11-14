@@ -541,7 +541,7 @@ export default {
 
 .hero-icon {
   width: 10vw;
-  height: 36.0903vh;
+  height: 10vw;
   border-radius: 1.0417vw;
   background-color: @card-background-color;
 }

@@ -260,6 +260,35 @@ undefined\0auto\0none\0wx\0rpx\0px\0vw\0vh\0url(\0absolute\0row-reverse\0...
 - `PenCG/src/services/media.js` 的平面参数与 `rect` 默认值。
 - `PenCG/src/pages/index/index.vue:732` `applyBannerWidth()` 里 `Math.floor((864 - 6 * c) / c)` 算出的 `bannerW`（同属 `<image :width>` 传值）。
 
+### 7.4 ★ 方形元素不能用 vw 配 vh ★
+
+`vw` 是画布宽的百分比、`vh` 是画布高的百分比。960x266 下两者换算系数分别是
+9.6 与 2.66，所以**同一个数字在两条轴上不是同一个像素数**。
+
+反例（2026-11-15 修掉）：图标容器原本写
+
+```less
+.brand-logo { width: 2.7084vw; height: 9.7745vh; }   /* 都是 26px @960x266 */
+```
+
+在 960x266 上都是 26px，看着没问题；换到 936x280 就变成
+`25.4 x 27.4` —— **圆形/方形图标被拉成椭圆**。全仓一共 21 处这种写法
+（`.gcard-icon`、`.lcard-icon`、`.hero-icon`、`.mb-avatar`、`.p2-logo`、
+`.ih-spon-thumb`、`.logo-img`、`.pimg`、`.brand-mark`、`.brand-logo`、
+`.bar-logo`、`.mb-hicon`、`.mb-spon-img`、`.mb-guest-avatar` 等），已全部把
+`height` 改成与 `width` 相同的 `vw` 值，保证恒为正方形。
+
+**规则**：需要保持宽高比（正方形、圆、固定比例矩形）的元素，两条轴用**同一种**
+单位。优先用 `vw`（宽度是本设计的主要约束）。
+
+例外（保持现状，故意的）：
+- `.p2-left` / `.p2-right` / `.p2-kb` / `.brand-col` —— 这些是**整列**，
+  `width` 用 vw（横向分栏）+ `height: 100vh`（撑满高度）是正确的语义。
+- `.mb-hcard` —— 84x76 本来就不是正方形，两轴独立伸缩可以接受。
+
+改完真机回归：首页整图与改动前 diff 只落在 logo 一处（138 像素，
+logo 盒 27x26 → 27x27，即从「被压扁 1px」变回正圆角方形），其余逐像素相同。
+
 ---
 
 ## 8. 迁移结果

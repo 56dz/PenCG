@@ -961,14 +961,14 @@ export default {
 
 .gcard-icon-wrap {
   width: 5.8334vw;
-  height: 21.0527vh;
+  height: 5.8334vw;
   border-radius: 0.8334vw;
   overflow: hidden;
 }
 
 .gcard-icon {
   width: 5.8334vw;
-  height: 21.0527vh;
+  height: 5.8334vw;
   border-radius: 0.8334vw;
 }
 
@@ -1018,12 +1018,12 @@ export default {
 
 .lcard-icon-wrap {
   width: 5.8334vw;
-  height: 21.0527vh;
+  height: 5.8334vw;
 }
 
 .lcard-icon {
   width: 5.8334vw;
-  height: 21.0527vh;
+  height: 5.8334vw;
   border-radius: 0.8334vw;
 }
 
@@ -1256,7 +1256,7 @@ export default {
 
 .ih-spon-thumb-wrap {
   width: 3.3334vw;
-  height: 12.0301vh;
+  height: 3.3334vw;
   align-items: center;
   justify-content: center;
   margin-right: 0.8334vw;
@@ -1264,7 +1264,7 @@ export default {
 
 .ih-spon-thumb {
   width: 3.3334vw;
-  height: 12.0301vh;
+  height: 3.3334vw;
   border-radius: 0.4167vw;
   background-color: #FFFFFF;
 }
@@ -1311,7 +1311,7 @@ export default {
 
 .ih-spon-full-img {
   width: 20.8334vw;
-  height: 75.188vh;
+  height: 20.8334vw;
   border-radius: 0.8334vw;
   background-color: #FFFFFF;
 }

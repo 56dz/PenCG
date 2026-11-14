@@ -668,7 +668,7 @@ export default {
 
 .pimg {
   width: 5.4167vw;
-  height: 19.5489vh;
+  height: 5.4167vw;
   margin-bottom: 0.7519vh;
 }
 

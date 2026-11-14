@@ -612,7 +612,7 @@ export default {
 
 .logo-img {
   width: 6.4584vw;
-  height: 23.3083vh;
+  height: 6.4584vw;
   border-radius: 1.4584vw;
   background-color: transparent;
 }

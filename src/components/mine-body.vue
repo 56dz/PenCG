@@ -807,7 +807,7 @@ export default {
 
 .mb-guest-avatar {
   width: 5.8334vw;
-  height: 21.0527vh;
+  height: 5.8334vw;
   border-radius: 2.9167vw;
   background-color: @card-background-color;
   justify-content: center;
@@ -893,7 +893,7 @@ export default {
 
 .mb-avatar {
   width: 5.2084vw;
-  height: 18.797vh;
+  height: 5.2084vw;
   border-radius: 2.6042vw;
   background-color: @accent;
   justify-content: center;
@@ -1066,7 +1066,7 @@ export default {
 
 .mb-hicon-wrap {
   width: 4.5834vw;
-  height: 16.5414vh;
+  height: 4.5834vw;
   border-radius: 0.8334vw;
   background-color: @ctrl-background;
   justify-content: center;
@@ -1075,7 +1075,7 @@ export default {
 
 .mb-hicon {
   width: 4.5834vw;
-  height: 16.5414vh;
+  height: 4.5834vw;
   border-radius: 0.8334vw;
 }
 
@@ -1261,7 +1261,7 @@ export default {
 
 .mb-spon-img {
   width: 18.75vw;
-  height: 67.6692vh;
+  height: 18.75vw;
   border-radius: 0.8334vw;
   background-color: #FFFFFF;
 }

@@ -2592,7 +2592,7 @@ export default {
 
 .p2-logo {
   width: 2.7084vw;
-  height: 9.7745vh;
+  height: 2.7084vw;
   border-radius: 0.625vw;
   background-color: transparent;
 }

@@ -624,12 +624,12 @@ export default {
 
 .lcard-icon-wrap {
   width: 5.8334vw;
-  height: 21.0527vh;
+  height: 5.8334vw;
 }
 
 .lcard-icon {
   width: 5.8334vw;
-  height: 21.0527vh;
+  height: 5.8334vw;
   border-radius: 0.8334vw;
 }
 
