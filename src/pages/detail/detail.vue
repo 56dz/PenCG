@@ -33,8 +33,13 @@
       </div>
 
       <div v-else class="body">
-        <!-- 左列：图标 + 名称 + 标签 + 三个数据卡 + 两个按钮 -->
+        <!-- 左列：图标 + 名称 + 标签 + 三个数据卡 + 两个按钮
+             整列包在 scroller 里：X6 Pro 上这列内容刚好放得下（合计约 79vh < 85.7vh），
+             但换到更窄/更方的屏、或者文案变长（游戏名两行、标签多一个）时就会溢出，
+             而这里离屏幕底部只有几 vh，溢出即被裁掉且没有任何滚动入口。
+             包进 scroller 是纯增量：内容不溢出时滚动条不出现，布局与原来逐像素相同。 -->
         <div class="col-left">
+        <scroller class="col-left-scroll">
           <div class="hero">
             <image class="hero-icon" :src="game.icon" :width="96" :height="96"></image>
             <div class="hero-info">
@@ -71,6 +76,7 @@
           <div v-if="histText" class="hist-line">
             <text class="hist-t">{{ histText }}</text>
           </div>
+        </scroller>
         </div>
 
         <!-- 右列：画质 + 简介 -->
@@ -517,6 +523,15 @@ export default {
 .col-left {
   width: 44.1667vw;
   flex-direction: column;
+}
+
+/* 左列的滚动容器：占满 .col-left 的高度，内容不足时不出现滚动条。 */
+.col-left-scroll {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .hero {

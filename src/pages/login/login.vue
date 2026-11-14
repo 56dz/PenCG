@@ -38,6 +38,10 @@
         <text class="brand-tip">和游玩记录</text>
       </div>
       <div class="form-col">
+        <!-- 表单列包进 scroller：X6 Pro 上纵向合计约 62vh 放得下，但系统提示、
+             错误行、短信剩余秒数文案都可能换行，一旦超出 100vh 底部就会被裁掉
+             且没有滚动入口。内容不溢出时滚动条不出现，布局与原来一致。 -->
+        <scroller class="form-scroll">
         <div class="tabs">
           <div :class="mode === 'pwd' ? 'mtab mtab-on' : 'mtab'" @click="setMode('pwd')">
             <text :class="mode === 'pwd' ? 'mtab-text mtab-text-on' : 'mtab-text'">密码登录</text>
@@ -81,6 +85,7 @@
         </div>
         <div v-if="toast" class="toast"><text class="toast-text">{{ toast }}</text></div>
         <text v-else class="tip">{{ tipText }}</text>
+        </scroller>
       </div>
       </div>
     </div>
@@ -648,6 +653,14 @@ export default {
   font-size: 1.1458vw;
   color: @text-color-dim;
   margin-top: 3.0076vh;
+}
+
+.form-scroll {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .form-col {

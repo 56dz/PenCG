@@ -7,6 +7,10 @@
     </div>
 
     <div class="content">
+      <!-- 整页内容包进 scroller：X6 Pro 上这一屏合计约 94vh 刚好放得下，但底部离
+           屏幕边缘只余 6vh，文案变长（游戏名换行、提示两行）就会把「返回首页」
+           挤到屏幕外且没有滚动入口。包进来后内容不溢出时行为与原来一致。 -->
+      <scroller class="qscroll">
       <div class="qhead">
         <text class="qtitle">正在排队中</text>
         <div :class="badgeCls"><text :class="badgeTcls">{{ badgeText }}</text></div>
@@ -42,6 +46,7 @@
       </div>
 
       <div class="qfoot"><text class="qfoot-text">排队不消耗免费时长 · 入座后免费时长 25 分钟</text></div>
+      </scroller>
     </div>
   </div>
 </template>
@@ -403,6 +408,14 @@ export default {
 
 .bdg {
   margin-left: 1.0417vw;
+}
+
+.qscroll {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0%;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .qhead {

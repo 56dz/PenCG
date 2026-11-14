@@ -9,9 +9,14 @@
     "queue": "pages/queue/queue.js",
     "diag": "pages/diag/diag.js"
   },
+  "props": {
+    "supportUnInstall": true
+  },
   "options": {
     "style": {
-      "lessPaths": ["styles"],
+      "lessPaths": [
+        "styles"
+      ],
       "theme": "theme-dark"
     },
     "alias": {}
