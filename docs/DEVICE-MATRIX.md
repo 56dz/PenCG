@@ -9,7 +9,12 @@
 但这**不等于「支持多机型」**：
 - `$falcon.env` 在 JS 层能否读到值，**尚未真机验证**；
 - X7 Pro **一次都没测过**；
-- 布局侧仍硬编码（`src/styles/base.less` 的 `.page` 960px、`.bar` 76px、`.content` 884px；`src/services/media.js:273`/`:495` 的 960×266），即使探测出 936 也会溢出 24px。
+- 布局侧硬编码**已在 2026-11-15 全部清除**（详见 §7 与 `docs/VW-VH-GUIDE.md`）：
+  `.page`/`.bar`/`.content` 全改 vw/vh，`media.js` 的 960×266 改由
+  `device_profile.js` 的 `stageVideoRect()` 按画布宽度反算，`play.vue` 的三栏
+  改成 `25.3125 + 49.2709 + 25.4167 = 100vw`。**但「936 画布下会不会溢出」
+  仍未在真机验证** —— 本机只有 X6 Pro，`DEV_DESIGN_WIDTH=720` 的模拟因为
+  `setViewPort` 只是等比缩放、截图永远铺满 960 宽而无法暴露溢出。
 
 所以本文的测试清单仍是**必要的保障手段**，只是从「唯一」变成了「与运行时探测互补」。详见 §1.2.1 与 §7。
 
@@ -56,7 +61,7 @@
 | 可信度闸门 | 只有 `width ≥ 600 && height > 0 && width / height ≥ 2.2` 才采信 | 两台的物理面板都是 480×960（宽高比 ≤ 2），一旦 env 报的是面板而非视口，必须整组丢弃；只丢宽会把 480×960 的 960 当成高度用。**实测已起作用**：800×480 宽够 600 但宽高比 1.67 < 2.2，被正确拦下 → `source=fallback` |
 | 兜底 | 任何异常 / 不可信 → 回到 **960** | 与改动前行为完全等价 |
 | 覆盖通道 | 优先级 `FORCE_WIDTH` > `$falcon.env.custom.pencgDesignWidth` > `$falcon.env` > 兜底 960 | 前者要重新打包；后者（`custom`）只需在真机上 `$falcon.env.custom.$set('pencgDesignWidth', 936)` 并重启小程序，就能**在 X6 Pro 上伪造 X7 Pro 的 936 宽度**去观察布局溢出，是伪机型验证最省事的一条路 |
-| 布局弹性 | **未做，且已成为唯一阻塞项** | `src/styles/base.less` 仍硬编码 `.page` 960px / `.bar` 76px / `.content` 884px；`src/services/media.js:273`、`:495` 仍硬编码 960×266；`src/pages/play/play.vue` 三栏 243+473+244=960。**在自动探测通道被证伪后，这里就是 X7 Pro 适配的全部工作量** |
+| 布局弹性 | **已完成（2026-11-15），但未在第二台机型验证** | 全仓真 px 只剩刻意保留的 1px 细线与亚像素微调（清单见 `docs/VW-VH-GUIDE.md` §8.4）；`font-size` px 命中 0；`.page`/`.bar`/`.content` 全 vw/vh；`media.js` 的 960×266 改由 `stageVideoRect()` 反算；native 的 `PANEL_X_OFFSET`/`PANEL_H` 改由 `cm_cfg.panel_x_offset`/`panel_h` 传入（默认仍是 107/960/266）。X6 Pro 上逐像素零回归（capture md5 `ad268b1d...`）。**验证局限**：`setViewPort` 只做等比缩放，`DEV_DESIGN_WIDTH=720` 时截图仍是 960×266 且视觉一致，所以「窄画布下是否溢出」这条只能等 X7 Pro 实机 |
 
 > **真机结论（2026-11-14 00:23，X6 Pro，1.2.0 包含 `device_profile.js`）**
 >
@@ -484,18 +489,19 @@ $ADB pull "$L" ./shots/logs/x6pro-DictPen.log
 | X6 Pro 字号 vw 迁移后复测 | **未做**（167→175 处迁移后未逐页走查） | 本轮改动未触碰任何 `font-size`；`grep -rnE "font-size:[^;]*px" src/` 仍为 **0** |
 | X7 Pro 任意测试 | **未做** | — |
 | X7 Pro 布局弹性（CSS 层） | **已参数化（2026-11-14）** | ✅ `base.less` + 8 个页面 + `play.vue` 全三批共 **619 处**布局 px → vw/vh（另有 16 处刻意跳过：`border-width`、`flex-basis:0`、`≤1px`）；ceil 4 位取整，见 `docs/VW-VH-GUIDE.md` §8.4。`.page{width:100vw;height:100vh}`、`.bar{width:7.9167vw}`、`.content{width:92.0834vw}` 随视口自适应 |
-| X7 Pro 播放页视频区 | **已知限制（设计如此，不是待办）** | `src/services/media.js:273`、`:495` 的 `{w:960,h:266}` 与 `play.vue:153` 的 `VIDEO={x:243,y:0,w:473,h:266}` **保持 px 不变** —— 它们是发给网关 `setRect`／SDP 协商用的**物理像素矩形**，与 KMS 平面坐标、视频编码尺寸绑定，不是 CSS。改成 vw 会让 native 收到 `100vw` 这种无意义字符串直接崩。X7 Pro 的 936 宽要在这里按 `device_profile.js` 的 `KNOWN_MODELS.x7p`（`width:936, height:280, panelXOffset:0, planeId:-1, swScale:1`）**手工填数值**，不是靠 CSS 自适应。**`.page` 的 `100vw/100vh` 只解决画布，不解决 KMS 矩形** |
+| X7 Pro 播放页视频区 | **已参数化（2026-11-15），未在真机验证** | 直播挖孔矩形改由 `device_profile.js` 的 `stageVideoRect()` 按画布宽度反算：`x = round(w*243/960)`、`width = round(w*473/960)`、`height = round(width/(16/9))` 并纵向居中，`play.vue` 的 `var VIDEO = stageVideoRect()`、`media.js` 的兜底 `rect` 也走同一函数。**仍传 px 数值给 native**（不是 CSS 单位），所以不会出现「native 收到 100vw」的问题。960 画布下结果与历史逐像素相同 `<243,0,473,266>`；936 画布下是 `<237,4,461,259>`。native 侧 `cm_cfg` 新增 `panelXOffset`/`panelH`/`panelW`（默认 107/960/266），`apply_rect()` 不再依赖 `#define`。**未验证**：936 画布下 `panelXOffsetFor()` 会算成 (480−280)/2 = 100，而 X7 Pro 是否也是这个死区宽度、是否根本走软件缩放（`KNOWN_MODELS.x7p.swScale=1`，`planeId=-1`）都还没实机确认 |
 | 测试记录归档 | 部分（日志散落在 `.tmp/`） | — |
 
 > 结论（2026-11-14 更新，含 X6 Pro 真机实测）：**多机型自适应的「自动探测」这条路在本固件上实际不通** —— `$falcon.env` 读得到，但报的永远是框架默认值 800×480，不含硬件真值。这是真机得出的确定事实，不是推断。
 >
-> 因此 X7 Pro 的视口只能**手工指定**：改 `device_profile.js` 的 `FORCE_WIDTH = 936` 重新构建，或在真机上 `$falcon.env.custom.$set('pencgDesignWidth', 936)` 免构建覆盖（会持久化，验完清 0）。代码的 960 兜底保证「探测不到 = 行为与改动前完全一致」，X6 Pro 已实测零回归。
+> 因此 X7 Pro 的视口只能**手工指定**：改 `device_profile.js` 的 `FORCE_WIDTH = 936` 重新构建，或在真机上 `$falcon.env.custom.$set('pencgDesignWidth', 936)` 免构建覆盖（会持久化；`app.js` 在 `DEV_DESIGN_WIDTH=0` 时已会自动清 0，见下）。代码的 960 兜底保证「探测不到 = 行为与改动前完全一致」，X6 Pro 已实测零回归。
 >
+> **坑（2026-11-15 真机踩到）**：`$falcon.env.custom` 是**持久化**的。用 `DEV_DESIGN_WIDTH=720` 应过验收包之后，换回量产包（`DEV_DESIGN_WIDTH=0`）并不会清除它，`bootProfile()` 仍读到 720，日志 `[device] width=720 source=custom`，挖孔 rect 变成 `<182,33,355,200>`、`panel-><140,183,200,355>` —— 而物理合成面还是 960 宽，于是整页被放大 1.33 倍、底部被裁。已修：`app.js` 在 `DEV_DESIGN_WIDTH === 0` 时若发现 custom 里存着非 0 值就主动 `$set(...,0)`（先读一次，避免每次启动都白写存储）。参考 commit `4751615`。
 > **PenCG 仍然只能声称「在 X6 Pro 上工作」。** 要满足新规第 4 条，剩余工作按依赖顺序是：
 
 ① ~~把 `base.less`（`.page` 960 / `.bar` 76 / `.content` 884）参数化~~ —— **2026-11-14 已完成**：样式层 578 处布局 px 已全部转 vw/vh（`docs/VW-VH-GUIDE.md` §8.4），**真机回归范围要看清**：目前只有 `base.less` 那 47 处在 X6 Pro 上实测过（几何与基线完全一致，`>30` = 387 属亚像素抗锯齿，判据 `>30 ≤ 400`）；**其余 531 处尚未装机截图比对**，等机位后按 `tools/shoot.sh` + `tools/pxdiff.py` 逐页跑。
-② **`media.js:273`/`:495` 的 960×266 与 `play.vue` 的 KMS 矩形** —— **这不是待办，是已知限制（设计如此）**。它们是发给网关 `setRect`／SDP 协商用的物理像素矩形，与 KMS 平面坐标、视频编码尺寸绑定，不能按 CSS 比例换算；改成 vw/vh 会让 native 收到无意义字符串而崩。**X7 Pro 要在这里手工按机型填数值**（参考 `device_profile.js` 的 `KNOWN_MODELS.x7p`：`width:936, height:280, panelXOffset:0, planeId:-1, swScale:1`）。注意 `.page` 的 `100vw/100vh` **只解决画布，不解决 KMS 矩形** —— 两者是两套坐标系统，不能混为一谈。
-③ 用 `FORCE_WIDTH = 936` 或 `env.custom.pencgDesignWidth = 936` 在 X6 Pro 上跑一遍 936 宽度的布局测试（伪机型验证，§3.2/§3.3）。
+② ~~`media.js:273`/`:495` 的 960×266 与 `play.vue` 的 KMS 矩形~~ —— **2026-11-15 已参数化**：统一走 `device_profile.js` 的 `stageVideoRect()`，按画布宽度反算并保持 16:9，`play.vue` 的 `var VIDEO = stageVideoRect()`、`media.js` 的兜底 `rect` 同源；native 侧 `cm_cfg` 新增 `panelXOffset`/`panelH`/`panelW`（默认 107/960/266），`apply_rect()` 不再用 `#define`。**传给 native 的仍是 px 数值**，不是 CSS 单位，所以「收到 100vw 就崩」的风险不存在。X6 Pro 960 画布下逐像素零回归（`logical=<243,0,473,266> panel-><107,244,266,473>`）。**剩余不确定性**：`panelXOffsetFor()` 在 936 画布下推导出 100（= (480−280)/2），而 X7 Pro 的死区宽度未知；若 X7 Pro 其实走软件缩放（`KNOWN_MODELS.x7p` 的 `planeId:-1, swScale:1`）则这套换算根本不适用，要另写分支。
+③ ~~用 `FORCE_WIDTH = 936` 或 `env.custom.pencgDesignWidth = 936` 在 X6 Pro 上跑一遍 936 宽度的布局测试~~ —— **2026-11-15 实测此路不通**：`setViewPort` 只是让容器把 W 个设计像素等比缩放到 960 物理宽，所以任何 W 的截图都是 960×266 且视觉一致（`DEV_DESIGN_WIDTH=720` 的截图 md5 与基线相同 `ad268b1d...`）。**伪机型验证必须改用「布局本身在缩放前是否溢出画布宽」这一判据**，例如临时把 `.page` 设成 `width:100vw` 之外再叠加 `overflow:hidden` 并导出中间态，或等真机。
 ④ 有 X7 Pro 实机后跑本清单并回填 §1.2（视口到底 936×280 还是 960×280、planeId、panelXOffset）。
 ⑤ 字号迁移后的 X6 Pro 逐页复测。
 
