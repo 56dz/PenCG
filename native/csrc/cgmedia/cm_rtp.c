@@ -489,6 +489,16 @@ static int note_slice(int parsed, int first_mb) {
         g_rtp.au_slice_unknown = 1;
         return 0;
     }
+    /* ★ 中途加入：本 AU 还一个 slice 都没有，而这个 slice 的
+     * first_mb 就不是 0 —— 说明我们从一帧的中间开始收（刚建连、
+     * 刚从坏 AU 里 reset、或前面的 slice 全丢了）。这种 AU 前半部
+     * 宏块永远补不回来（NACK 对这些 seq 也没登记），必须当坏 AU
+     * 丢，否则就是把一帧只含后半部宏块的 IDR 推给解码器 —— 正是
+     * VPU 复位（irq_status 0x001123）的触发条件。 */
+    if (first_mb != 0 && g_rtp.au_slices == 0) {
+        g_rtp.au_broken = 1;
+        g_rtp.au_broken_fixable = 0;
+    }
     if (first_mb == 0 && g_rtp.au_slices > 0) {
         /* 新图像开始。注意 au_slices 在这次调用里还没自增，所以 >0
          * 就说明「当前 AU 里已经攒了上一帧的 slice」。 */
