@@ -451,6 +451,7 @@ void cm_rtp_flush_held(cm_sess *s);
 void cm_rtp_au_join_tick(cm_sess *s);
 /* 本局「接回了多少个切片组」的计数，进 stat JSON 给前端看。 */
 uint64_t cm_rtp_au_joined(void);
+uint64_t cm_rtp_au_hold_released(void);
 
 /* cm_cmd.c */
 int  cm_cmd_apply(cm_sess *s, const char *op, const char *json);

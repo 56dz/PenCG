@@ -267,6 +267,22 @@ typedef struct {
      * 表示「接回了几次」又偷偷把一帧算成 4 次。 */
     int      au_joined_counted;
     uint64_t au_marker_until;
+    /* ★ 硬上限：AU 开始被压住的那一刻的时间戳，**不随续期改变**。
+     *
+     * 为什么需要它：au_marker_until 会被「又来了一个切片」不断往后推，本意是
+     * 「别在帧中间超时放行」。但如果一条流永远不再出现 first_mb==0（网关把帧头
+     * 一直切掉、或者我们从一帧中间加入后再没等到完整帧），续期就会无限进行，
+     * au_marker_until 永远到不了期，AU 被永久压住 → 一帧都不推 → 画面永久静止。
+     * 这比「放行一帧残帧」更糟：残帧最多让解码器复位一次，而永久压住是不可恢复的。
+     *
+     * hostut 的策略 F（永不发 fm=0）就是这个场景，修复前 pushes=0、RESULT: FAIL。
+     * 有了 au_hold_start_ms，压住最多持续 AU_HOLD_HARD_MAX_MS，之后必定放行。 */
+    uint64_t au_hold_start_ms;
+    /* 「压住后真的被放行」的次数（=超时兜底生效次数）。用来区分
+     * 「兜底没生效、AU 被永久压住」和「兜底生效了、但这一帧因为缺帧头
+     * 被 flush_frame 按设计丢弃」。两者最终都可能是 0 帧上屏，但前者是
+     * 死锁（不可恢复），后者是安全行为（等新 IDR 就好）。 */
+    uint64_t au_hold_released;
     uint64_t au_joined;
     /* au_slice_unknown：本 AU 里有 slice 的 first_mb 解析失败（数据太短、
      * 编码器用了我们没有预期的结构）。一旦置位就整帧退回「只看 marker」
@@ -474,6 +490,11 @@ static void rtp_reset_au(void);
 static void flush_frame(cm_sess *s);
 
 #define AU_HOLD_MAX_MS 150
+/* 压住一个多 slice AU 的硬上限。软上限（AU_HOLD_MAX_MS）靠「码流静默」触发，
+ * 只要还有包在来就永远到不了；硬上限从「开始压住」那一刻算起，不再续期，
+ * 保证任何情况下 AU 都不会被无限压住。取 400ms ≈ 12 帧@30fps —— 明显长于
+ * 任何正常的帧间隔或多 slice 装配时间，只有在码流真的不再给帧头时才会走到。 */
+#define AU_HOLD_HARD_MAX_MS 400
 
 /* 把一个 slice 登记进当前 AU，并判断它是不是「新图像的第一个 slice」。
  *
@@ -595,6 +616,7 @@ static void au_on_slice_done(cm_sess *s, int marker) {
         g_rtp.au_marker_pending = 1;
         g_rtp.au_joined_counted = 0;
         g_rtp.au_marker_until = now + AU_HOLD_MAX_MS;
+        g_rtp.au_hold_start_ms = now;
         /* ★ 这里**不**计 au_joined：压住只是「有机会接回」，能不能接回要看
          * 后面有没有同一帧的后续 slice（计数在 note_slice 里做）。在这里
          * 计数会让单 slice 流每帧都 +1，这个数字就退化成帧数了。 */
@@ -605,6 +627,8 @@ static void au_on_slice_done(cm_sess *s, int marker) {
 }
 
 /* 供 stat JSON 读「这一局接回了多少个切片组」（cm_media.c 的 emit_stat）。 */
+uint64_t cm_rtp_au_hold_released(void) { return g_rtp.au_hold_released; }
+
 uint64_t cm_rtp_au_joined(void) {
     return g_rtp.au_joined;
 }
@@ -613,10 +637,15 @@ uint64_t cm_rtp_au_joined(void) {
 void cm_rtp_au_join_tick(cm_sess *s) {
     if (!s) return;
     pthread_mutex_lock(&g_rtp_mu);
-    if (g_rtp.au_marker_pending && g_rtp.au_marker_until &&
-        (int64_t)(cm_now_ms() - g_rtp.au_marker_until) >= 0) {
+    uint64_t now = cm_now_ms();
+    int soft = (g_rtp.au_marker_until && (int64_t)(now - g_rtp.au_marker_until) >= 0);
+    int hard = (g_rtp.au_hold_start_ms &&
+                (int64_t)(now - g_rtp.au_hold_start_ms) >= (int64_t)AU_HOLD_HARD_MAX_MS);
+    if (g_rtp.au_marker_pending && (soft || hard)) {
         g_rtp.au_marker_pending = 0;
         g_rtp.au_marker_until = 0;
+        g_rtp.au_hold_start_ms = 0;
+        g_rtp.au_hold_released++;
         CM_LOGD("#%d multislice AU held %.0fms without a new picture, flushing "
                 "(%d slices, last fm=%d)", s->id, (double)AU_HOLD_MAX_MS,
                 g_rtp.au_slices, g_rtp.au_last_first_mb);
@@ -676,6 +705,7 @@ static void rtp_reset_au(void) {
     g_rtp.au_marker_pending = 0;
     g_rtp.au_joined_counted = 0;
     g_rtp.au_marker_until = 0;
+    g_rtp.au_hold_start_ms = 0;
     g_rtp.au_slice_unknown = 0;
 }
 

@@ -28,6 +28,7 @@ void cm_emit(cm_sess *s, const char *fmt, ...);
 typedef struct { int len; int key; unsigned char *data; } push_t;
 static push_t *g_pushes = NULL;
 static int g_npush = 0, g_cappush = 0;
+static uint64_t g_release_mid_feed = 0;
 
 int cm_box_push(cm_box *b, const unsigned char *data, int len, uint64_t pts, int key) {
     (void)b; (void)pts;
@@ -146,6 +147,10 @@ static int marker_for(int policy, int i) {
     const unsigned char *nal = g_nals[i].p;
     int n = g_nals[i].n;
     if (policy == 3) return 0;                      /* D */
+    if (policy == 5) return 0;                      /* E: 同上，但喂法不同 */
+    if (policy == 6) {                              /* F: F=故意不发 fm=0 */
+        return (i + 1 >= g_nnals) || ((g_nals[i + 1].p[0] & 0x1F) == 7);
+    }
     if (!is_slice(nal, n)) return 0;
     if (policy == 2) return 1;                      /* C */
     if (policy == 1) return is_frame_last_slice(i); /* B */
@@ -166,6 +171,22 @@ static void feed(cm_sess *s, int policy, int mtu, int drop_every) {
         int nn = g_nals[i].n;
         int t = nal[0] & 0x1F;
         int marker = marker_for(policy, i);
+        /* 策略 F：凡 fm==0 的切片都不喂（模拟「网关永远把帧头切掉」）。
+         * 这是最坏情况，用来验证续期逻辑不会让 AU 永久卡住。 */
+        if (policy == 6 && is_slice(nal, nn) && nalu_first_mb(nal, nn) == 0) continue;
+        /* ★ F 轮边喂边 tick：真实码流从不停止，「静默 150ms」软兜底永远
+         * 到不了期（每个新切片都会续期）。所以必须在这里周期性 sleep+tick，
+         * 才能检验「压住 400ms 硬上限」是不是真的在持续收包时生效。
+         * 若只有软兜底，下面这个计数会保持 0。 */
+        if (policy == 6 && (i % 40) == 39) {
+            uint64_t before = cm_rtp_au_hold_released();
+            cm_sleep_ms(60);
+            cm_rtp_au_join_tick(s);
+            /* 只在这里累加：这是「码流正在持续到达、并没有静默」时发生的
+             * 放行。若硬上限失效，这里必定恒为 0（软兜底要求静默 150ms，
+             * 而每 40 个 NAL 才睡 60ms，永远不会到期）。 */
+            g_release_mid_feed += (cm_rtp_au_hold_released() - before);
+        }
 
         if (nn + 12 <= mtu) {
             pkt[0] = 0x80;
@@ -200,11 +221,31 @@ static void feed(cm_sess *s, int policy, int mtu, int drop_every) {
     }
     /* 收尾：真等 200ms 让 AU_HOLD_MAX_MS(150ms) 到期，再跑 tick 兜底放行。
      * （cm_now_ms 是真实时钟，只跑循环不等待的话 timeout 永远不会到期。） */
+    /* 收尾：真等够时间再跑 tick 兜底放行。
+     * cm_now_ms 是真实时钟，整份流喂进来只花几毫秒，不 sleep 的话
+     * 「静默 150ms」和「压住 400ms 硬上限」两条时限都永远到不了期。
+     * 分两段睡（200 + 300 = 500ms > AU_HOLD_HARD_MAX_MS 400ms），
+     * 每段后面都 tick 一次，这样软兜底和硬上限两条路径都能被覆盖到。 */
     cm_rtp_flush_held(s);
-    cm_rtp_au_join_tick(s);
     cm_sleep_ms(200);
-    cm_rtp_flush_held(s);
     cm_rtp_au_join_tick(s);
+    cm_rtp_flush_held(s);
+    cm_sleep_ms(300);
+    cm_rtp_au_join_tick(s);
+    cm_rtp_flush_held(s);
+}
+
+/* 这条流里是否存在 first_mb != 0 的切片？
+ * 只有多 slice 流才有，单 slice 流每帧就一个切片且 fm 恒为 0。 */
+static int has_nonzero_fm_stream(void) {
+    int i;
+    for (i = 0; i < g_nnals; i++) {
+        const unsigned char *nal = g_nals[i].p;
+        int nn = g_nals[i].n;
+        if (!is_slice(nal, nn)) continue;
+        if (nalu_first_mb(nal, nn) != 0) return 1;
+    }
+    return 0;
 }
 
 static void clear_pushes(void) {
@@ -300,7 +341,7 @@ int main(int argc, char **argv) {
      * 所以只检查「首切片不变量」：任何推出去的 AU 都不能从帧中间开始。
      * 这正是真机 reqeseq=3945 那种场景 —— 丢片被 NACK 补不回来时，
      * 绝不能把半帧推给 mppvideodec。 */
-    int npol = 5;
+    int npol = 7;
     int drop_every = argc > 3 ? atoi(argv[3]) : 7;
 
     printf("=== 真实 cm_rtp.c 单测: %s (mtu=%d) ===\n", file, mtu);
@@ -308,16 +349,47 @@ int main(int argc, char **argv) {
     printf("  NAL=%d\n", g_nnals);
 
     for (pol = 0; pol < npol; pol++) {
-        static const char *names[5] = {"A(参数集前)", "B(每帧末)", "C(每片)",
-                                       "D(无marker)", "A+丢包"};
+        static const char *names[7] = {"A(参数集前)", "B(每帧末)", "C(每片)",
+                                       "D(无marker)", "A+丢包", "A(紧跟重放)",
+                                       "F(永不发fm=0)"};
         int drop = (pol == 4) ? drop_every : 0;
         cm_sess *s = mk_sess();
         clear_pushes();
-        feed(s, pol == 4 ? 0 : pol, mtu, drop);
+        g_release_mid_feed = 0;
+        {
+            int rep = (pol == 6) ? 3 : 1, r;
+            for (r = 0; r < rep; r++)
+                feed(s, (pol == 4) ? 0 : (pol == 5 ? 0 : pol), mtu, drop);
+        }
         /* 丢包轮的帧数必然对不上，只检查首切片不变量；其余轮全查。 */
         if (pol == 4) printf("  (每 %d 包丢 1)\n", drop_every);
-        report(names[pol], (pol == 4) ? 0 : want_au,
-               (pol == 4) ? 0 : want_idr_min, (pol == 4) ? 0 : want_idr_max);
+        report(names[pol], (pol >= 4) ? 0 : want_au,
+               (pol >= 4) ? 0 : want_idr_min, (pol >= 4) ? 0 : want_idr_max);
+        if (pol == 6 && !has_nonzero_fm_stream()) {
+            /* 单 slice 流（原神/明日方舟那种）每帧只有一个切片且 first_mb 就是 0，
+             * 策略 F 把所有 fm=0 的切片都丢掉，等于整条流一个切片都不喂 ——
+             * 没有任何 AU 被压住，这里的计数当然是 0。这不是死锁，是场景不成立，
+             * 跳过这条断言。 */
+            printf("  F 轮不适用（该流每帧首切片都是 fm=0，无可丢的非零切片）\n");
+        } else if (pol == 6) {
+            /* F 轮（永不发 fm=0）是「续期会不会永久压住 AU」的最坏情况测试。
+             * 两种结果都可以接受，但必须能区分：
+             *   兜底放行了（au_hold_released > 0）=> 没有死锁。帧可能因为缺
+             *     帧头被 flush_frame 按设计丢弃，那是安全行为（等新 IDR）。
+             *   一次都没放行（== 0）=> 真的死锁，AU 被无限续期压住。 */
+            uint64_t rel = cm_rtp_au_hold_released();
+            printf("  F 轮兜底放行次数=%llu（其中喂包途中 %llu 次）",
+                   (unsigned long long)rel, (unsigned long long)g_release_mid_feed);
+            if (g_release_mid_feed == 0) {
+                printf(" => 喂包途中一次都没放行，硬上限没起作用（死锁）\n");
+                g_fail = 1;
+            } else if (rel == 0) {
+                printf(" => 续期逻辑会永久压住 AU（死锁）\n");
+                g_fail = 1;
+            } else {
+                printf(" => 未死锁；%s\n", g_npush ? "且有帧上屏" : "帧按设计被丢弃");
+            }
+        }
         cm_rtp_reset(s);
         pthread_mutex_destroy(&s->gst_mu);
         free(s);
