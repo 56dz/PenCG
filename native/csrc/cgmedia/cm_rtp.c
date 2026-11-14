@@ -258,6 +258,8 @@ typedef struct {
      *   拼回一帧的次数 —— 这是修复是否真的在起作用的直接证据。 */
     int      au_slices;
     int      au_last_first_mb;
+    /* 本 AU 见过的最小 first_mb；flush 时用它判“头部宏块是否缺失”。 */
+    int      au_min_first_mb;
     int      au_multislice;
     int      au_marker_pending;
     /* au_joined_counted：本次「压住」是否已经计过一次 au_joined。一帧里可能
@@ -489,16 +491,6 @@ static int note_slice(int parsed, int first_mb) {
         g_rtp.au_slice_unknown = 1;
         return 0;
     }
-    /* ★ 中途加入：本 AU 还一个 slice 都没有，而这个 slice 的
-     * first_mb 就不是 0 —— 说明我们从一帧的中间开始收（刚建连、
-     * 刚从坏 AU 里 reset、或前面的 slice 全丢了）。这种 AU 前半部
-     * 宏块永远补不回来（NACK 对这些 seq 也没登记），必须当坏 AU
-     * 丢，否则就是把一帧只含后半部宏块的 IDR 推给解码器 —— 正是
-     * VPU 复位（irq_status 0x001123）的触发条件。 */
-    if (first_mb != 0 && g_rtp.au_slices == 0) {
-        g_rtp.au_broken = 1;
-        g_rtp.au_broken_fixable = 0;
-    }
     if (first_mb == 0 && g_rtp.au_slices > 0) {
         /* 新图像开始。注意 au_slices 在这次调用里还没自增，所以 >0
          * 就说明「当前 AU 里已经攒了上一帧的 slice」。 */
@@ -517,6 +509,12 @@ static int note_slice(int parsed, int first_mb) {
         g_rtp.au_joined++;
     }
     g_rtp.au_last_first_mb = first_mb;
+    /* 记录本 AU 见过的最小 first_mb。完整图像必定从 0 开始覆盖宏块，
+     * 所以“没见过 0”就是头部缺失。用最小值而不是“先到的那个”，是为了对
+     * 乱序不敏感：先到的可能是 fm=1840，但 fm=0 一到就把最小值拉回 0。 */
+    if (g_rtp.au_slices == 0 || first_mb < g_rtp.au_min_first_mb) {
+        g_rtp.au_min_first_mb = first_mb;
+    }
     g_rtp.au_slices++;
     if (g_rtp.au_slices > 1) g_rtp.au_multislice = 1;
     /* 又来了一个 slice，说明这一帧还没结束：把兜底时间往后推，避免在帧
@@ -668,6 +666,7 @@ static void rtp_reset_au(void) {
     /* 切片区状态随 AU 一起清（au_joined 是全局累计计数，刻意不清）。 */
     g_rtp.au_slices = 0;
     g_rtp.au_last_first_mb = 0;
+    g_rtp.au_min_first_mb = 0;
     g_rtp.au_multislice = 0;
     g_rtp.au_marker_pending = 0;
     g_rtp.au_joined_counted = 0;
@@ -1082,6 +1081,25 @@ static void flush_frame(cm_sess *s) {
     if (!g_rtp.have_data || g_rtp.frame.len == 0) { rtp_reset_au(); return; }
 
     key = g_rtp.au_has_idr;
+
+    /* --- 0.0) 头部宏块缺失：从一帧的中间开始收，整帧必须丢 ---
+     *
+     * note_slice() 记录了本 AU 见过的最小 first_mb。一帧完整图像必定从
+     * first_mb==0 开始覆盖宏块；见不到 0 就说明我们从中间才开始收
+     * （刚建连 / 刚从坏 AU reset / 前面几个 slice 全丢了）。前半部宏块
+     * 永远补不回来 —— 那些 seq 根本没登记进 gap 表，NACK 也要不回来，
+     * 所以必须 au_broken_fixable=0（不能被 步骤 0 的“已修复”分支清掉）。
+     *
+     * 这正是 VPU 复位（irq_status 0x001123）的触发条件：720p 一帧
+     * 2400~3600 个宏块，只给后半部，mpp 越界。
+     *
+     * 用“最小值”而不是“先到的那个 slice”，是为了对乱序不敏感。 */
+    if (g_rtp.au_slices > 0 && g_rtp.au_min_first_mb != 0 && !g_rtp.au_broken) {
+        g_rtp.au_broken = 1;
+        g_rtp.au_broken_fixable = 0;
+        CM_LOGW("#%d AU starts at fm=%d (no slice 0), head macroblocks missing -> drop",
+                s->id, g_rtp.au_min_first_mb);
+    }
 
     /* --- 0) NACK 补洞成功：把「可修复」的损坏标记清掉 ---
      * au_broken_fixable 只在「缺口/丢 start」时置位；结构性损坏（STAP-A
