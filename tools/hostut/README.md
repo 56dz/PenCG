@@ -30,7 +30,7 @@ bash PenCG/tools/hostut/run.sh <某个 .h264 文件> [mtu]
 | 策略 | 含义 |
 |---|---|
 | A | 每组参数集之前打 marker（**真机网关的实际形态**） |
-| B | 每帧最后一个 slice |
+| B | 每帧最后一个 slice（marker 位置本来就正确，作对照） |
 | C | 每个 slice 都打（最恶劣） |
 | D | marker 全丢（只能靠 150ms 超时兜底） |
 
@@ -49,6 +49,22 @@ bash PenCG/tools/hostut/run.sh <某个 .h264 文件> [mtu]
 git show 8c75587:native/csrc/cgmedia/cm_rtp.c > /tmp/cm_rtp_old.c
 ```
 
-修复前实测：策略 A 切出 **70 个 AU、首 IDR 5409 字节** —— 与真机日志
-`AU push key=1 bytes=5409 segs=9` 逐字节吻合；策略 B/C 更糟（1968 个 AU、
-首 IDR 只有 1138 字节）。这正是 `irq_status 0x001123` / VPU 复位的成因。
+修复前实测（`au_fail.h264`）：
+
+| 策略 | 修复前 | 修复后 |
+|---|---|---|
+| A 参数集前 | 70 AU / 首 IDR **5409B** | 246 AU / 15358B |
+| B 每帧末 | 307 AU / 首 IDR **5409B** | 246 AU / 15358B |
+| C 每片 marker | 1968 AU / 首 IDR 1138B | 246 AU / 15358B |
+| D 无 marker | 68 AU / 5409B | 245 AU / 15358B |
+
+策略 A 的 5409 字节与真机日志 `AU push key=1 bytes=5409 segs=9` 逐字节吻合。
+
+值得注意：**策略 B 的 marker 位置本来就是对的，旧代码依然切出 5409B** ——
+因为旧代码在 FU-A 的 end 上也会 flush（mtu=1200 时那 3385 字节的大 slice 必须
+走 FU-A），所以这是**两个独立的缺陷**：marker 位置不可靠、FU-A end 也被当帧
+边界。两处都已修（`f60b57d` 修后者）。
+
+健康局 `au_1812.h264`：修复后四种策略都是 300 AU / 首 IDR 44440B；旧代码在
+A/D 策略下会误切成 197/196 帧（把相邻两帧黏在一起），即新判据对单 slice 流
+反而更准。

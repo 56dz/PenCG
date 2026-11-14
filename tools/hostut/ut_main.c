@@ -85,91 +85,111 @@ static void load_nals(const char *path) {
  */
 static int is_slice(const unsigned char *p, int n) {
     if (n < 1) return 0;
-    int t = p[0] & 0x1F;
-    return t == 1 || t == 5;
+    {
+        int t = p[0] & 0x1F;
+        return t == 1 || t == 5;
+    }
+}
+
+/* 独立实现一份 first_mb 解析（cm_rtp.c 里的 slice_parse 是 static，取不到）。
+ * 先剥 1 字节 NAL 头、去掉防竞争字节 00 00 03，再解第一个 ue(v)。 */
+static int nalu_first_mb(const unsigned char *p, int n) {
+    unsigned char rbsp[64];
+    int i, k = 0, zeros = 0, bits, pos = 0, lz, mb;
+    if (n < 2) return -1;
+    if (!is_slice(p, n)) return -1;
+    for (i = 1; i < n && k < (int)sizeof(rbsp); i++) {
+        if (zeros >= 2 && p[i] == 3) { zeros = 0; continue; }
+        rbsp[k++] = p[i];
+        if (p[i] == 0) zeros++; else zeros = 0;
+    }
+    bits = k * 8;
+    while (pos < bits && !((rbsp[pos >> 3] >> (7 - (pos & 7))) & 1)) pos++;
+    if (pos >= bits) return -1;
+    lz = pos;
+    pos++;
+    if (lz == 0) return 0;
+    if (pos + lz > bits) return -1;
+    mb = 0;
+    for (i = 0; i < lz; i++) {
+        mb = (mb << 1) | ((rbsp[pos >> 3] >> (7 - (pos & 7))) & 1);
+        pos++;
+    }
+    return mb + (1 << lz) - 1;
+}
+
+/* i 之后第一个 slice NAL 的下标（跳过参数集 / SEI），没有则 -1 */
+static int next_slice_idx(int i) {
+    int k;
+    for (k = i + 1; k < g_nnals; k++) {
+        if (is_slice(g_nals[k].p, g_nals[k].n)) return k;
+    }
+    return -1;
+}
+
+/* 这个 slice 是不是本帧的最后一个（后面已经没有切片，或下一个切片是新帧开头） */
+static int is_frame_last_slice(int i) {
+    int k = next_slice_idx(i);
+    if (k < 0) return 1;
+    return nalu_first_mb(g_nals[k].p, g_nals[k].n) == 0;
+}
+
+/* marker 策略（决定「哪一个包的 marker 位置为 1」）：
+ *   A = 每组参数集之后紧跟的那个 slice（真机网关的形态：每 2~3 个 slice
+ *       插一组 SPS/PPS，并在插入点之前的最后一个 slice 上打 marker）
+ *   B = 每帧最后一个 slice
+ *   C = 每个 slice 都打（最恶劣）
+ *   D = 全丢 marker（只能靠 150ms 兜底）
+ * 修复前只有 A/C/D 能暴露 bug；B 本来就是「正确」的 marker 位置，用作对照。
+ */
+static int marker_for(int policy, int i) {
+    const unsigned char *nal = g_nals[i].p;
+    int n = g_nals[i].n;
+    if (policy == 3) return 0;                      /* D */
+    if (!is_slice(nal, n)) return 0;
+    if (policy == 2) return 1;                      /* C */
+    if (policy == 1) return is_frame_last_slice(i); /* B */
+    /* A：下一个 NAL 是参数集（说明网关在此插了 SPS/PPS），或已到文件末尾 */
+    {
+        int k = i + 1;
+        if (k >= g_nnals) return 1;
+        return (g_nals[k].p[0] & 0x1F) == 7;
+    }
 }
 
 static void feed(cm_sess *s, int policy, int mtu) {
-    int i, j;
+    int i;
     uint16_t seq = 1000;
     unsigned char pkt[2048];
     for (i = 0; i < g_nnals; i++) {
         const unsigned char *nal = g_nals[i].p;
         int nn = g_nals[i].n;
-        int t = nal[0] & 0x1F, marker = 0;
+        int t = nal[0] & 0x1F;
+        int marker = marker_for(policy, i);
 
-        if (policy == 0) {          /* A: 参数集之前打 marker */
-            if (t == 7 && i > 0) marker = 0;   /* marker 打在「前一个」包上，见下 */
-        }
-        if (policy == 1) {          /* B: 帧末（下一个 first_mb==0 之前） */
-            /* 由下面统一处理：只有当下一个 NAL 是 first_mb==0 的 slice 时才打 */
-        }
-
-        /* 打包：小 NAL 单包，大 NAL 走 FU-A */
         if (nn + 12 <= mtu) {
-            pkt[0] = 0x80; pkt[1] = 96;      /* V=2, PT=96 */
+            pkt[0] = 0x80;
+            pkt[1] = (unsigned char)(96 | (marker ? 0x80 : 0));
             pkt[2] = (unsigned char)(seq >> 8); pkt[3] = (unsigned char)seq;
             memset(pkt + 4, 0, 8);
             memcpy(pkt + 12, nal, (size_t)nn);
-            /* 决定 marker */
-            if (policy == 2) marker = is_slice(nal, nn);           /* C */
-            else if (policy == 3) marker = 0;                       /* D */
-            else if (policy == 1) {                                 /* B */
-                marker = 0;
-                if (is_slice(nal, nn)) {
-                    /* 下一个 NAL 若是新帧的 slice0 或参数集/结尾 -> 本片是帧末 */
-                    int k = i + 1;
-                    if (k >= g_nnals) marker = 1;
-                    else {
-                        int nt = g_nals[k].p[0] & 0x1F;
-                        (void)nt;
-                        marker = 1; /* 简化：单 slice/多 slice 都按「每个 NAL 结束即帧末」 */
-                    }
-                }
-            } else if (policy == 0) {                               /* A */
-                marker = 0;
-                if (t == 1 || t == 5) {
-                    int k = i + 1;
-                    if (k >= g_nnals) marker = 1;
-                    else if ((g_nals[k].p[0] & 0x1F) == 7) marker = 1;  /* 下一组参数集之前 */
-                    else if ((g_nals[k].p[0] & 0x1F) == 1 || (g_nals[k].p[0] & 0x1F) == 5) {
-                        /* 只有当下一个 slice 是新帧开头（fm==0）才打 marker —— 但这里
-                         * 不解 first_mb，交给「参数集前」这一条兜住。 */
-                        marker = 0;
-                    }
-                }
-            }
-            pkt[1] = (unsigned char)(96 | (marker ? 0x80 : 0));
             cm_rtp_on_packet(s, pkt, nn + 12, "127.0.0.1", 5000);
             seq++;
         } else {
-            /* FU-A 分片 */
-            int off = 1;   /* nal[0] 是 NAL 头 */
-            int first = 1;
+            /* FU-A 分片：marker 只打在最后一个分片上 */
+            int off = 1, first = 1;
             while (off < nn) {
                 int chunk = nn - off;
                 int last;
                 if (chunk > mtu - 14) chunk = mtu - 14;
                 last = (off + chunk >= nn);
-                pkt[0] = 0x80; 
+                pkt[0] = 0x80;
+                pkt[1] = (unsigned char)(96 | ((last && marker) ? 0x80 : 0));
                 pkt[2] = (unsigned char)(seq >> 8); pkt[3] = (unsigned char)seq;
                 memset(pkt + 4, 0, 8);
                 pkt[12] = (unsigned char)((nal[0] & 0xE0) | 28);
                 pkt[13] = (unsigned char)((first ? 0x80 : 0) | (last ? 0x40 : 0) | t);
                 memcpy(pkt + 14, nal + off, (size_t)chunk);
-                {
-                    int mk = 0;
-                    if (last) {
-                        if (policy == 2) mk = 1;
-                        else if (policy == 3) mk = 0;
-                        else if (policy == 1) mk = 1;
-                        else if (policy == 0) {
-                            int k = i + 1;
-                            mk = (k >= g_nnals) || ((g_nals[k].p[0] & 0x1F) == 7);
-                        }
-                    }
-                    pkt[1] = (unsigned char)(96 | (mk ? 0x80 : 0));
-                }
                 cm_rtp_on_packet(s, pkt, chunk + 14, "127.0.0.1", 5000);
                 seq++;
                 off += chunk; first = 0;
@@ -183,7 +203,6 @@ static void feed(cm_sess *s, int policy, int mtu) {
     cm_sleep_ms(200);
     cm_rtp_flush_held(s);
     cm_rtp_au_join_tick(s);
-    (void)j;
 }
 
 static void clear_pushes(void) {
