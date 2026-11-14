@@ -150,13 +150,11 @@
  * 干脆丢了），一直压着就等于永久不显画面。窗口取得很短，所以即使超时
  * 触发，代价也只是「和修复前一样」，不会更差。
  *
- * AU_JOIN_MS 取 12ms：同一帧的 slice 是背靠背发的，实测间隔 <2ms；12ms
- * 远大于它，又远小于一帧间隔（20~30fps 是 33~50ms），所以正常路径下
- * 下一帧第一个 slice 会先到、走的是「精确边界」而不是超时。
- * IDR_JOIN_MS 取 40ms：IDR 被切碎的代价是整局全黑，值得多等一点；
- * 而 IDR 出现频率低（终末地一局一个），这点延迟用户感知不到。 */
-#define AU_JOIN_MS  12
-#define IDR_JOIN_MS 40
+ * 正常路径的实际延迟是「一帧」：第 N 帧的最后一个 slice 带着 marker 被压住，
+ * 第 N+1 帧的第一个 slice 一到就放行。20~30fps 下就是 33~50ms，云游戏
+ * 能接受；换来的是绝不再把残缺 IDR 送进解码器（那会让 VPU 复位、整局全黑）。
+ * 超时窗口取 150ms（见 AU_HOLD_MAX_MS）：远大于一帧间隔，所以只有码流
+ * 真的静默时才会走到，不会误切。 */
 
 /* 当前 AU 的分片索引容量：一个 720p IDR 约 30~60 个包，1080p 大 IDR 可到
  * 数百。512 足够，超了就停止记录（退化成「不能填洞」，不影响正确性）。 */
@@ -1538,6 +1536,31 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
             } else if (g_rtp.au_broken) {
                 /* 之前的孤儿分片留下的破坏标记；新 AU 从干净的 start 起 */
                 rtp_reset_au();
+            }
+            /* ★ 多 slice 修复：FU-A 承载的同样可能是「多 slice 帧里的一个
+             * slice」，而且大切片（终末地有 3385B 的）必然走 FU-A。这一路
+             * 以前完全没登记过 slice，于是 au_slices 恒为 0、多 slice 帧
+             * 永远判不出来，新判据在这里等于失效。
+             *
+             * 切片头在整个 NAL 的最前面，start 包的正文就是它的开头，所以
+             * 用「nh + 前几十字节」拼一个临时 NAL 就能解出 first_mb ——
+             * 不需要等整片拼完。拼不出来（包太短）就让 slice_parse 返回
+             * 失败，note_slice 会把整帧退回旧行为。 */
+            {
+                unsigned char hdr[2 + 32];
+                int hn = 0, k;
+                hdr[hn++] = nh;
+                for (k = 2; k < n && hn < (int)sizeof(hdr); k++) hdr[hn++] = p[k];
+                {
+                    int fm = 0, st = 0;
+                    int ok = (slice_parse(hdr, hn, &fm, &st) == 0);
+                    if (note_slice(ok, fm)) {
+                        /* 新图像的第一个 slice：先把上一帧交出去，再让这个
+                         * 切片从干净状态开始。 */
+                        au_flush_boundary(s);
+                        note_slice(ok, fm);
+                    }
+                }
             }
             g_rtp.au_start_ms = cm_now_ms();
             g_rtp.seg_ordered = 1;
