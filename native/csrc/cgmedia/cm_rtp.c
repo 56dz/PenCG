@@ -469,6 +469,8 @@ static int slice_parse(const unsigned char *nal, int n, int *out_first_mb,
 static void rtp_reset_au(void);
 static void flush_frame(cm_sess *s);
 
+#define AU_HOLD_MAX_MS 150
+
 /* 把一个 slice 登记进当前 AU，并判断它是不是「新图像的第一个 slice」。
  *
  * 返回 1 = 这是一个新图像的开头，调用方必须先把正在攒的 AU 放出去
@@ -493,6 +495,12 @@ static int note_slice(int parsed, int first_mb) {
     g_rtp.au_last_first_mb = first_mb;
     g_rtp.au_slices++;
     if (g_rtp.au_slices > 1) g_rtp.au_multislice = 1;
+    /* 又来了一个 slice，说明这一帧还没结束：把兜底时间往后推，避免在帧
+     * 中间超时放行（那会把残缺 AU 送给解码器）。只有真正静默满
+     * AU_HOLD_MAX_MS 才会走到超时分支。 */
+    if (g_rtp.au_marker_pending) {
+        g_rtp.au_marker_until = cm_now_ms() + AU_HOLD_MAX_MS;
+    }
     return 0;
 }
 
@@ -513,23 +521,33 @@ static void au_flush_boundary(cm_sess *s) {
     }
 }
 
-/* marker 到了 —— 但 marker 未必等于「一帧结束」（见 AU_JOIN_MS 的注释）。
+/* 一个 slice 传输完了 —— 判断现在能不能把 AU 交出去。
  *
- * 单 slice 帧（原神/明日方舟等）marker 就是帧边界，直接放行，零额外延迟。
- * 多 slice 帧（终末地）marker 可能只结束了一个切片组，先压住，等下一个
- * first_mb==0 的 slice 到来（那时 note_slice 会返回 1，由 au_flush_boundary
- * 放出去），或者等超时兜底。
+ * marker 未必等于「一帧结束」（见 AU_JOIN_MS 的注释），FU-A 的 end 也一样：
+ * 一个大切片被拆成多个 RTP 包，end 只说明**这个切片**拼完了，不说明整帧
+ * 拼完了。旧代码在 FU-A end 上无条件 flush_frame，于是多 slice 帧每送完
+ * 一个切片就吐出一个残缺 AU —— 比 marker 那条路径还早出错。
+ *
+ * 所以两处都收敛到这里，按「这个 AU 目前长什么样」决定：
+ *   1. 解析失败        → 退回旧行为（只看 marker），保证不劣化；
+ *   2. 单 slice + 有 marker → marker 就是帧边界，立即放行（原神等零延迟）；
+ *   3. 其余情况        → 压住，等下一个 first_mb==0 的 slice 到来时由
+ *                        au_flush_boundary 放出去，或超时兜底。
  *
  * 超时取 150ms 而不是几十毫秒：正常多 slice 帧靠「下一帧的第一个 slice」
  * 就能放行，超时只在「码流真的停了」时才用得上；而如果超时太短，一旦某个
  * slice 稍微晚到就会把**残缺的 IDR** 放给解码器 —— 那正是 VPU 复位的原因。
  * 宁可画面晚 150ms，也不能再送残缺关键帧。 */
-#define AU_HOLD_MAX_MS 150
 
-static void au_on_marker(cm_sess *s) {
+static void au_on_slice_done(cm_sess *s, int marker) {
     uint64_t now = cm_now_ms();
-    if (g_rtp.au_slice_unknown || g_rtp.au_slices <= 1 || !g_rtp.au_multislice) {
-        /* 单 slice 帧，或解析失败：marker 就是帧边界（与修复前完全一致）。 */
+    if (g_rtp.au_slice_unknown) {
+        /* 有 slice 解析不出来：这个 AU 的边界无法判断，整帧退回旧行为。 */
+        flush_frame(s);
+        return;
+    }
+    if (marker && g_rtp.au_slices <= 1 && !g_rtp.au_multislice) {
+        /* 单 slice 帧的常态：marker 就是帧边界，零额外延迟。 */
         flush_frame(s);
         return;
     }
@@ -540,8 +558,7 @@ static void au_on_marker(cm_sess *s) {
          * 这个数涨没涨，就知道修复到底在不在干活。 */
         g_rtp.au_joined++;
     } else {
-        /* 同一个 AU 里又来一个 marker（切片组之间的边界）：续期即可，
-         * 不要重复计数。 */
+        /* 同一个 AU 里又来一个组边界：续期即可，不要重复计数。 */
         g_rtp.au_marker_until = now + AU_HOLD_MAX_MS;
     }
 }
@@ -1472,7 +1489,7 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
          * 刷新 last_kf_ms，cm_kf_tick 就以为「关键帧还新鲜」而不补 PLI，
          * 丢掉的 IDR 永远等不回来 —— 这正是「马赛克残留会一直持续」而不是
          * 「闪一帧就过」的原因。现在关键帧只由 au_has_idr（NAL type 5）决定。 */
-        if (marker) au_on_marker(s);
+        if (marker) au_on_slice_done(s, 1);
         return;
     }
 
@@ -1574,8 +1591,11 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
         if (end) {
             g_rtp.in_fu = 0;
             /* ★ 多 slice 修复：FU-A 承载的也可能是多 slice 帧里的一个 slice，
-             * marker 同样不必等于帧边界。交给 au_on_marker 统一判。 */
-            if (marker) au_on_marker(s); else flush_frame(s);
+             * marker 同样不必等于帧边界。交给 au_on_slice_done 统一判。
+             * ★ 注意不能用 `else flush_frame(s)`：FU-A 的 end 只说明「一个切片
+             * 拼完了」，多个大切片组成的帧如果在每个 end 都 flush，就会吐出
+             * 一串残缺 AU —— 和 marker 那条路径一样的病。 */
+            au_on_slice_done(s, marker);
         }
         return;
     }
@@ -1627,8 +1647,8 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
         gap_upgrade_since(g_rtp.au_start_ms);
     }
     g_rtp.have_data = 1;
-    /* marker 未必等于帧边界（网关按切片组打 marker），交给 au_on_marker 判。 */
-    if (marker) au_on_marker(s);
+    /* marker 未必等于帧边界（网关按切片组打 marker），交给 au_on_slice_done 判。 */
+    if (marker) au_on_slice_done(s, 1);
 }
 
 /* ---------------- 对外入口 ---------------- */
