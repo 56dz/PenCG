@@ -807,12 +807,20 @@ static void cache_param_set(const unsigned char *nal, int n) {
     if (t == 7) {
         cm_buf_reset(&g_rtp.sps);
         g_rtp.sps_ok = (annexb_put(&g_rtp.sps, nal, n) == 0);
-        g_rtp.au_has_sps = 1;
     } else if (t == 8) {
         cm_buf_reset(&g_rtp.pps);
         g_rtp.pps_ok = (annexb_put(&g_rtp.pps, nal, n) == 0);
-        g_rtp.au_has_pps = 1;
     }
+    /* ★ 这里**只缓存，不置 au_has_sps/au_has_pps**。
+     * 那两个标志的语义是「当前 AU 的字节流里已经带了参数集」，而
+     * flush_frame 正是靠它决定要不要补插缓存。早先在这里无条件置位，
+     * 造成两个后果：
+     *   1. 网关在帧中间插入的重复参数集（终末地每 2~3 个 slice 就插一组）
+     *      会把标志置上，帧首那组真参数集一旦因为丢包没到，补插也永不
+     *      触发 —— IDR 就这么裸着推给解码器了；
+     *   2. 我们后来为了不让解码器在解一帧中途重配而丢弃中途参数集，
+     *      丢弃后标志仍然是 1，于是这一帧一个参数集都不带。
+     * 现在由真正把参数集写进 frame 的那几处负责置位。 */
 }
 
 /* 丢包/乱序后立刻补一次 PLI。
@@ -1471,9 +1479,21 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
             }
             if (t == 5) g_rtp.au_has_idr = 1;
             {
+                /* 与单 NAL 分支同一套规则：当前 AU 已经在攒 slice 了，说明
+                 * 这一组参数集是网关插在帧中间的重复品 —— 只登记进缓存，
+                 * 不要拼进帧（否则解码器会在解一帧的途中看到参数集，行为
+                 * 未定义）。帧首那一组（au_slices == 0）照常保留。 */
+                int skip = ((t == 7 || t == 8) && g_rtp.au_slices > 0 &&
+                            g_rtp.frame.len > 0);
                 uint32_t off = (uint32_t)g_rtp.frame.len;
-                if (annexb_put(&g_rtp.frame, p + o, sz) == 0)
+                if (skip) {
+                    CM_LOGD("#%d drop mid-AU parameter set in STAP-A (type %d, %d bytes)",
+                            s->id, t, sz);
+                } else if (annexb_put(&g_rtp.frame, p + o, sz) == 0) {
                     au_seg_add(seq, off, 4u + (uint32_t)sz);
+                    if (t == 7) g_rtp.au_has_sps = 1;
+                    else if (t == 8) g_rtp.au_has_pps = 1;
+                }
             }
             g_rtp.have_data = 1;
             o += sz;
@@ -1663,6 +1683,9 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
                     s->id, nal_type, n);
         } else if (annexb_put(&g_rtp.frame, p, n) == 0) {
             au_seg_add(seq, off, 4u + (uint32_t)n);
+            /* 真的写进 frame 了，才算「本帧自带」 */
+            if (nal_type == 7) g_rtp.au_has_sps = 1;
+            else if (nal_type == 8) g_rtp.au_has_pps = 1;
         }
     }
     if (nal_type == 5 || nal_type == 7 || nal_type == 8) {
