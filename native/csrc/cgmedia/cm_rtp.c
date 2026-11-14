@@ -1510,17 +1510,11 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
             }
             if (t == 5) g_rtp.au_has_idr = 1;
             {
-                /* 与单 NAL 分支同一套规则：当前 AU 已经在攒 slice 了，说明
-                 * 这一组参数集是网关插在帧中间的重复品 —— 只登记进缓存，
-                 * 不要拼进帧（否则解码器会在解一帧的途中看到参数集，行为
-                 * 未定义）。帧首那一组（au_slices == 0）照常保留。 */
-                int skip = ((t == 7 || t == 8) && g_rtp.au_slices > 0 &&
-                            g_rtp.frame.len > 0);
+                /* 与单 NAL 分支同一套规则：参数集一律入帧（同时 cache），
+                 * au_has_sps/pps 只在真的写进去时置位。为什么不丢弃帧中重复
+                 * 参数集，见单 NAL 分支那段注释。 */
                 uint32_t off = (uint32_t)g_rtp.frame.len;
-                if (skip) {
-                    CM_LOGD("#%d drop mid-AU parameter set in STAP-A (type %d, %d bytes)",
-                            s->id, t, sz);
-                } else if (annexb_put(&g_rtp.frame, p + o, sz) == 0) {
+                if (annexb_put(&g_rtp.frame, p + o, sz) == 0) {
                     au_seg_add(seq, off, 4u + (uint32_t)sz);
                     if (t == 7) g_rtp.au_has_sps = 1;
                     else if (t == 8) g_rtp.au_has_pps = 1;
@@ -1702,19 +1696,22 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
     /* 单 NAL（含 SPS=7 / PPS=8 / 普通切片 1、5） */
     {
         uint32_t off = (uint32_t)g_rtp.frame.len;
-        /* ★ 多 slice 修复附带：AU 中途重复出现的参数集不再拼进 frame。
-         * 终末地每 2~3 个 slice 就重发一组 SPS/PPS，把它们原样塞进 AU 中间
-         * 会让解码器在解一帧的中途重新初始化（正是 VPU 复位的一个诱因）。
-         * 参数集本身已经 cache_param_set 过，帧首需要时 flush_frame 会补插。
-         * au_slices==0 时（帧首那组）照常写入。 */
-        int skip = ((nal_type == 7 || nal_type == 8) && g_rtp.au_slices > 0 &&
-                    g_rtp.frame.len > 0);
-        if (skip) {
-            CM_LOGD("#%d drop mid-AU parameter set (type %d, %d bytes)",
-                    s->id, nal_type, n);
-        } else if (annexb_put(&g_rtp.frame, p, n) == 0) {
+        /* ★ 曾经在这里「丢弃 AU 中途重复出现的参数集」，已撤回 —— 理由：
+         *
+         * 1. 网关确实会在一个 AU 中间每 2~3 个 slice 重发一组 SPS/PPS
+         *    （文件开头「切片区」注释里的 nal7/nal10/nal13）。但整份
+         *    au_fail.h264（含这些重复参数集）用 ffmpeg 解码是**零错误**的，
+         *    说明它们对解码器完全合法 —— VPU 复位的原因是 AU 被切碎，
+         *    不是参数集重复。为了一个不存在的问题去改写码流是纯风险。
+         * 2. 真要丢弃就必须判断「这组参数集是帧中重复还是新帧开头」，
+         *    而这两者在字节层面无法区分：单 slice 流里 marker 之后紧跟的
+         *    就是下一帧的 SPS，此时 au_slices 还是上一帧的计数，一旦误判
+         *    就会把新 IDR 自己的 SPS/PPS 丢掉 —— 那才是真的把画面解坏。
+         *
+         * 所以保持原样：参数集照常入帧（同时进缓存），au_has_sps/pps 只在
+         * 「确实写进了 frame」时才置位，这样 flush_frame 的补插判据依然准确。 */
+        if (annexb_put(&g_rtp.frame, p, n) == 0) {
             au_seg_add(seq, off, 4u + (uint32_t)n);
-            /* 真的写进 frame 了，才算「本帧自带」 */
             if (nal_type == 7) g_rtp.au_has_sps = 1;
             else if (nal_type == 8) g_rtp.au_has_pps = 1;
         }
