@@ -120,6 +120,21 @@ extern void gst_event_unref(GstEvent *event);
 extern int gst_pad_push_event(GstPad *pad, GstEvent *event);
 extern GstPad *gst_element_get_static_pad(GstElement *element, const char *name);
 
+/* ---- pad probe（只用来数「真正流到 sink 的帧」）----
+ * 设备上没有开发头文件，这里按 GStreamer 1.x 的 ABI 手写声明：
+ *   GstPadProbeReturn 是 enum（int），GstPadProbeType 是 guint，
+ *   GST_PAD_PROBE_TYPE_BUFFER = 1<<4，GST_PAD_PROBE_OK 在枚举里是 1。
+ * 设备符号表已确认 `gst_pad_add_probe` 存在（libgstreamer 1.22.0），
+ * 返回的 id 我们不用，所以不声明 remove_probe。 */
+typedef struct _GstPadProbeInfo GstPadProbeInfo;
+typedef int GstPadProbeReturn;
+typedef unsigned int GstPadProbeType;
+#define GST_PAD_PROBE_TYPE_BUFFER (1u << 4)
+#define GST_PAD_PROBE_OK 1
+extern unsigned long gst_pad_add_probe(GstPad *pad, GstPadProbeType mask,
+                                       GstPadProbeReturn (*cb)(GstPad *, GstPadProbeInfo *, void *),
+                                       void *user_data, void (*destroy)(void *));
+
 extern void gst_app_src_set_caps(GstAppSrc *appsrc, GstCaps *caps);
 extern GstFlowReturn gst_app_src_push_buffer(GstAppSrc *appsrc, GstBuffer *buffer);
 extern void gst_app_src_set_max_bytes(GstAppSrc *appsrc, unsigned long long max);
@@ -167,6 +182,19 @@ struct cm_box {
     int rect_x, rect_y, rect_w, rect_h;
     uint64_t pushed;
     uint64_t pushed_bytes;
+    /* ★ 真·上屏帧计数：kmssink 的 sink pad 上挂 BUFFER 探针数出来的。
+     *
+     * pushed 只说明「我们把 AU 交给了 appsrc」，完全不代表解码器出帧 ——
+     * 终末地（mrfzzmd）真机实测过：AU push 每秒 15~20 帧、AULD 每帧指纹都
+     * 不同、appsrc push failed 为 0，但 kmssink 一条新 buffer 都没收到，
+     * 用户看到全黑或冻结。原因是 appsrc 是 leaky（见 cm_box_create 末尾的
+     * set_max_bytes/set_leaky_type），队列塞满时它默默丢掉旧 AU，于是
+     * pushed 照样在涨，把「下游已经停摆」这件事完全掩盖掉。
+     *
+     * 所以「画面到底有没有在动」必须以这个计数为准，看门狗在 cm_media.c。
+     * 跨线程读写（探针跑在 kmssink 的流任务里），用 volatile 即可 ——
+     * 64 位对齐的单调计数器，读者只做「与上次是否相等」的比较，不需要原子性。 */
+    volatile uint64_t shown;
     int failed;
     char *caps_str;
 
@@ -1118,6 +1146,18 @@ static void apply_rect(cm_box *b) {
             b->rect_x, b->rect_y, b->rect_w, b->rect_h, buf);
 }
 
+/* kmssink sink pad 的 BUFFER 探针：只做一件事 —— 计数。
+ * 探针是在 kmssink 的流任务（也就是 GStreamer 的 sink 线程）里回调的，
+ * 与媒体主循环不同线程，但只写一个 volatile 计数器，不需要加锁。 */
+static GstPadProbeReturn cb_sink_buffer(GstPad *pad, GstPadProbeInfo *info,
+                                        void *ud) {
+    cm_box *b = (cm_box *)ud;
+    (void)pad;
+    (void)info;
+    if (b) b->shown++;
+    return GST_PAD_PROBE_OK;
+}
+
 cm_box *cm_box_create(cm_sess *s, int is_video) {
     cm_box *b;
     if (gst_ensure() != 0) return NULL;
@@ -1174,7 +1214,20 @@ cm_box *cm_box_create(cm_sess *s, int is_video) {
             if (caps && b->src) gst_app_src_set_caps(b->src, caps);
             if (caps) gst_caps_unref(caps);
         }
-        if (b->sink) apply_rect(b);
+        if (b->sink) {
+            /* ★ 挂一个 BUFFER 探针，数「kmssink 真的吃进去多少帧」。
+             * 这是判「画面有没有在动」的唯一可信信号（见 struct cm_box 里
+             * shown 字段的注释）。探针返回值恒 OK，绝不改动 buffer。 */
+            GstPad *sp = gst_element_get_static_pad(b->sink, "sink");
+            if (sp) {
+                gst_pad_add_probe(sp, GST_PAD_PROBE_TYPE_BUFFER,
+                                  cb_sink_buffer, b, NULL);
+                gst_object_unref(sp);
+            } else {
+                CM_LOGW("video: sink pad not found, sink watchdog unavailable");
+            }
+            apply_rect(b);
+        }
     } else {
         /* 开机默认 Playback Path=OFF（功放通路未接），开播前拨到 SPK。
          * ★ audio_route_ensure 会先快照，且**绝不再动 card1 音量**
@@ -1552,4 +1605,7 @@ const char *cm_box_desc(cm_box *b) {
 }
 
 uint64_t cm_box_pushed(cm_box *b) { return b ? b->pushed : 0; }
+/* 真正送到 kmssink 的帧数（探针计数）。与 cm_box_pushed 的区别见 struct
+ * cm_box 里 shown 字段的注释 —— 判断画面上没上屏只能看这个。 */
+uint64_t cm_box_shown(cm_box *b) { return b ? b->shown : 0; }
 uint64_t cm_box_pushed_bytes(cm_box *b) { return b ? b->pushed_bytes : 0; }

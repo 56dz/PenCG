@@ -63,6 +63,34 @@
 #define WATCHDOG_WARN_MS 60000
 #define WATCHDOG_CHECK_MS 500
 
+/* ---- 视频上屏看门狗（终末地 mrfzzmd 全黑 / 冻结的正面修复）----
+ *
+ * 现象（真机 2026-11-14，同一个包、连续三次会话）：
+ *   A 局：`AU push` 每秒 15~20 帧、`AULD` 每帧指纹都不同、`appsrc push
+ *         failed` 为 0，但 `plane[76]` 三分钟里 `crtc=(null) fb=0`，
+ *         kmsgrab 报 `Plane 76 does not have an attached framebuffer.`
+ *         —— 视频区全黑，用户听到的却是正常游戏音。
+ *   B 局：80 秒后平面才绑上，随后 70 秒里平面 md5 完全不变（画面冻结）。
+ *   C 局：同样码流、同样构建，`displaying fb` 每秒 20 次，290 秒全程正常。
+ *
+ * 内核日志（A 局那 105 秒内）：
+ *   mpp_rkvdec2 ff340100.rkvdec: session 32 task 1996xx
+ *       irq_status 0x001123 timeout 0 abort 0 force_dequeue 1
+ *   mpp_rkvdec2 ff340100.rkvdec: resetting... / reset done      （共 21 次）
+ * 硬件解码器报错被复位，参考帧全部失效；而终末地一局只给 1 个 IDR
+ * （后续 IDR 都被丢包打碎，网关又从不响应我们的 NACK，见
+ *  cm_rtp.c 的 NACK 段注释），所以解码器再也回不到可解码状态。
+ *
+ * 判据必须是「pushed 在涨、shown 不动」：
+ *   - 只看 pushed 不够 —— appsrc 是 leaky 的，队列满时它会默默丢旧 AU，
+ *     pushed 照样上涨，把下游停摆掩盖掉；
+ *   - 只看 shown 不动也不够 —— 起播初期本来就没帧。
+ * 两个条件同时成立 VWD_STALL_MS，判定「下游停止消费」，重建解码器管线。
+ * 重建后 cm_rtp_after_rebuild() 会关闸并补 PLI，等一个新 IDR 回来。 */
+#define VWD_CHECK_MS        500    /* 检查粒度 */
+#define VWD_STALL_MS        2500   /* pushed 涨而 shown 不动的容忍时长 */
+#define VWD_MAX_REBUILDS    3      /* 单局最多重建几次，超过就交给 JS 侧换会话 */
+
 static void emit_stat(cm_sess *s) {
     uint64_t now = cm_now_ms();
     uint64_t dt = now - s->stat_base_ms;
@@ -131,7 +159,12 @@ static void emit_stat(cm_sess *s) {
             "\"auDrop\":%llu,\"gateDrop\":%llu,\"kfReq\":%llu,\"dup\":%llu,"
             "\"reorder\":%llu,\"spsInject\":%llu,\"rtcpIn\":%llu,\"rrSent\":%llu,"
             "\"nackSent\":%llu,\"nackReq\":%llu,\"nackRecovered\":%llu,"
-            "\"relax\":%llu,\"staleRtx\":%llu,\"pDrop\":%llu}",
+            "\"relax\":%llu,\"staleRtx\":%llu,\"pDrop\":%llu,"
+            /* shown = 真正送进 kmssink 的帧数（sink pad 探针）。
+             * 判「画面在不在动」只能看它：pushed/fps 只代表交给了 appsrc，
+             * 而 appsrc 是 leaky 的，队列满就默默丢帧，会把下游停摆掩盖掉。
+             * 真机指纹：shown 长时间不涨而 fps 一直有 → 全黑/冻结。 */
+            "\"shown\":%llu}",
             (unsigned long long)s->stats.rtp_rx,
             /* ★ 这里原来是硬编码 0，JS 侧看到的 lost 永远是 0，等于把
              * 「到底丢没丢包」这个最关键的信息扔掉了。现在用 RTP 层
@@ -178,7 +211,8 @@ static void emit_stat(cm_sess *s) {
              * 和 gateDrop 的区别：gateDrop 是「没关键帧所以不放行」，
              * pDrop 是「有关键帧、只丢拼不全的某一帧」—— 后者增长但 fps
              * 仍稳定，就是弱网下我们要的健康态。 */
-            (unsigned long long)s->stats.vid_p_drop);
+            (unsigned long long)s->stats.vid_p_drop,
+            (unsigned long long)cm_box_shown(s->vbox));
     /* 每 10 秒打一次 PT 直方图（只打非零项），用来确认音频到底有没有到。 */
     {
         static uint64_t last_hist_ms = 0;
@@ -194,6 +228,17 @@ static void emit_stat(cm_sess *s) {
             }
             CM_LOGI("#%d pt histogram %s(want v=%d a=%d)", s->id, buf,
                     s->cfg.video_pt, s->cfg.audio_pt);
+            /* ★ 画面健康度三件套，10 秒一行（终末地全黑/冻结的判据）：
+             *   pushed + shown 都在涨 → 正常
+             *   pushed 涨、shown 不动 → 下游停止消费（看门狗会重建解码器）
+             *   两个都不动        → 根本没数据到，问题在上游/网关
+             * 把这行留在生产日志里，是因为「有声音没画面」这类报障只能靠它定位，
+             * 而 cm_emit 的 stat JSON 不进日志文件。 */
+            CM_LOGI("#%d video sink pushed=%llu shown=%llu%s", s->id,
+                    (unsigned long long)cm_box_pushed(s->vbox),
+                    (unsigned long long)cm_box_shown(s->vbox),
+                    (s->vbox && cm_box_pushed(s->vbox) > cm_box_shown(s->vbox) + 60)
+                        ? " (DOWNSTREAM STALLED)" : "");
         }
     }
     s->stat_base_ms = now;
@@ -215,6 +260,18 @@ void cm_media_loop(cm_sess *s) {
     uint64_t silent = 0;
     int s_wd_sid = -1;
     int s_wd_warned = 0;
+    /* 上屏看门狗状态（同一个会话内用，换局时重置） */
+    uint64_t s_vwd_last_check = 0;
+    uint64_t s_vwd_last_pushed = 0;
+    uint64_t s_vwd_last_shown = 0;
+    uint64_t s_vwd_frozen_since = 0;
+    int s_vwd_sid = -1;
+    int s_vwd_rebuilds = 0;
+    /* 两次重建之间的等待：2.5s -> 5s -> 10s（上限 8s 用的是「不翻倍」原则，
+       见 VWD_STALL_MS 注释）。终末地的 IDR 只在一局开头给一个，重建后新解码器
+       必须等一个新的 IDR 才能出画，而 PLI 常常石沉大海；硬间隔 2.5s 连打三次
+       会在 8 秒内把额度烧光、然后直接把 -7 抛给 JS，等于没给网关任何反应时间。 */
+    uint64_t s_vwd_wait_ms = VWD_STALL_MS;
 
     /* 进循环前先建好 GStreamer 盒子（kmssink 一上来就要占住 KMS 平面） */
     pthread_mutex_lock(&s->gst_mu);
@@ -349,6 +406,83 @@ void cm_media_loop(cm_sess *s) {
          * consent 是反方向义务。不加这个，约 4m18s 后网关单方面停推。
          * 内部按 next_ice_consent_ms 限速，每轮调无代价。 */
         cm_ice_consent_tick(s);
+        /* ---- 视频上屏看门狗：pushed 在涨、shown 不动 ⇒ 下游停止消费 ----
+         * 判据与取舍见文件头 VWD_* 的注释。这里只做「发现 + 重建」，
+         * 不做「等待」——终末地的 IDR 稀疏，等是等不来的。 */
+        if (s->vbox && now - s_vwd_last_check >= VWD_CHECK_MS) {
+            uint64_t vpushed = cm_box_pushed(s->vbox);
+            uint64_t vshown = cm_box_shown(s->vbox);
+            s_vwd_last_check = now;
+            if (s_vwd_sid != s->id) {
+                s_vwd_sid = s->id;
+                s_vwd_last_pushed = vpushed;
+                s_vwd_last_shown = vshown;
+                s_vwd_frozen_since = 0;
+                s_vwd_rebuilds = 0;
+                s_vwd_wait_ms = VWD_STALL_MS;
+            }
+            if (vshown != s_vwd_last_shown) {
+                /* 有帧真的上屏了：一切正常，清掉冻结计时 */
+                s_vwd_last_shown = vshown;
+                s_vwd_last_pushed = vpushed;
+                s_vwd_frozen_since = 0;
+                s_vwd_wait_ms = VWD_STALL_MS;
+            } else if (vpushed != s_vwd_last_pushed) {
+                /* 我们还在往 appsrc 喂，但 kmssink 一帧都没新吃到 */
+                if (!s_vwd_frozen_since) {
+                    s_vwd_frozen_since = now;
+                } else if (now - s_vwd_frozen_since >= s_vwd_wait_ms) {
+                    if (s_vwd_rebuilds >= VWD_MAX_REBUILDS) {
+                        /* 重建到上限还是不出画：交回 JS 换会话（L2/L3）。
+                         * 这里只报错，不自己拆会话 —— 拆会话会让音频也断，
+                         * 而用户此刻听得到的音频是「还能不能继续玩」的判据。 */
+                        CM_LOGE("#%d video still frozen after %d rebuilds "
+                                "(shown=%llu pushed=%llu), asking JS to reconnect",
+                                s->id, s_vwd_rebuilds,
+                                (unsigned long long)vshown,
+                                (unsigned long long)vpushed);
+                        cm_emit(s, "{\"t\":\"error\",\"msg\":\"video sink frozen\","
+                                   "\"code\":-7}");
+                        s_vwd_frozen_since = now; /* 别再连发 */
+                    } else {
+                        s_vwd_rebuilds++;
+                        CM_LOGW("#%d video sink frozen %llu ms "
+                                "(shown=%llu pushed=%llu) -> rebuild decoder #%d",
+                                s->id, (unsigned long long)(now - s_vwd_frozen_since),
+                                (unsigned long long)vshown,
+                                (unsigned long long)vpushed, s_vwd_rebuilds);
+                        /* 必须先 destroy 再 create：kmssink 要重新抢
+                         * plane 76，旧 box 不释放平面新 box 就绑不上。
+                         * 两者之间有一小段没有视频平面的时间窗，
+                         * 表现为视频区短暂显示页面底色，可接受。 */
+                        pthread_mutex_lock(&s->gst_mu);
+                        if (s->vbox) {
+                            cm_box_destroy(s->vbox);
+                            s->vbox = NULL;
+                        }
+                        s->vbox = cm_box_create(s, 1);
+                        pthread_mutex_unlock(&s->gst_mu);
+                        if (s->vbox) {
+                            /* 关闸 + 清半截 AU + 补 PLI，等新 IDR */
+                            cm_rtp_after_rebuild(s);
+                            s_vwd_last_pushed = cm_box_pushed(s->vbox);
+                            s_vwd_last_shown = cm_box_shown(s->vbox);
+                        } else {
+                            CM_LOGE("#%d video pipeline rebuild failed", s->id);
+                            cm_emit(s, "{\"t\":\"error\","
+                                       "\"msg\":\"video rebuild failed\",\"code\":-4}");
+                        }
+                        s_vwd_frozen_since = 0;
+                        /* 退避：下一次给网关更长的反应时间（PLI 有机会落地） */
+                        if (s_vwd_wait_ms < 8000) s_vwd_wait_ms *= 2;
+                    }
+                }
+            } else {
+                /* pushed 也没动：没有新数据，不是下游的问题，不计冻结 */
+                s_vwd_last_pushed = vpushed;
+            }
+        }
+
         if (now - s->last_stat_ms >= STAT_INTERVAL_MS) {
             /* 每个统计周期顺手抽一次 bus：opusdec/alsasink/kmssink 的致命错误
              * 只会出现在这里，不打出来就是「有包没声/没画」排查黑洞。 */

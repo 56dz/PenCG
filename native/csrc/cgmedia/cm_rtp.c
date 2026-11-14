@@ -732,6 +732,11 @@ static uint64_t g_dump_bytes = 0;
  * 因为它是纯诊断，不值得占用会话结构、也不该进统计 JSON。 */
 static uint64_t g_diag_ms = 0;
 
+/* 每帧 AU 指纹的诊断开关状态（0=未判定 1=关闭 2=记录中）。
+ * 只看 1 秒限速那行日志分不清「这一秒里每帧都一样」还是「每帧都不一样」，
+ * 所以要有一个逐帧的开关。 */
+static int      g_auld = 0;
+
 /* 在 push 成功之后调用，p/n 必须就是推给 appsrc 的那一份字节。 */
 static void au_dump_hook(const unsigned char *p, int n, int key) {
     if (g_dump_state == 1 || g_dump_state == 3) return;
@@ -1085,6 +1090,25 @@ static void flush_frame(cm_sess *s) {
                         g_rtp.pps.len > 6 ? g_rtp.pps.p[6] : 0,
                         g_rtp.pps.len > 7 ? g_rtp.pps.p[7] : 0);
             }
+            /* ★ 每帧 AU 指纹（开关 /userdisk/miniapp/data/auld.txt）。
+             * 目的：区分两种"平面纹丝不动"——
+             *   a) 码流每帧都不同，但视频平面 md5 一直不变 → 残差没被应用，
+             *      问题在 mppvideodec（参考链坏了、错误掩盖吐同一张图）；
+             *   b) 码流本身也每帧相同 → 源侧就是静止的（游戏卡在加载页）。
+             * 用 FNV-1a 64 位当指纹：零依赖、够短、整数运算，3000 行也不拖速度。 */
+            if (g_auld == 0) {
+                FILE *sw = fopen("/userdisk/miniapp/data/auld.txt", "r");
+                if (sw) { fclose(sw); g_auld = 2; }
+                else g_auld = 1;
+            }
+            if (g_auld == 2) {
+                uint64_t h = 1469598103934665603ULL;
+                int i;
+                for (i = 0; i < out_n; i++) { h ^= out_p[i]; h *= 1099511628211ULL; }
+                CM_LOGI("#%d AULD t=%llu n=%d key=%d h=%016llx",
+                        s->id, (unsigned long long)now, out_n, key,
+                        (unsigned long long)h);
+            }
             /* ★ AU dump：传的是刚推给 appsrc 的同一份字节（含注入的 SPS/PPS） */
             au_dump_hook(out_p, out_n, key);
         } else {
@@ -1390,6 +1414,41 @@ void cm_rtp_note_stale(cm_sess *s, const char *why) {
     pthread_mutex_unlock(&g_rtp_mu);
     /* 关键帧请求放在锁外：cm_send_pli 会做 UDP send，不该持锁 */
     kf_request(s, why ? why : "srtp auth fail");
+}
+
+/* 视频管线被重建后调用（见 cm_media.c 的上屏看门狗）。
+ *
+ * 新解码器没有任何参考帧，所以必须：
+ *   1. 丢掉正在拼的半截 AU（它属于旧解码器的时间线，拼完推过去只会花屏）；
+ *   2. 清缺口表 —— 那些序号对应的是旧管线的数据，补回来也没人用；
+ *   3. 关掉关键帧闸门（have_kf=0）并清掉饥饿/放行计时，让后续 P 帧被挡在
+ *      外面，直到真的收到一个新 IDR；
+ *   4. 立刻补一次 PLI，别等 cm_kf_tick 的 2 秒节拍。
+ * **不清 SPS/PPS 缓存**：终末地的 IDR 不带参数集（每局 3~4 次
+ * `IDR without SPSPPS, injected cached parameter sets`），新解码器要靠
+ * 缓存里的 SPS/PPS 才能初始化，清了反而开不出画面。 */
+void cm_rtp_after_rebuild(cm_sess *s) {
+    if (!s) return;
+    pthread_mutex_lock(&g_rtp_mu);
+    if (!g_rtp_init) {
+        cm_buf_init(&g_rtp.frame);
+        cm_buf_init(&g_rtp.sps);
+        cm_buf_init(&g_rtp.pps);
+        cm_buf_init(&g_rtp.au_out);
+        g_rtp_init = 1;
+    }
+    g_rtp.sess_id = s->id;
+    rtp_reset_au();
+    g_rtp.gap_n = 0;
+    g_rtp.seg_n = 0;
+    g_rtp.drop_streak = 0;
+    g_rtp.have_seq = 0;
+    g_rtp.last_seq = 0;
+    s->have_kf = 0;
+    s->kf_starve_ms = 0;
+    s->relax_until_ms = 0;
+    pthread_mutex_unlock(&g_rtp_mu);
+    kf_request(s, "pipeline rebuild");
 }
 
 void cm_rtp_reset(cm_sess *s) {

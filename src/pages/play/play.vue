@@ -394,6 +394,9 @@ export default {
          的升级链永远走不到第二级（真机上就会表现为无限次 L1 补帧）。 */
       stallOwner: '',
       stallAt: 0,      /* 本次停滞的判定时刻，用于日志里算「已停 N 秒」 */
+      /* native 报告「上屏看门狗重建用尽」(-7) 的次数。第 1 次走 L2，
+         第 2 次起走 L3 换机位 —— 理由见 onMedia 里 -7 分支的注释。 */
+      nativeFrozen: 0,
       stallL1Timer: 0, /* L1 之后等 5s 复查的定时器句柄（必须能清） */
       /* ---- 第二条判据：弱网冻结（rx 在涨但画面不动）。计时器与 stalls 完全独立，
          否则两条判据会互相清掉对方的计时基准（见文件头 FREEZE_GATE_MS 注释） ---- */
@@ -1059,6 +1062,9 @@ export default {
         var now = Date.now();
         if (now - this.statAt < 900) return;
         this.statAt = now;
+        /* native 的 shown > 0 证明真有buffer上屏了（不是「我们推出去了」），
+           这才是把 -7 计数清零的可靠依据：出画事件在纯黑局也会触发。 */
+        if (ev.shown > 0 && this.nativeFrozen) this.nativeFrozen = 0;
         /* 只靠 cgmedia 的 media 事件判断出画并不可靠：真机上有整轮 media 事件
            丢失、但 kf/pli/rx 照常在报的情况，于是遮罩一直盖着（KMS 平面在 UI 之上，
            玩家看到的是画面，中栏文案却永远是「正在连接云游戏…」）。
@@ -1096,6 +1102,38 @@ export default {
       }
       if (t === 'error') {
         var d = ev.data || {};
+        /* ★ cgmedia 直接发的错误（没有 data 包装）：目前只有一个 -7。
+         *   -7 = video sink frozen：上屏看门狗把解码器管线重建了 VWD_MAX_REBUILDS
+         *        次，kmssink 仍然一帧新 buffer 都收不到。
+         * 这不是网关错误，把它显示成「服务端错误」既误导玩家又救不回画面。
+         * 真机实测（2026-11-14 18:01 那局）根因是 RK3562 VPU 报
+         *   mpp_rkvdec2 ... irq_status 0x001123 timeout 0 -> resetting -> reset done
+         * 复位后解码器丢掉全部参考帧，而终末地一局只给 1 个 IDR、网关又从不补
+         * NACK，于是永远等不到可解码的起点。唯一有效的动作是**换会话**（L2），
+         * 让新解码器从新的 IDR 开始。 */
+        var ncode = Number(ev.code) || 0;
+        if (!ev.data && ncode === -7) {
+          /* ★ 第一次 -7 先试 L2（复用网关重连，代价最小）。
+           * 真机实测：终末地的黑屏是「RK3562 VPU 报错被内核复位」引起的，
+           * 复位后新解码器需要一个新的 IDR，而同一机位/同一会话里网关几乎不再
+           * 给 IDR（一局只 1 个），所以 L2 往往也只能再黑一次。第二次 -7 就
+           * 直接 L3 —— 重新申请机位换一台机器，那条流是新的、IDR 一定会来。 */
+          this.nativeFrozen = (this.nativeFrozen | 0) + 1;
+          logError('[play] native -7 video sink frozen（第 ' + this.nativeFrozen + ' 次）');
+          if (this.stage === 'live' || this.stage === 'waiting' || this.stage === 'connecting') {
+            var why2 = 'native video sink frozen x' + this.nativeFrozen;
+            if (this.nativeFrozen <= 1) this.stallHealL2(Date.now(), 'freeze', why2);
+            else this.stallHealL3(Date.now(), 'freeze', why2);
+          }
+          return;
+        }
+        if (!ev.data && ncode === -4) {
+          logError('[play] native -4 video rebuild failed → L2 换会话');
+          if (this.stage === 'live' || this.stage === 'waiting' || this.stage === 'connecting') {
+            this.stallHealL2(Date.now(), 'freeze', 'native video rebuild failed');
+          }
+          return;
+        }
         /* 网关在 ticket 校验阶段会对首个 auth 回一条 400 format invalid，
          * 但其实 offer 紧接着就来了、协商照常进行（真机实测三轮一致）。
          * 这种「协商已成功」后的残留错误不再上屏，免得玩家看到假的失败文案。 */

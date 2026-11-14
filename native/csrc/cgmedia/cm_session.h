@@ -421,6 +421,10 @@ void cm_rtp_on_packet(cm_sess *s, unsigned char *pkt, int len,
 void cm_rtp_note_stale(cm_sess *s, const char *why);
 /* 换局/重连时复位拆包状态（seq 基准 / 残缺 AU / 缓存的 SPS-PPS）。 */
 void cm_rtp_reset(cm_sess *s);
+/* 视频管线被重建（解码器换新、参考帧全丢）之后调用：清掉收包侧的半截 AU、
+ * 缺口表与 have_kf 闸门，并立刻补一次 PLI。**不清 SPS/PPS 缓存** ——
+ * 新解码器仍然需要它们（终末地的 IDR 不带 SPS/PPS，只能靠缓存注入）。 */
+void cm_rtp_after_rebuild(cm_sess *s);
 /* 取走「最近发现的视频 seq 缺口」并清空。
  *
  * cm_cmd.c 的 NACK 发送在拿到这批缺口后，用 BLP 位图压成 FCI 发出去。
@@ -474,6 +478,9 @@ int     cm_box_drain_bus(cm_box *b);
 void    cm_box_set_caps_video(cm_box *b, int w, int h);
 uint64_t cm_box_pushed(cm_box *b);
 uint64_t cm_box_pushed_bytes(cm_box *b);
+/* 真正送进 kmssink 的帧数（sink pad 探针计数）。cm_box_pushed 只代表
+ * 「交给了 appsrc」，它涨而本函数不涨 = 下游停止消费（终末地全黑/冻结）。 */
+uint64_t cm_box_shown(cm_box *b);
 /* 调试用：把内部 GstElement* pipeline 暴露给测试工具（gtest）看 bus/state。
  * 生产路径不调用；返回 NULL 表示没有管线。 */
 void   *cm_box_pipeline(cm_box *b);
