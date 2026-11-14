@@ -135,6 +135,7 @@ import { APP_VERSION } from '../services/version.js';
 import { imgUrl } from '../services/img.js';
 import { QUALITY_LABEL } from '../services/const.js';
 import { logInfo, logWarn } from '../services/log.js';
+import { checkUpdate } from '../services/upd-view.js';
 
 const QUALITY_ORDER = ['low'];
 
@@ -334,6 +335,7 @@ export default {
         { id: 'quality', label: '画质设置', desc: '当前 ' + qLabel },
         { id: 'history', label: '清除历史', desc: '清空游玩记录' },
         { id: 'about', label: '关于 PenCG', desc: '版本 ' + APP_VERSION },
+        { id: 'update', label: '检查更新', desc: '当前 ' + APP_VERSION },
         { id: 'sponsor', label: '赞助作者', desc: '请作者喝杯奶茶' },
         { id: 'logout', label: '退出登录', desc: '清除本地会话' }
       ];
@@ -712,6 +714,15 @@ export default {
       }
       if (id === 'about') {
         this.showToast('PenCG ' + APP_VERSION + ' · 非官方客户端');
+        return;
+      }
+      if (id === 'update') {
+        /* 走 services/upd-view.js 的模块单例：真正的弹窗由外层页面
+         * （pages/index/index.vue 的整页替换分支）渲染，这里只负责把状态
+         * 置成 visible 并开始检查。本运行时没有 props/$emit，也没有跨页
+         * 事件总线，模块级状态 + 回调是唯一稳的通道。 */
+        logInfo('[mine] 手动检查更新');
+        checkUpdate('manual');
         return;
       }
       if (id === 'sponsor') {

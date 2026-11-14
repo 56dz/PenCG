@@ -7,4 +7,4 @@
  *
  * 注意：src/services/net.js 里的 `X-Ver: 1.0.0` 是**冒充官方 web 客户端**的
  * 请求头，不是我们的版本号，不要跟着改。 */
-export const APP_VERSION = '1.2.2';
+export const APP_VERSION = '1.2.3';

@@ -1,5 +1,11 @@
 <template>
   <div class="page">
+    <!-- 检查更新：整页替换（不是浮层）。本页是 navTo('mine') 的老入口薄壳，
+         但「我的」内容（mine-body）会在这里渲染，用户同样能点到「检查更新」，
+         所以这里也必须挂同一份弹窗 —— 否则点了之后状态变成 visible
+         却没有任何组件渲染它，表现为「点了没反应」。 -->
+    <update-dialog v-if="updOn"></update-dialog>
+    <div v-else class="mn-body">
     <!-- 顶栏补齐成和首页一致的 5 栏。
          用户反馈 2：原来这里只有「首页 / 我的」两项，只要走了 navTo('mine')
          这条路（登录成功、详情页点「我的」），左侧导航就"塌"成两项。
@@ -14,10 +20,13 @@
     <div class="content">
       <mine-body ref="body" />
     </div>
+    </div>
   </div>
 </template>
 <script>
 import MineBody from '../../components/mine-body.vue';
+import UpdateDialog from '../../components/update-dialog.vue';
+import { bindView, unbindView } from '../../services/upd-view.js';
 import { navTo, navBack, setPendingTab } from '../../services/nav.js';
 import logoImg from '../../assets/logo.png';
 
@@ -33,13 +42,27 @@ const TABS = [
 ];
 
 export default {
-  components: { MineBody },
+  components: { MineBody, UpdateDialog },
   data() {
     return {
       tabs: TABS,
       tab: 'mine',
-      logo: logoImg
+      logo: logoImg,
+      /* 检查更新弹窗是否整页替换本页内容。状态本体在 services/upd-view.js
+       * 的模块单例里（mine-body 只负责触发），本字段只是渲染开关。 */
+      updOn: false
     };
+  },
+  mounted() {
+    const self = this;
+    this._onUpdView = function (v) {
+      self.updOn = !!(v && v.visible);
+    };
+    bindView(this._onUpdView);
+  },
+  beforeDestroy() {
+    if (this._onUpdView) unbindView(this._onUpdView);
+    this._onUpdView = null;
   },
   onShow() {
     // 优先 ref；$refs 在本运行时不一定可用，回退到组件自己挂在根实例上的引用。
@@ -83,4 +106,14 @@ export default {
 </script>
 <style lang="less" scoped>
 @import "base.less";
+
+/* 正常视图的包裹层：只在「不显示检查更新弹窗」时渲染。
+   必须重声明宽高和 row —— 它取代了原来直接挂在 .page 下的
+   .bar + .content 两个兄弟，不声明的话这层是 column 且高度为 0，
+   整页会塌成一条。 */
+.mn-body {
+  width: 100vw;
+  height: 100vh;
+  flex-direction: row;
+}
 </style>

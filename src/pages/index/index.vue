@@ -1,5 +1,13 @@
 <template>
   <div class="page">
+    <!-- 检查更新：整页替换（不是浮层）。
+         falcon 运行时 position:absolute 不可靠、全仓没有一个 z-index 能用
+         （base.less 文件头铁律），所以靠 updOn 把正常视图整体不渲染 ——
+         零定位依赖，也就不会出现「弹窗和列表叠在一起」。 -->
+    <update-dialog v-if="updOn"></update-dialog>
+    <!-- 正常视图整体包一层：让「整页替换」只改这一处 v-else，
+         不必给下面每个顶层子节点各加一个 !updOn（漏一个就会和弹窗叠加）。 -->
+    <div v-else class="ih-page-body">
     <!-- 左侧竖导航：76px -->
     <div class="bar" @touchstart="onBarStart" @touchmove="onBarMove" @touchend="onBarEnd" @touchcancel="onBarEnd">
       <div class="brand">
@@ -127,6 +135,7 @@
         </div>
       </scroller>
     </div>
+    </div>
   </div>
 </template>
 
@@ -144,6 +153,8 @@ import { logInfo, logWarn } from '../../services/log.js';
 import logoImg from '../../assets/logo.png';
 import sponsorImg from '../../assets/sponsor.png';
 import MineBody from '../../components/mine-body.vue';
+import UpdateDialog from '../../components/update-dialog.vue';
+import { bindView, unbindView, autoCheckUpdate as runAutoCheck } from '../../services/upd-view.js';
 import { DEV_AUTOSTART, DEV_LOGOUT } from '../../dev-autostart.js';
 
 // 所有栏目都是「原地换内容」，不再有跳页的 tab。
@@ -159,7 +170,7 @@ const TABS = [
 const SWIPE_ORDER = ['recommend', 'mobile', 'pc', 'free'];
 
 export default {
-  components: { MineBody },
+  components: { MineBody, UpdateDialog },
   data() {
     return {
       tabs: TABS,
@@ -200,15 +211,28 @@ export default {
       seqTimer: null,
       seqStopped: false,
       seqReady: false,
-      seqChecking: false
+      seqChecking: false,
+      /* 检查更新弹窗是否整页替换掉正常视图。
+       * 状态本体在 services/upd-view.js（模块单例）—— 入口在「我的」栏目里的
+       * mine-body 组件，而自动检测发生在本页 boot() 里（那时「我的」可能还没渲染），
+       * 两边必须共享同一份状态，所以用模块级状态 + 回调，不用 props/$emit
+       * （本运行时全仓没有一处 props/$emit，也没有跨页事件总线）。 */
+      updOn: false
     };
   },
   mounted() {
+    const self = this;
+    this._onUpdView = function (v) {
+      self.updOn = !!(v && v.visible);
+    };
+    bindView(this._onUpdView);
     this.boot();
     this.startSeqWatch();
   },
   beforeDestroy() {
     this.stopSeqWatch();
+    if (this._onUpdView) unbindView(this._onUpdView);
+    this._onUpdView = null;
   },
   /* 用户反馈 2 的另一半：登录成功后是 navBack() 回到本页的（不是重新
    * navTo 一个 mine 页），而 navBack 没法带参数，所以登录页先用
@@ -423,6 +447,10 @@ export default {
       await this.loadHome();
       this.devLogout();
       this.devAutostart();
+      /* 自动检查更新放在最后：首屏已经渲染完，网络差的机器最多只是弹窗晚一点，
+       * 不会白屏等它。autoCheckUpdate 内部整体 try/catch 且永不 reject，
+       * 静默失败（连日志都是 W 级），用户不点「检查更新」时完全无感。 */
+      runAutoCheck();
     },
     /* ★ 仅取证用（见 src/dev-autostart.js 的 DEV_LOGOUT 说明）：
      * 让 app 自己在启动后走一次生产 logout()（清 cg.js 的 G + 删盘上
@@ -768,6 +796,16 @@ export default {
 
 <style lang="less" scoped>
 @import "base.less";
+
+/* 正常视图的包裹层：只在「不显示检查更新弹窗」时渲染。
+   必须在这里重声明宽高和 row —— 它取代了原来直接挂在 .page 下的
+   .bar + .content 两个兄弟，不声明的话这层是 column 且高度为 0，
+   整个首页会塌成一条。 */
+.ih-page-body {
+  width: 100vw;
+  height: 100vh;
+  flex-direction: row;
+}
 
 .topbar {
   height: 14.2858vh;

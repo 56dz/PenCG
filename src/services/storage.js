@@ -11,7 +11,11 @@ export const KEYS = {
   history: 'pencg_history',
   autotest: 'pencg_autotest',
   lastTab: 'pencg_last_tab',
-  diag: 'pencg_diag'
+  diag: 'pencg_diag',
+  /* 检查更新的提示状态：{skipVersion, quietDay}，见 services/updater.js。
+   * 单独一个键而不是塞进 settings：它是「别烦我」的临时意愿，不是用户配置，
+   * 混在一起会让 settings 的读写路径带上无关字段。 */
+  update: 'pencg_update'
 };
 
 function store() {
