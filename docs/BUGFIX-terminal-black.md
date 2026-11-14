@@ -259,7 +259,14 @@ D=marker 全丢），并与 `first_mb==0` 切出的 ground truth 比对：
    PLI 要一个干净 IDR。
    判据用「最小值」而不是「先到的那个 slice」，是为了对**乱序**不敏感 ——
    先到的可能是 fm=1840，`fm=0` 一到就把最小值拉回 0，不会误判。
-8. **兜底**：`slice_parse()` 失败（数据太短 / 结构意外）时置
+8. **FU-A 的切片头探测只对 slice NAL 做**（type 1/5）：FU-A 承载的也可能是
+   SEI 或参数集，那时硬去解 slice 头必然失败，`note_slice()` 会把
+   `au_slice_unknown` 置 1 —— 于是后面**每一帧**都退回旧行为，修复被一次
+   SEI 分片永久关掉。现在用 `if (typ == 1 || typ == 5)` 守住。
+9. **`au_slice_unknown` 分支只在 marker 上 flush**：退回旧行为的意思是
+   「和修复前一样只在 marker 处切帧」，不是「见到 FU-A 的 end 就切」。
+   后者会把一段残缺 AU 推给解码器，正好制造本次要消灭的 VPU 复位。
+10. **兜底**：`slice_parse()` 失败（数据太短 / 结构意外）时置
    `au_slice_unknown`，整帧退回「只看 marker」的旧行为 —— 宁可跟以前一样，
    也不能把画面卡住。
 
@@ -277,6 +284,7 @@ D=marker 全丢），并与 `first_mb==0` 切出的 ground truth 比对：
 | `sim_state.py` | python 复刻 C 的 AU 状态机，4 种 marker 策略 | 终末地 246 / 健康局 300，全部与 ground truth 一致；修复前策略「每个 slice 都打 marker」会切出 1981 个 AU |
 | `sim_fua.py` | FU-A 分片路径（MTU=1000 切包） | 终末地 246、健康局 300，两种 marker 策略都对；证明 start 包前 32 字节足以解出 `first_mb` |
 | `sim_join.py` | 头部缺失判据的 5 个场景 | 完整帧保留 / 中途加入丢弃 / 单 slice 不误伤 / 多 slice 不误伤 / 乱序只丢 1 帧且不级联 |
+| `sim_p1.py` | 第 8、9 条两个回归点 | SEI 走 FU-A 不污染 `unknown`；真切片走 FU-A 仍解得出 `first_mb`；`unknown` 下无 marker 的 end 不 flush、有 marker 才 flush。**做过变异测试**：把对应修复分别回退掉，两条断言都会失败 |
 
 > 写模拟脚本时踩过两次「模型与 C 不一致」的坑，两次都得出过假结论：
 > ①模型里保留了 C 已经删掉的「单 slice 快速路径」；②模型里 `note_slice` 的

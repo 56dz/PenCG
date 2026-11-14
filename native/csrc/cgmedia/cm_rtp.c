@@ -564,8 +564,13 @@ static void au_flush_boundary(cm_sess *s) {
 static void au_on_slice_done(cm_sess *s, int marker) {
     uint64_t now = cm_now_ms();
     if (g_rtp.au_slice_unknown) {
-        /* 有 slice 解析不出来：这个 AU 的边界无法判断，整帧退回旧行为。 */
-        flush_frame(s);
+        /* 有 slice 解析不出来：这个 AU 的边界无法判断，整帧退回旧行为
+         * —— 旧行为就是「只在 marker 上 flush」。
+         *
+         * 这里必须判 marker：FU-A 的 end 只说明一个分片拼完了，并不代表
+         * 帧结束；若此时无条件 flush，等于把一段残缺 AU 推给解码器，
+         * 正好制造我们这次要消灭的那种 VPU 复位。 */
+        if (marker) flush_frame(s);
         return;
     }
     if (!marker) {
@@ -1619,7 +1624,7 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
              * 用「nh + 前几十字节」拼一个临时 NAL 就能解出 first_mb ——
              * 不需要等整片拼完。拼不出来（包太短）就让 slice_parse 返回
              * 失败，note_slice 会把整帧退回旧行为。 */
-            {
+            if (typ == 1 || typ == 5) {
                 unsigned char hdr[2 + 32];
                 int hn = 0, k;
                 hdr[hn++] = nh;
@@ -1635,6 +1640,10 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
                     }
                 }
             }
+            /* typ 既不是 1 也不是 5（比如 FU-A 承载 SEI 或参数集）：
+             * 这里绝不能去解 slice 头 —— slice_parse 必然失败，note_slice
+             * 会把 au_slice_unknown 置 1，让后面每一帧都退回旧行为，
+             * 修复等于被一次 SEI 分片永久关掉。 */
             g_rtp.au_start_ms = cm_now_ms();
             g_rtp.seg_ordered = 1;
             {
