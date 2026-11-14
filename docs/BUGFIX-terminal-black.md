@@ -275,21 +275,51 @@ D=marker 全丢），并与 `first_mb==0` 切出的 ground truth 比对：
   **`join` 增长 = 修复真的在起作用**（被 marker 切碎的帧被接回）；
 - `stat` JSON 增 `"join"` 字段；换局时 `join` 清零（`rtp_reset_all()`）。
 
-### 5.3.1 离线验证（设备离线期间完成，脚本都在 `.tmp/vpu/`）
+### 5.3.1 验证（设备离线期间完成）
+
+**主力证据 = `PenCG/tools/hostut/`：直接编译真实的 `cm_rtp.c` 做单测。**
+
+python 模拟脚本（`.tmp/vpu/sim_*.py`）只是模型，模型与 C 不一致时结论毫无
+价值 —— 本项目已经因此误判过两次。所以另做了一套 host harness：直接用
+zig 把 `native/csrc/cgmedia/cm_rtp.c` 编成主机程序，只把 gst / 网络 / 会话
+管理 stub 掉，把真实码流按 4 种 RTP marker 策略打包喂进
+`cm_rtp_on_packet()`，统计**实际推给 appsrc 的 AU 数与首个 IDR 字节数**。
+
+A/B（同一份码流、同一套 harness，只换 `.c` 文件）：
+
+| marker 策略 | 修复前 `8c75587` | 修复后 |
+|---|---|---|
+| A 每组参数集前（**真机实际形态**） | 70 AU / 首 IDR **5409B** | 246 AU / 首 IDR **15358B** |
+| B 每帧末 | 1968 AU / 1138B | 246 AU / 15358B |
+| C 每个 slice 都打 | 1968 AU / 1138B | 246 AU / 15358B |
+| D marker 全丢 | 68 AU / 5409B | 245 AU / 15358B |
+
+- 修复前策略 A 切出的 **5409 字节**与真机日志 `AU push key=1 bytes=5409 segs=9`
+  **逐字节吻合** ⇒ 真机网关走的就是策略 A，旧代码把一个 15358 字节的完整
+  IDR 按 marker 切成 4 段，第一段只有 5409 字节。
+- 策略 B/C 更糟（首 IDR 只有 1138 字节 = 1/13 帧），说明 marker 打得越碎
+  mppvideodec 越容易越界 —— 与 `irq_status 0x001123` 的 VPU 复位对得上。
+- 健康局 `au_1812.h264`（302 NAL）修复前后**都是 300 AU / 首 IDR 44440B**，
+  四种策略全对 ⇒ 单 slice 流没有劣化（旧版在 A/D 策略下还会误切成 197/196
+  帧，新判据反而更稳）。
+- 期望值写成断言（`RESULT: PASS/FAIL`），并做过反向验证：用修复前的 `.c`
+  编同一套 harness，四条断言全 FAIL ⇒ 断言确实有牙。
+
+跑法：`bash PenCG/tools/hostut/run.sh <文件.h264> [mtu]`（详见
+`PenCG/tools/hostut/README.md`）。
+
+**辅助证据（模型，仅作参照）：**
 
 | 脚本 | 验证什么 | 结果 |
 |---|---|---|
-| `verify_fix.py` | 两种切帧规则对真实码流的 AU 结构 | 终末地 OLD 6 个 AU / 首个 IDR 5409B → NEW 246 个 AU / 首个 15256B；健康局 OLD 1 个 AU → NEW 300 个 AU，无劣化 |
-| `emit_aus.py` | 按 AU 边界切好后重新拼 h264 交给 ffmpeg | 两种规则 stderr 均为空，帧数 250 / 246 ⇒ 字节流合法，问题只在「AU 边界与真实图像边界不符」 |
-| `sim_state.py` | python 复刻 C 的 AU 状态机，4 种 marker 策略 | 终末地 246 / 健康局 300，全部与 ground truth 一致；修复前策略「每个 slice 都打 marker」会切出 1981 个 AU |
-| `sim_fua.py` | FU-A 分片路径（MTU=1000 切包） | 终末地 246、健康局 300，两种 marker 策略都对；证明 start 包前 32 字节足以解出 `first_mb` |
+| `verify_fix.py` | 两种切帧规则对真实码流的 AU 结构 | 终末地 OLD 6 个 AU / 首个 IDR 5409B → NEW 246 个 AU；健康局 NEW 300 个 AU |
+| `emit_aus.py` | 按 AU 边界切好后重新拼 h264 交给 ffmpeg | 两种规则 stderr 均为空，帧数 250 / 246 ⇒ 字节流合法，问题只在 AU 边界 |
+| `sim_fua.py` | FU-A 分片路径（MTU=1000 切包） | 终末地 246、健康局 300；证明 start 包前 32 字节足以解出 `first_mb` |
 | `sim_join.py` | 头部缺失判据的 5 个场景 | 完整帧保留 / 中途加入丢弃 / 单 slice 不误伤 / 多 slice 不误伤 / 乱序只丢 1 帧且不级联 |
-| `sim_p1.py` | 第 8、9 条两个回归点 | SEI 走 FU-A 不污染 `unknown`；真切片走 FU-A 仍解得出 `first_mb`；`unknown` 下无 marker 的 end 不 flush、有 marker 才 flush。**做过变异测试**：把对应修复分别回退掉，两条断言都会失败 |
+| `sim_p1.py` | 第 8、9 条两个回归点 | SEI 走 FU-A 不污染 `unknown`；`unknown` 下无 marker 的 end 不 flush。**变异测试**：回退对应修复，两条断言都失败 |
 
-> 写模拟脚本时踩过两次「模型与 C 不一致」的坑，两次都得出过假结论：
-> ①模型里保留了 C 已经删掉的「单 slice 快速路径」；②模型里 `note_slice` 的
-> 判定顺序与 C 不同（C 先判「新图像开始」并 return，再记录最小 `first_mb`）。
-> **改动 C 之后必须同步模型，否则模拟什么也证明不了。**
+> 两个留在这张表里的作用只是「覆盖 host harness 不方便构造的边界场景」，
+> **不作为提交版本的证明**。改动 C 之后必须同步模型，否则模拟什么也证明不了。
 
 ### 5.4 与上屏看门狗（§三）的关系
 
