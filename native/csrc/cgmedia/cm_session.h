@@ -53,6 +53,24 @@ typedef struct {
     uint32_t tx_ssrc;    /* 我方 RTCP sender SSRC（绝不能等于 video_ssrc） */
     uint32_t audio_ssrc;
     int  rect_x, rect_y, rect_w, rect_h;
+    /* ★ KMS 面板换算参数（由 JS 的 device_profile.canvasGeom() 下发）
+     *
+     * apply_rect() 要把「逻辑画布矩形」换成「面板物理绝对坐标」，靠的就是这三个数：
+     *     panel_x = panel_x_offset + logical_y
+     *     panel_y = panel_h - logical_x - logical_w
+     *     panel_w = logical_h ; panel_h = logical_w     （旋转 90°，宽高互换）
+     *
+     * 过去它们写死成 #define PANEL_X_OFFSET 107 / PANEL_H 960，只对 X6 Pro 成立：
+     * Falcon/weston 的合成面在那块面板上只占列 107..372（266 宽），左边 107px 是
+     * 死区。换机型（例如 X7 Pro 合成面铺满整块面板）这个偏移就是错的，症状是
+     * 视频整体横向偏移一百多像素，或挖孔外的页面底色露出来。
+     *
+     * 缺省值保持与历史完全一致（107/960/266），所以老客户端不下发这三个字段时
+     * 行为不变；只有认得出机型（或将来探测出真实面板）时才会不同。
+     * panel_w 目前不参与坐标换算，只用于日志与自检（合成面在面板上占多少列）。 */
+    int  panel_x_offset;
+    int  panel_h;
+    int  panel_w;
     char codec[32];
     int  log_level;
     int  audio_enabled;

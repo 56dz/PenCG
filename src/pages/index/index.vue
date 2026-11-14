@@ -1133,7 +1133,7 @@ export default {
 @keyframes ihFadeIn {
   from {
     opacity: 0;
-    transform: translateX(8px);
+    transform: translateX(0.8334vw);
   }
   to {
     opacity: 1;

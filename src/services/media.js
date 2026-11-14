@@ -5,6 +5,7 @@ import { loadNative, loadMedia, callJSON } from './native.js';
 import { encodeBody, decodeBody, currentOffset, currentToken, currentUserId } from './cg.js';
 import { logInfo, logWarn, logError } from './log.js';
 import { DEV_NO_RTCP, DEV_CHROME_FP } from '../dev-autostart.js';
+import { stageVideoRect, canvasGeom } from './device_profile.js';
 
 const S = {
   wsId: 0,
@@ -333,10 +334,6 @@ function pump() {
   S.pollTimer = setInterval(tick, 120);
 }
 
-function screenCfg() {
-  return { w: 960, h: 266 };
-}
-
 /* 网关对 auth 做严格 JSON-Schema 校验（实测矩阵）：
    - 任一字段缺失 / 类型不对（数字当字符串、字符串当数字、codecs 非数组）→
      {"errcode":400,"errmsg":"format invalid"}
@@ -566,7 +563,15 @@ export async function startMedia() {
     audioPt: S.remote.audioPt,
     videoSsrc: S.remote.videoSsrc,
     audioSsrc: S.remote.audioSsrc,
-    rect: S.rect || { x: 0, y: 0, w: 960, h: 266 },
+    // 挖孔矩形：play 页会先 setRect(stageVideoRect())，没设置时也按当前画布算，
+    // 绝不写死 960x266（换画布宽度的笔会挖错位置）。
+    rect: S.rect || stageVideoRect(),
+    // 面板换算参数：native 的 apply_rect() 把画布矩形映射到物理面板时要用。
+    // 下发而不是写死，是因为不同机型的合成面在面板上的横向起点/占位不同
+    // （X6 Pro 实测 107/266/960；X7 Pro 待测）。见 native/csrc/cgmedia/cm_gst.c。
+    panelXOffset: canvasGeom().panelXOffset,
+    panelH: canvasGeom().panelH,
+    panelW: canvasGeom().panelW,
     codec: 'h264',
     // ★ 取证开关（对比实验用）：DEV_NO_RTCP=1 时 native 不发任何上行 RTCP
     // （PLI/NACK/RR），用于二分「网关是否因为我们的上行 RTCP 而停推」。

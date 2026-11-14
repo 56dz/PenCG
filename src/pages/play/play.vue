@@ -146,12 +146,19 @@ import { DEV_AUTOTAP } from '../../dev-autostart.js';
 import { recordPlay, touchPlay } from '../../services/history.js';
 import { QUALITIES, QUALITY_LABEL, normQuality } from '../../services/const.js';
 import { logInfo, logWarn, logError } from '../../services/log.js';
+import { stageVideoRect } from '../../services/device_profile.js';
 import logoImg from '../../assets/logo.png';
 
 // KMS 硬件平面是盖在 UI 之上的 overlay：视频矩形与 UI 矩形必须完全分离。
-// 播放页三栏：左 243 + 中 473（视频）+ 右 244 = 960。473x266 正好 16:9，
-// 所以视频矩形必须从 x=243 开始 —— 和模板里 .p2-left 宽度分毫不差，否则挖孔错位。
-var VIDEO = { x: 243, y: 0, w: 473, h: 266 };
+// 播放页三栏按画布宽度切分：左 25.3125vw + 中 49.2709vw（视频）+ 右 25.4167vw，
+// 中栏就是挖孔，必须与模板里 .p2-left 的宽度分毫不差，否则挖孔错位。
+//
+// 这里不再写死 960 画布下的 243/473/266 —— 三栏比例固定在 device_profile.js 的
+// STAGE_LEFT_RATIO / STAGE_VIDEO_RATIO，由当前画布宽度反算像素矩形。
+// 模块加载时 onLaunch 已经跑过 bootProfile()，所以拿到的就是真实画布；
+// 万一没有（例如单独 import 做静态检查），stageVideoRect() 会退回 X6 基线
+// 960x266，即与历史行为完全一致，不会抛错。
+var VIDEO = stageVideoRect();
 var VW = 1280;
 var VH = 720;
 var MAX_TOUCH = 5;
@@ -2693,10 +2700,14 @@ export default {
   color: @text-color-dim;
 }
 
-/* ---------- 中栏：视频挖孔 473x266 ---------- */
+/* ---------- 中栏：视频挖孔 473x266 ----------
+ * 宽度 49.2709vw / 高度 100vh 与 JS 里的 var VIDEO = { x:243, y:0, w:473, h:266 }
+ * 等价（473/960、266/266）。用 vw/vh 而不用 px，是为了让三栏 25.3125 + 49.2709 +
+ * 25.4167 = 100vw 在任何画布宽度下都严丝合缝；挖孔用的绝对值仍只由 JS 那份
+ * VIDEO 常量提供，CSS 不参与 KMS 坐标计算。 */
 .stage {
-  width: 473px;
-  height: 266px;
+  width: 49.2709vw;
+  height: 100vh;
   flex-direction: column;
   justify-content: center;
   align-items: center;

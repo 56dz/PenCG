@@ -29,6 +29,11 @@ int cm_cfg_parse(cm_cfg *cfg, const char *json) {
     cfg->audio_pt = 111;
     cfg->rect_w = 960;
     cfg->rect_h = 266;
+    /* 面板换算默认值 = X6 Pro 真机实测，见 cm_session.h 的字段注释。
+     * 保持与旧版 #define 完全一致，保证不下发这三个字段的客户端行为不变。 */
+    cfg->panel_x_offset = 107;
+    cfg->panel_h = 960;
+    cfg->panel_w = 266;
     cfg->log_level = 3;
     cfg->audio_enabled = 1;
     snprintf(cfg->codec, sizeof(cfg->codec), "h264");
@@ -59,6 +64,15 @@ int cm_cfg_parse(cm_cfg *cfg, const char *json) {
     cfg->audio_enabled = cm_json_get_int(json, "audio", 1) ? 1 : 0;
     cfg->no_rtcp = cm_json_get_int(json, "noRtcp", 0) ? 1 : 0;
     cfg->chrome_fp = cm_json_get_int(json, "chromeFp", 0) ? 1 : 0;
+
+    /* 面板换算参数：来自 JS 的 device_profile.canvasGeom()。
+     * panelH 的下限用 1（而不是某个具体分辨率）—— 认不出机型时不传，走默认。 */
+    cfg->panel_x_offset = cm_json_get_int(json, "panelXOffset", cfg->panel_x_offset);
+    cfg->panel_h = cm_json_get_int(json, "panelH", cfg->panel_h);
+    cfg->panel_w = cm_json_get_int(json, "panelW", cfg->panel_w);
+    if (cfg->panel_x_offset < 0) cfg->panel_x_offset = 0;
+    if (cfg->panel_h < 1) cfg->panel_h = 960;
+    if (cfg->panel_w < 1) cfg->panel_w = 266;
 
     v = cm_json_get_int(json, "videoSsrc", 0);
     cfg->video_ssrc = (uint32_t)v;

@@ -180,6 +180,12 @@ struct cm_box {
     GstElement *sink; /* kmssink，改 rect 用 */
     int width, height;
     int rect_x, rect_y, rect_w, rect_h;
+    /* 面板换算参数，建盒时从 cfqg 拷进来（见 cm_session.h 的字段注释）。
+     * 存一份而不是每次 apply_rect 时读 s->cfg，是因为 apply_rect 可能被
+     * cm_box_set_rect 在会话已经改过 cfg 之后调用，拷贝快照语义更清楚。 */
+    int panel_x_offset;
+    int panel_h;
+    int panel_w;
     uint64_t pushed;
     uint64_t pushed_bytes;
     /* ★ 真·上屏帧计数：kmssink 的 sink pad 上挂 BUFFER 探针数出来的。
@@ -1113,6 +1119,10 @@ static GstElement *launch(const char *desc) {
  * 左侧 107px 是面板死区。这个数字来自 PenBili/native/csrc/player.c:194 的真机实测，
  * 和 skill 里 documented 的映射一致。加错的症状是视频整体横向偏移一百多像素。
  * 隐藏视频（1x1）时**不能**加这个偏移，否则左侧会残留一条 107px 宽的条带。 */
+/* ↓ 这两个宏只作为「cfg 里没给出时的历史默认值」保留，不再直接被 apply_rect
+ * 使用：真正的换算参数来自 cm_cfg 的 panel_x_offset / panel_h（由 JS 侧
+ * device_profile.canvasGeom() 下发），因为换机型时合成面在面板上的占位不同。
+ * 数值与历史完全一致，所以老客户端的行为不变。 */
 #define PANEL_X_OFFSET 107
 /* 面板物理高度（竖屏 480x960）。逻辑 x 方向映射到面板 y 轴，换算要用它。 */
 #define PANEL_H 960
@@ -1120,15 +1130,19 @@ static GstElement *launch(const char *desc) {
 static void apply_rect(cm_box *b) {
     char buf[64];
     int px, py, pw, ph;
+    int xoff, ph_panel;
     if (!b || !b->sink) return;
+    /* 面板换算参数来自盒子（建盒时从 cfg 拷来），不是编译期常量。 */
+    xoff = b->panel_x_offset > 0 ? b->panel_x_offset : 0;
+    ph_panel = b->panel_h > 0 ? b->panel_h : PANEL_H;
 
     /* w/h 有一个 <=0 时保持原样下发，让 kmssink 走 fullscreen 语义 */
     if (b->rect_w <= 1 && b->rect_h <= 1) {
         snprintf(buf, sizeof(buf), "<%d,%d,%d,%d>",
                  b->rect_x, b->rect_y, b->rect_w, b->rect_h);
     } else {
-        px = PANEL_X_OFFSET + b->rect_y;
-        py = PANEL_H - b->rect_x - b->rect_w;
+        px = xoff + b->rect_y;
+        py = ph_panel - b->rect_x - b->rect_w;
         pw = b->rect_h;
         ph = b->rect_w;
         if (px < 0) px = 0;
@@ -1142,8 +1156,9 @@ static void apply_rect(cm_box *b) {
     gst_util_set_object_arg(b->sink, "render-rectangle", buf);
     /* 默认 force-aspect-ratio=true 会加黑边，我们要铺满目标矩形 */
     gst_util_set_object_arg(b->sink, "force-aspect-ratio", "false");
-    CM_LOGI("kmssink rect logical=<%d,%d,%d,%d> panel->%s",
-            b->rect_x, b->rect_y, b->rect_w, b->rect_h, buf);
+    CM_LOGI("kmssink rect logical=<%d,%d,%d,%d> panel->%s (xoff=%d panelH=%d panelW=%d)",
+            b->rect_x, b->rect_y, b->rect_w, b->rect_h, buf,
+            xoff, ph_panel, b->panel_w);
 }
 
 /* kmssink sink pad 的 BUFFER 探针：只做一件事 —— 计数。
@@ -1174,6 +1189,9 @@ cm_box *cm_box_create(cm_sess *s, int is_video) {
     b->rect_y = s->cfg.rect_y;
     b->rect_w = s->cfg.rect_w;
     b->rect_h = s->cfg.rect_h;
+    b->panel_x_offset = s->cfg.panel_x_offset;
+    b->panel_h = s->cfg.panel_h;
+    b->panel_w = s->cfg.panel_w;
     /* 兜底：rect 全 0 会让 kmssink 走 fullscreen 语义（自己去做 modesetting），
      * 那会跟 weston 抢 CRTC 并卡在 PAUSED。给一个面板内的安全矩形。 */
     if (b->rect_w <= 0 || b->rect_h <= 0) {

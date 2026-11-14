@@ -213,11 +213,83 @@ function describeEnv(env) {
     ' api=' + (env.apiVersion || '-');
 }
 
+/* ---------------- 画布几何（供布局与视频挖孔共用） ----------------
+ *
+ * 为什么需要它：播放页的 KMS 挖孔矩形过去写成 var VIDEO = {x:243,y:0,w:473,h:266}，
+ * 那是**按 960x266 画布算好的绝对值**。换一台画布宽度不同的笔，这个矩形就会
+ * 与 CSS 三栏（25.3125vw + 49.2709vw + 25.4167vw）错位，而 KMS 平面是硬件
+ * overlay，错位表现为「视频盖住左右栏」或「挖孔里露出页面底色」。
+ *
+ * 所以把「三栏各占画布宽度的几分之几」固定下来，由画布宽度反算像素矩形。
+ * 比例与 base.less / play.vue 的 vw 值严格对应，改一边必须改另一边：
+ *     左栏 243 / 960 = 25.3125vw
+ *     中栏 473 / 960 = 49.2708vw   <- 视频挖孔
+ *     右栏 244 / 960 = 25.4167vw
+ */
+export const STAGE_LEFT_RATIO = 243 / 960;
+export const STAGE_VIDEO_RATIO = 473 / 960;
+
+/* 面板物理宽度（横屏方向的短边）。两台已知机型都是 480x960 的面板，
+ * 所以合成面在横向上通常居中：左右死区各 (480 - 合成面宽) / 2。
+ * 这个值唯一的作用是「认不出机型时的推导」，认得出就用 KNOWN_MODELS 的实测值。 */
+const DEFAULT_PANEL_PHYS_W = 480;
+
+/* bootProfile() 的结果缓存。play.vue / media.js 在页面里 import 时
+ * onLaunch 已经跑过，因此这里一定已有值；没有时（例如单元测试直接 import）
+ * 就退回 X6 基线，绝不抛。 */
+let BOOT_CACHE = null;
+
+/* 横向死区宽度。X6 Pro 是 107（合成面 266 宽居中于 480 面板：
+ * (480-266)/2 = 107，与 cm_gst.c 里历史 #define PANEL_X_OFFSET 107 完全一致，
+ * 这也是它能被这条推导复现的原因）。
+ *
+ * ★ 为什么必须推导而不是退回 0：X6 Pro 的 $falcon.env.deviceModel 报的是
+ *   "HaaS UI" 而不是机型名，所以 model 识别**恒失败**。若此时退回 0，视频
+ *   会整体横移 107px（正好一个死区宽），症状是「左栏空白、右栏被视频盖住」。
+ *   换句话说，这条推导是 X6 Pro 上唯一能拿到 107 的路径。 */
+function panelXOffsetFor(model, canvasH) {
+  const ref = model ? KNOWN_MODELS[model] : null;
+  if (ref) return ref.panelXOffset;
+  const v = Math.round((DEFAULT_PANEL_PHYS_W - canvasH) / 2);
+  return v > 0 ? v : 0;
+}
+
+/* 当前画布几何。w/h 是 setViewPort 声明的设计画布尺寸，
+ * panel* 是 KMS 合成面在物理面板上的占位（换算见 cm_gst.c 的 apply_rect）。 */
+export function canvasGeom() {
+  const b = BOOT_CACHE;
+  const w = (b && b.cfg && b.cfg.width > 0) ? b.cfg.width : FALLBACK_WIDTH;
+  const h = (b && b.cfg && b.cfg.height > 0) ? b.cfg.height : FALLBACK_HEIGHT;
+  const dev = (b && b.model) || null;
+  return {
+    width: w,
+    height: h,
+    /* 面板换算参数：合成面旋转 90° 后占面板 panelH（= 画布宽度）、
+     * panelW（= 画布高度），横向起点 panelXOffset。
+     * X6 Pro 实测 107 / 960 / 266，与 cm_gst.c 的历史 #define 完全一致；
+     * 认不出机型时由 panelXOffsetFor() 推导（见该函数注释）。 */
+    panelXOffset: panelXOffsetFor(dev, h),
+    panelH: w,
+    panelW: h,
+    model: dev,
+    source: (b && b.source) || 'fallback'
+  };
+}
+
+/* 视频挖孔矩形（画布坐标系，单位=设计像素）。
+ * y 恒为 0、h 恒为画布高度：三栏都是满高的，只有横向分栏。 */
+export function stageVideoRect() {
+  const g = canvasGeom();
+  const x = Math.round(g.width * STAGE_LEFT_RATIO);
+  const w = Math.round(g.width * STAGE_VIDEO_RATIO);
+  return { x: x, y: 0, w: w, h: g.height };
+}
+
 /* 启动期一次性算好的 profile。app.js 只读 cfg.width。 */
 export function bootProfile() {
   const picked = pickDesignWidth({});
   const w = picked.width > 0 ? picked.width : FALLBACK_WIDTH;
-  return {
+  const out = {
     cfg: {
       width: w,
       // 高度不参与 setViewPort，只作日志参考：env 可信时用它，否则用 X6 基线。
@@ -230,4 +302,6 @@ export function bootProfile() {
     /* 布局侧的已知缺口，供日志与文档引用。 */
     layoutFixed: w !== FALLBACK_WIDTH
   };
+  BOOT_CACHE = out;
+  return out;
 }
