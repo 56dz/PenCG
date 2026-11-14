@@ -430,6 +430,29 @@ A/B（同一份码流、同一套 harness，只换 `.c` 文件）：
    第一段。修复已落地（`cm_rtp.c` 按 `first_mb_in_slice==0` 判帧边界），
    **待真机验证**（判据见 §5.3：`join` 持续增长、`reset done` 增量为 0、
    `AU push key=1` 变成 15KB 级）。
+
+   修复过程中 hostut 又抓出两个**修复自身引入**的问题，都已修掉：
+
+   - **会永久压住 AU**（commit `35472cf`）：`au_marker_until` 被每个新切片
+     续期，若一条流再也不出现 `first_mb==0`，到期时刻永远推不到，AU 被
+     永久压住、一帧都不推 —— 比放行残帧更糟（残帧最多复位一次，压住不
+     可恢复）。修法是多加一个不随续期改变的硬上限 `au_hold_start_ms`
+     （`AU_HOLD_HARD_MAX_MS=400`，约 12 帧）。
+   - **FU-A 承载 SEI 时会永久关掉修复**（commit `eeb1968`）：FU-A start
+     上的切片头探测没判 NAL 类型，一个 SEI 分片就让 `slice_parse` 失败、
+     `au_slice_unknown` 置位，之后每帧都退回旧行为。修法是先判
+     `typ == 1 || typ == 5`。
+
+   真机上还有一个新的观测口径（commit `f261065`）：stat/心跳里的
+   `holdRel`（压住的 AU 被兜底放行的次数）。三种组合的含义：
+
+   | join | holdRel | 含义 |
+   |---|---|---|
+   | 涨 | 不涨 | 边界判据正常工作，没走兜底（理想） |
+   | 不涨 | 涨 | 一直在走兜底，判据没生效 |
+   | 不涨 | 不涨 | AU 被永久压住（死锁，不该出现） |
+
+
 2. **VPU 复位后如何救回**：目前只能靠 JS 换会话（L2/L3）。若能拿到
    `RtcKeepPlaying`（官方 SDK `CmdId=20015`）就不必换机位，但那需要
    `paasDispatch` 的 `appKey`，见 `docs/HANDOFF-163CG-API.md`。
