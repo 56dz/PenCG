@@ -2,7 +2,7 @@ import { BasePage } from './base-page.js';
 import { stopPlay, mediaState, currentGameCode, inputBusy } from './services/media.js';
 import { stopGame } from './services/session.js';
 import { getScreenState, screenStateName, isScreenNotOn } from './services/screen.js';
-import { bootProfile, FALLBACK_WIDTH, FALLBACK_HEIGHT } from './services/device_profile.js';
+import { bootProfile, FALLBACK_WIDTH, FALLBACK_HEIGHT, readCustomEnv } from './services/device_profile.js';
 import { DEV_DESIGN_WIDTH } from './dev-autostart.js';
 
 // 逻辑画布宽度来自设备 profile（真机截屏 + cfg.json 证实）：
@@ -34,12 +34,21 @@ class App extends $falcon.App {
   onLaunch(options) {
     super.onLaunch(options);
     /* 屏幕适配验收开关：0 = 关闭（量产恒为 0，见 dev-autostart.js）。
-     * 必须在 bootProfile() 之前写，因为它读的就是 custom 通道。 */
-    if (DEV_DESIGN_WIDTH > 0) {
-      try {
+     * 必须在 bootProfile() 之前写，因为它读的就是 custom 通道。
+     *
+     * ★ 关掉时必须主动清除，不能只「不写」★
+     * custom 通道是持久化的：拿 720 应过一版验收包之后，只要不显式清，
+     * 后续量产包每次启动都会读到 720，画布宽度被悄悄改掉（真机实测过：
+     * 日志 width=720 source=custom，挖孔 rect 变成 182,33,355,200，
+     * 而物理合成面仍是 960 宽，整页被缩放且视频区错位）。
+     * 这里只在「读到的值确实非 0」时才写，避免每次启动都白写一次存储。 */
+    try {
+      if (DEV_DESIGN_WIDTH > 0) {
         $falcon.env.custom.$set('pencgDesignWidth', DEV_DESIGN_WIDTH);
-      } catch (e) {}
-    }
+      } else if (Math.round(Number(readCustomEnv('pencgDesignWidth')) || 0) !== 0) {
+        $falcon.env.custom.$set('pencgDesignWidth', 0);
+      }
+    } catch (e) {}
     try {
       BOOT = bootProfile();
       DESIGN_WIDTH = BOOT.cfg.width > 0 ? BOOT.cfg.width : FALLBACK_WIDTH;
