@@ -6,9 +6,15 @@
 
 ## 一、结论（一句话）
 
-RK3562 的硬件解码器（`mpp_rkvdec2`）在这条码流上解错，被内核**强制复位**；
+**我们的 RTP 层把终末地的一个 IDR 帧切成了 4 个残缺 AU**（详见 §五）：网关把
+RTP marker 打在「切片组」边界而不是帧边界，旧代码无条件 `if (marker) flush_frame()`，
+于是 15358 字节的完整 IDR 被截成 5409 字节就送进解码器，宏块只覆盖约 53%
+=> RK3562 的硬件解码器（`mpp_rkvdec2`）解码越界、被内核**强制复位**；
 复位丢掉全部参考帧，而终末地一局只给 1 个 IDR、网关对 NACK 又从不重传，
 解码器再也回不到可解码状态 —— 于是「全黑」或「冻结」，音频链路完全不受影响。
+
+> **阅读顺序建议**：先看 §五（最终根因与修复），§二~§四是通往它的取证过程
+> （VPU 复位这个中间结论就是从那里得到的），§六 是仍未解决的遗留项。
 
 ## 二、决定性证据
 
@@ -111,12 +117,172 @@ ffmpeg -f kmsgrab -plane_id 76 -framerate 5 -i - \
 - 回传主机：`adb shell "base64 /tmp/p.png" | tr -d '\r\n' | base64 -d > p.png`
   （`adb pull` 在 MSYS 下会被路径转换搞坏）。
 
-## 五、仍未解决 / 下一步
+## 五、★ 最终根因（2026-11-14 19:00 定案）：AU 边界被 RTP marker 切错 ★
 
-1. **为什么同一款游戏有时一帧都不上屏、有时完全正常**：观测到黑屏局的第一个 IDR 只有
-   **5409 字节**、健康局是 **44440 字节**，且黑屏局 `rx` 极低（22 秒 52 个包）。
-   怀疑网关在「几乎静止的画面」上给出了退化码流，触发 VPU 的 `irq_status 0x001123`。
-   还需要在同一局里同时抓 AU dump + dmesg 时间戳来确认因果方向。
+> 上面 §一~§四 记录的是「VPU 复位」这个**中间结论**（它是对的，但只回答
+> 「画面为什么黑」，没回答「VPU 为什么复位」）。本节补上最后一环，
+> 并把 §六 里「为什么第一个 IDR 只有 5409 字节」这个当期的疑问彻底解开。
+
+### 5.1 一句话
+
+**终末地的编码器每帧切成 8 个 H.264 slice，而网关的 RTP marker 打在「切片组」
+边界（每 2~3 个 slice）而不是「一帧结束」。我们旧代码 `if (marker) flush_frame(s)`
+于是把一个完整的 15358 字节 IDR 拆成 4 个残缺 AU 推给解码器，第一个 AU 只覆盖
+约 53% 的宏块 → `mppvideodec` 解码越界 → VPU 复位 → 全黑。**
+
+### 5.2 证据链（三份独立证据互相咬合）
+
+**（1）真机日志的字节数，与离线解析逐字节吻合**
+
+`au_fail.h264`（黑屏局 dump，560986B）按 NAL 切出来：
+
+```text
+nal0  off=0      len=26    type=7 (SPS)
+nal1  off=26     len=8     type=8 (PPS)
+nal2  off=34     len=707   type=6 (SEI)
+nal3  off=741    len=397   type=5 first_mb=0     slice_type=7
+nal4  off=1138   len=339   type=5 first_mb=480   slice_type=7
+nal5  off=1477   len=547   type=5 first_mb=880   slice_type=7
+nal6  off=2024   len=3385  type=5 first_mb=1360  slice_type=7
+--- 5409 字节 ← 真机日志里推出去的那个 key=1 AU 就到这里
+nal7  off=5409   len=26    type=7  ← SPS 又来了（网关在此处打 marker）
+nal8  off=5435   len=8     type=8  ← PPS 又来了
+nal9  off=5443   len=3708  type=5 first_mb=1840  slice_type=7
+nal10 off=9151   len=26    type=7
+nal11 off=9177   len=8     type=8
+nal12 off=9185   len=2935  type=5 first_mb=2240  slice_type=7
+nal13 off=12120  len=26    type=7
+nal14 off=12146  len=8     type=8
+nal15 off=12154  len=339   type=5 first_mb=2720  slice_type=7
+nal16 off=12493  len=2865  type=5 first_mb=3120  slice_type=7
+--- 15358 字节 ← 这才是完整的一帧
+nal17 off=15358  len=11    type=1 first_mb=0     slice_type=5  ← 第一个 P 帧
+```
+
+- `nal0..nal6` 累计 = **5409**，而真机日志同时刻打的是
+  `#1 AU push key=1 bytes=5409 segs=9` —— **两个数逐字节相同**，
+  说明「我们送进解码器的第一个 AU」就是这段被截断的字节。
+- 健康局对照（`dp3.log:1811`）：`#1 AU push key=1 bytes=44440 segs=39` =
+  44414（**单 slice 整帧** IDR）+ 26（SPS）=> 宏块全覆盖，从不复位。
+- 这也解释了 §六 那个疑问：**「黑屏局 IDR 只有 5409 字节」不是网关给了退化
+  码流，而是我们自己把它切碎了**。码流本身一直是完整的。
+
+**（2）离线重放：把残缺前缀喂给 mppvideodec，必然复位**
+
+在设备上用 `gst-launch-1.0 filesrc ! h264parse ! mppvideodec ! fakesink`，
+前后 `dmesg -c`：
+
+| 输入 | 内容 | resets | irq_status |
+|---|---|---|---|
+| `au_1812.h264` | 健康局整份（单 slice） | **0** | — |
+| `t1_au1.h264` | 黑屏局前 **5409** 字节 | **1** | `0x001123` |
+| `t3_head.h264` | 黑屏局前 20000 字节 | **5** | `0x000017`×1 + `0x001123`×4 |
+| `a1_healthy` | 健康 SPS/PPS + 健康 IDR | **0** | — |
+| `au_fail.h264` | 黑屏局**整份**（合法流） | **0** | — |
+
+- 关键：**整份合法流不触发复位，只有「按 5409 字节截断」才触发**。
+- 官方立场一致：rockchip-linux/mpp issue #588 里维护者 HermanChen 对该类
+  reset 的答复是「Hardware reset happened on stream error. So use ffmpeg
+  check the input stream is correct or not first.」—— 即复位是输入不完整
+  导致的，不是解码器 bug。
+
+**（3）主机侧两种切帧规则的对照**
+
+`.tmp/vpu/verify_fix.py` 对同两份码流分别按「旧规则（marker/参数集处切）」与
+「新规则（`first_mb==0` 才切）」重放：
+
+```text
+终末地 au_fail.h264
+  OLD  AU=6    首个 IDR = 5409B     ← 与真机日志一致，缺陷被独立复现
+  NEW  AU=246  首个 IDR = 15256B    每帧恰好 8 slice
+健康局 au_1812.h264
+  OLD  AU=1    （300 slice 全糊成一个 AU —— 旧规则在单 slice 流上「碰巧」能用）
+  NEW  AU=300  每帧 1 slice，med=7944B   ← 没有劣化
+```
+
+=> 旧规则只在「单 slice 流」上碰巧正确，一遇到多 slice 流就把帧切碎。
+这就是「6 个游戏里只有终末地坏」的全部原因。
+
+**（4）对抗性验证：4 种 marker 策略 × 3 份码流**
+
+`.tmp/vpu/sim_state.py` / `sim_stress.py` 用 python 复刻 C 状态机，对真实 NAL
+序列按四种 marker 放置策略驱动（A=每组参数集前 / B=每帧末片 / C=每个 slice /
+D=marker 全丢），并与 `first_mb==0` 切出的 ground truth 比对：
+
+```text
+终末地 au_fail.h264    4 种策略全部 246 帧  ✓
+健康局 au_1812.h264    4 种策略全部 300 帧  ✓
+合成 synth_s8.h264     4 种策略全部 300 帧  ✓   (ffmpeg -x264-params slices=8 现造)
+```
+
+策略 C（每个 slice 都打 marker，最恶劣的情况）在修复前会切出 1981 个 AU
+（修复完全失效），修复后正确切出 246 个。
+
+### 5.3 修复
+
+`PenCG/native/csrc/cgmedia/cm_rtp.c`：
+
+1. **新增 `slice_parse()`** —— 解析 slice NAL（type 1/5）的
+   `first_mb_in_slice` / `slice_type`。复用文件里已有的
+   `unescape_rbsp()` + `br_ue()`；**必须先剥 1 字节 NAL 头再反转义**，
+   否则 `first_mb` 恒为 1/2（离线分析时踩过这个坑）。
+2. **新增 `note_slice()`** —— `first_mb == 0 && 已有 slice` => 返回 1
+   （新图像开始）；否则累加 `au_slices`，并**续期 marker 的等待窗口**
+   （防止在帧中间超时放行）。
+3. **AU 边界改为 `first_mb == 0`**：`au_flush_boundary()` 在下一个
+   `first_mb==0` 的 slice 到来时把上一帧放出去。
+4. **marker 不再是帧边界**：`au_on_slice_done(s, marker)` 收到 marker 时
+   只是「压住等确认」，超时 `AU_HOLD_MAX_MS`(150ms) 才兜底放行。
+   正常路径的延迟 = 一帧（20~30fps 下 33~50ms），换来的收益是
+   **绝不再把残缺 IDR 送进解码器**。
+5. **FU-A 路径也要解析**：`handle_h264` 的 FU-A start 分支原来只置
+   `au_has_slice=1`，从不解析 slice 头，导致多 slice 流走 FU-A 时修复完全失效。
+   现在用 start 包正文前 32 字节解出 `first_mb`（切片头在 NAL 最前面，
+   不必等整片拼完）。
+6. **AU 中途的重复 SPS/PPS 不再拼进 frame**：网关在一帧中间反复插入参数集
+   （实测 6 次），旧代码把它们原样 `annexb_put` 进 `g_rtp.frame`。
+   现在 `cache_param_set()` 只负责缓存，中途的重复参数集丢弃
+   （`drop mid-AU parameter set`），帧首由 `flush_frame()` 的注入逻辑补一次。
+7. **兜底**：`slice_parse()` 失败（数据太短 / 结构意外）时置
+   `au_slice_unknown`，整帧退回「只看 marker」的旧行为 —— 宁可跟以前一样，
+   也不能把画面卡住。
+
+判据与观测：
+- 每 10 秒心跳日志 `video sink pushed=N shown=M join=K`，
+  **`join` 增长 = 修复真的在起作用**（被 marker 切碎的帧被接回）；
+- `stat` JSON 增 `"join"` 字段；换局时 `join` 清零（`rtp_reset_all()`）。
+
+### 5.4 与上屏看门狗（§三）的关系
+
+两者不冲突，是两层：
+
+| 层 | 作用 | 触发条件 |
+|---|---|---|
+| AU 边界修复（本节） | **不再产生**残缺 IDR，从根上避免 VPU 复位 | 始终生效 |
+| 上屏看门狗（§三） | 万一 VPU 还是复位了（别的码流），能察觉并求救 | `pushed` 涨而 `shown` 不动 2.5s |
+
+修复之后看门狗应当**永不触发**；它保留着是因为「VPU 复位」这类故障
+在别的游戏/别的码流上仍可能以别的形态出现，`shown` 是最可靠的观测面。
+
+### 5.5 为什么之前没发现
+
+三次「健康局」把注意力引到了别处：健康局 `pushed == shown`、fb 交替、
+`join` 会是 0 —— 因为那几局网关**碰巧**没在帧中间打 marker。而故障局的
+特征（`key=1` 只有 5409B）当时被解读成「网关给了退化码流」而不是
+「我们切碎了它」。
+
+**教训：看到「关键帧特别小」要先算宏块覆盖率（`first_mb` 序列是否从 0
+连续覆盖到 slice 总数），而不是先怀疑对端。**
+
+---
+
+## 六、仍未解决 / 下一步
+
+1. ~~**为什么同一款游戏有时一帧都不上屏、有时完全正常**~~ —— **已由 §五 回答**：
+   5409 字节不是网关给的「退化码流」，而是我们把完整的 15358 字节 IDR 切碎后的
+   第一段。修复已落地（`cm_rtp.c` 按 `first_mb_in_slice==0` 判帧边界），
+   **待真机验证**（判据见 §5.3：`join` 持续增长、`reset done` 增量为 0、
+   `AU push key=1` 变成 15KB 级）。
 2. **VPU 复位后如何救回**：目前只能靠 JS 换会话（L2/L3）。若能拿到
    `RtcKeepPlaying`（官方 SDK `CmdId=20015`）就不必换机位，但那需要
    `paasDispatch` 的 `appKey`，见 `docs/HANDOFF-163CG-API.md`。
