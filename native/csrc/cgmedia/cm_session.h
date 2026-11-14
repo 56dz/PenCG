@@ -443,7 +443,7 @@ int  cm_rtp_take_nack_gaps(cm_sess *s, unsigned char *out, int cap_entries);
  * 所以对 IDR 单独压住 IDR_HOLD_MS 再放行。P 帧不压（压了纯属加延迟）。 */
 void cm_rtp_flush_held(cm_sess *s);
 
-/* 多 slice AU 的兜底放行（见 cm_rtp.c 里 AU_JOIN_MS 的大注释）。
+/* 多 slice AU 的兜底放行（见 cm_rtp.c 文件开头「切片区」大注释）。
  *
  * marker 只在「下一帧第一个 slice」到来时才被确认是帧边界，因此码流一旦
  * 停下（比如网关静默停推），最后那个被压住的 AU 就再也没人放出来。

@@ -388,7 +388,7 @@ void cm_media_loop(cm_sess *s) {
          * 等重传补齐，到期必须有人把它放出来，否则画面停在这一帧。
          * 20ms 粒度足够（hold 窗口是几十 ms 量级）。 */
         cm_rtp_flush_held(s);
-        /* 多 slice AU 的兜底放行（见 cm_rtp.c 里 AU_JOIN_MS 的大注释）：
+        /* 多 slice AU 的兜底放行（见 cm_rtp.c 文件开头「切片区」大注释）：
          * marker 之后我们先压住，等下一帧的第一个 slice 到来才算确认帧边界。
          * 码流一停就没人放行，这里到期放出去。 */
         cm_rtp_au_join_tick(s);

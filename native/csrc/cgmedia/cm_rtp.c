@@ -245,7 +245,7 @@ typedef struct {
      * 0 = 没有挂起的 AU。见 IDR_HOLD_MS 的注释。 */
     uint64_t au_hold_until_ms;
 
-    /* ---------- 切片区：真正的 AU 边界（见 AU_JOIN_MS 的大注释） ----------
+    /* ---------- 切片区：真正的 AU 边界（见文件开头「切片区」大注释） ----------
      *
      * au_slices：当前 AU 已经攒了几个 slice。
      * au_last_first_mb：最后一个 slice 的 first_mb_in_slice。
@@ -521,7 +521,7 @@ static void au_flush_boundary(cm_sess *s) {
 
 /* 一个 slice 传输完了 —— 判断现在能不能把 AU 交出去。
  *
- * marker 未必等于「一帧结束」（见 AU_JOIN_MS 的注释），FU-A 的 end 也一样：
+ * marker 未必等于「一帧结束」（见文件开头「切片区」大注释），FU-A 的 end 也一样：
  * 一个大切片被拆成多个 RTP 包，end 只说明**这个切片**拼完了，不说明整帧
  * 拼完了。旧代码在 FU-A end 上无条件 flush_frame，于是多 slice 帧每送完
  * 一个切片就吐出一个残缺 AU —— 比 marker 那条路径还早出错。
