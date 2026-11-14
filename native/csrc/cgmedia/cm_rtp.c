@@ -725,6 +725,7 @@ static void rtp_reset_all(void) {
     /* 换局时把「切片拼接」统计也清零：它是给用户看「这一局到底修好了没有」
      * 的判据，跨局累加就没有意义了。 */
     g_rtp.au_joined = 0;
+    g_rtp.au_hold_released = 0;
     cm_buf_reset(&g_rtp.sps);
     cm_buf_reset(&g_rtp.pps);
     cm_buf_reset(&g_rtp.au_out);
