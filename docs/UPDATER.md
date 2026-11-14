@@ -163,6 +163,19 @@ PenBili 在 `updater.js` 里自己定义 `APP_VERSION`；PenCG 已经有唯一�
 运行时行为（`fetchLatestRelease` / `downloadFileToDisk` / `installAmr`）需要
 真机验证，不属于这个单测的范围。
 
+### 4.6 真机验证记录（X6 Pro，2026-11-15）
+
+| 环节 | 结论 | 证据 |
+| --- | --- | --- |
+| 自动检查 | 通过 | 1.2.3 干净包启动后日志 `[cg] upd auto suppressed (skip=- quiet=- remote=v1.2.3)` —— GitCode API 请求、`normalizeRelease`、版本比较全部跑通，并正确判定「已是最新」而不弹窗 |
+| 弹窗渲染 | 通过 | 把 `version.js` 临时改成 1.2.2 后装机，自动弹出对话框：标题「发现新版本 v1.2.3」、徽标 `v1.2.3`、`325 KB`、副标题「新版本 v1.2.3 · 当前 v1.2.2」，正文多行未被裁切 |
+| 双源按钮文案 | 通过 | 两个下载按钮的括号里是**当前命中的源名**（GitCode / GitHub），不是写死的 |
+| 整页替换 | 通过 | 弹窗出现时首页整体不渲染，没有叠层（本运行时禁用 position:absolute/z-index，靠 `v-if` 换页） |
+| 下载 + 安装 | **未验证** | 没点过下载按钮；`installAmr` 在本仓库恒返回 `NO_INSTALLER`，按钮文案已降级为「下载安装包」 |
+
+自动检查失败或断网时的表现（回落 GitHub、再回落镜像）也只有单测覆盖，
+真机上没制造过断网场景。
+
 ### 6.1 版本号
 
 三处必须一致：
