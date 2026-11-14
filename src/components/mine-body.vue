@@ -1115,15 +1115,26 @@ export default {
   color: @text-color-dim;
 }
 
+/* 设置与工具卡片：每行 3 张、共两行。
+ *
+ * 历史：卡片原来是 5 张、`flex-basis: 0%` 平分一行，每张约 166px 宽。
+ * 加了「检查更新」变 6 张之后仍然平分一行，每张掉到约 137px —— 在
+ * 960x266 的屏上标题（如「关于 PenCG」）已经贴边。改成固定宽度 + 换行，
+ * 一行 3 张、每张约 300px，两行共 88px 高，仍在 scroller 里滚动。
+ *
+ * 注意：本运行时对 flex-wrap 支持正常（首页 .grid、搜索页都在用），
+ * 但**不支持 position:absolute / z-index**，所以绝不能用浮层来做排列。 */
 .mb-fx-row {
   flex-direction: row;
+  flex-wrap: wrap;
   margin-top: 0.7519vh;
 }
 
 .mb-fcard {
-  flex-grow: 1;
-  flex-shrink: 1;
-  flex-basis: 0%;
+  flex-grow: 0;
+  flex-shrink: 0;
+  flex-basis: auto;
+  width: 31.25vw;
   height: 16.5414vh;
   border-radius: 1.0417vw;
   background-color: @card-background-color;
@@ -1131,6 +1142,7 @@ export default {
   justify-content: center;
   padding-left: 1.0417vw;
   margin-right: 0.625vw;
+  margin-bottom: 1.1279vh;
 }
 
 .mb-fname {
@@ -1142,7 +1154,7 @@ export default {
   font-size: 1.0417vw;
   color: @text-color-dim;
   margin-top: 1.1279vh;
-  max-width: 12.5vw;
+  max-width: 28.125vw;
 }
 
 .mb-foot {
