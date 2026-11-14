@@ -160,6 +160,10 @@ static void emit_stat(cm_sess *s) {
             "\"reorder\":%llu,\"spsInject\":%llu,\"rtcpIn\":%llu,\"rrSent\":%llu,"
             "\"nackSent\":%llu,\"nackReq\":%llu,\"nackRecovered\":%llu,"
             "\"relax\":%llu,\"staleRtx\":%llu,\"pDrop\":%llu,"
+            /* join = 「一个残缺的切片组被接回同一帧」的次数（cm_rtp.c 的
+             * au_joined）。终末地修复的判据：这个数持续增长说明 AU 边界
+             * 确实被接回来了；恒为 0 说明这一局压根没有多 slice 帧。 */
+            "\"join\":%llu,"
             /* shown = 真正送进 kmssink 的帧数（sink pad 探针）。
              * 判「画面在不在动」只能看它：pushed/fps 只代表交给了 appsrc，
              * 而 appsrc 是 leaky 的，队列满就默默丢帧，会把下游停摆掩盖掉。
@@ -212,6 +216,7 @@ static void emit_stat(cm_sess *s) {
              * pDrop 是「有关键帧、只丢拼不全的某一帧」—— 后者增长但 fps
              * 仍稳定，就是弱网下我们要的健康态。 */
             (unsigned long long)s->stats.vid_p_drop,
+            (unsigned long long)cm_rtp_au_joined(),
             (unsigned long long)cm_box_shown(s->vbox));
     /* 每 10 秒打一次 PT 直方图（只打非零项），用来确认音频到底有没有到。 */
     {
@@ -234,9 +239,10 @@ static void emit_stat(cm_sess *s) {
              *   两个都不动        → 根本没数据到，问题在上游/网关
              * 把这行留在生产日志里，是因为「有声音没画面」这类报障只能靠它定位，
              * 而 cm_emit 的 stat JSON 不进日志文件。 */
-            CM_LOGI("#%d video sink pushed=%llu shown=%llu%s", s->id,
+            CM_LOGI("#%d video sink pushed=%llu shown=%llu join=%llu%s", s->id,
                     (unsigned long long)cm_box_pushed(s->vbox),
                     (unsigned long long)cm_box_shown(s->vbox),
+                    (unsigned long long)cm_rtp_au_joined(),
                     (s->vbox && cm_box_pushed(s->vbox) > cm_box_shown(s->vbox) + 60)
                         ? " (DOWNSTREAM STALLED)" : "");
         }
@@ -382,6 +388,10 @@ void cm_media_loop(cm_sess *s) {
          * 等重传补齐，到期必须有人把它放出来，否则画面停在这一帧。
          * 20ms 粒度足够（hold 窗口是几十 ms 量级）。 */
         cm_rtp_flush_held(s);
+        /* 多 slice AU 的兜底放行（见 cm_rtp.c 里 AU_JOIN_MS 的大注释）：
+         * marker 之后我们先压住，等下一帧的第一个 slice 到来才算确认帧边界。
+         * 码流一停就没人放行，这里到期放出去。 */
+        cm_rtp_au_join_tick(s);
         /* 取证开关 noRtcp=1 时三种上行 RTCP 全部不发明文/密文，用来二分
          * 「网关是否因为我们的 PLI/NACK/RR 而停推」。正常路径恒为 0。 */
         if (!s->cfg.no_rtcp) cm_kf_tick(s);

@@ -443,6 +443,15 @@ int  cm_rtp_take_nack_gaps(cm_sess *s, unsigned char *out, int cap_entries);
  * 所以对 IDR 单独压住 IDR_HOLD_MS 再放行。P 帧不压（压了纯属加延迟）。 */
 void cm_rtp_flush_held(cm_sess *s);
 
+/* 多 slice AU 的兜底放行（见 cm_rtp.c 里 AU_JOIN_MS 的大注释）。
+ *
+ * marker 只在「下一帧第一个 slice」到来时才被确认是帧边界，因此码流一旦
+ * 停下（比如网关静默停推），最后那个被压住的 AU 就再也没人放出来。
+ * cm_media.c 的主循环每轮调一次，到期就放行。 */
+void cm_rtp_au_join_tick(cm_sess *s);
+/* 本局「接回了多少个切片组」的计数，进 stat JSON 给前端看。 */
+uint64_t cm_rtp_au_joined(void);
+
 /* cm_cmd.c */
 int  cm_cmd_apply(cm_sess *s, const char *op, const char *json);
 void cm_send_pli(cm_sess *s);

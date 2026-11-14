@@ -118,6 +118,46 @@
  * 只对 IDR 生效：P 帧压 30ms 就是纯延迟，丢一帧才 33ms，不值。 */
 #define IDR_HOLD_MS 30
 
+/* ---------- 切片区：AU 边界的真正判据（终末地全黑根因修复） ----------
+ *
+ * ★ 问题（2026-11-14 真机 + 离线码流对照，已定案）★
+ * 有的编码器会把一帧切成多个 slice（H.264 的 slice，不是 RTP 分片）。
+ * 明日方舟终末地就是每帧 8 个 slice（first_mb = 0/480/880/1360/1840/2240/
+ * 2720/3120，1280 宽 = 320 宏块一行，每 slice 480 宏块 = 3 行）。
+ *
+ * 更糟的是：网关打 RTP marker 的位置**不是「一帧结束」，而是「一个切片组
+ * 结束」** —— 实测它每 2~3 个 slice 就插一组 SPS/PPS 并在那里打 marker。
+ * 于是我们旧代码的 `if (marker) flush_frame(s)` 把**一个完整的 15358 字节
+ * IDR 拆成了 4 个 AU**推给解码器：
+ *    AU#1 = 5409B（只含 first_mb 0/480/880/1360 → 覆盖约 53% 的宏块）
+ *    AU#2 = 3742B（first_mb 1840）  AU#3 = 2969B（first_mb 2240）
+ *    AU#4 = 3238B（first_mb 2720/3120）
+ * mppvideodec 拿到只覆盖一半宏块的 IDR → 解码越界 → RK3562 VPU 报
+ * `irq_status 0x001123` 并被内核强制复位（`mpp_rkvdec2 resetting...`）。
+ * 复位丢掉全部参考帧，而终末地一局只给 1 个 IDR、网关又从不响应 NACK
+ * 重传 ⇒ 永远等不到新的完整 IDR ⇒ 用户看到「声音正常、画面全黑/冻住」。
+ * 对照组：健康局（原神/明日方舟等）的 IDR 是单 slice 44KB 整帧，
+ * marker 就是帧边界，所以从来没出过这个问题。
+ *
+ * ★ 修复 ★
+ * 不再无条件相信 marker，改用 H.264 自己的图像边界：**一个 slice 的
+ * first_mb_in_slice == 0 才是「新图像开始」**。
+ *   - first_mb == 0 且当前 AU 已在攒 slice → 先把旧的放出去，再开始新的；
+ *   - marker 到了但 first_mb != 0（后面很可能还有同一帧的 slice）→ 先压住
+ *     不放，等下一个 first_mb==0 的 slice 或超时再放。
+ *
+ * 为什么要超时兜底：万一同一帧的后续 slice 在网络上被拉开了间隔（或者
+ * 干脆丢了），一直压着就等于永久不显画面。窗口取得很短，所以即使超时
+ * 触发，代价也只是「和修复前一样」，不会更差。
+ *
+ * AU_JOIN_MS 取 12ms：同一帧的 slice 是背靠背发的，实测间隔 <2ms；12ms
+ * 远大于它，又远小于一帧间隔（20~30fps 是 33~50ms），所以正常路径下
+ * 下一帧第一个 slice 会先到、走的是「精确边界」而不是超时。
+ * IDR_JOIN_MS 取 40ms：IDR 被切碎的代价是整局全黑，值得多等一点；
+ * 而 IDR 出现频率低（终末地一局一个），这点延迟用户感知不到。 */
+#define AU_JOIN_MS  12
+#define IDR_JOIN_MS 40
+
 /* 当前 AU 的分片索引容量：一个 720p IDR 约 30~60 个包，1080p 大 IDR 可到
  * 数百。512 足够，超了就停止记录（退化成「不能填洞」，不影响正确性）。 */
 #define AU_SEG_MAX 512
@@ -206,6 +246,28 @@ typedef struct {
     /* IDR 的 hold 窗口：marker 到了但还在等重传时的放行时刻。
      * 0 = 没有挂起的 AU。见 IDR_HOLD_MS 的注释。 */
     uint64_t au_hold_until_ms;
+
+    /* ---------- 切片区：真正的 AU 边界（见 AU_JOIN_MS 的大注释） ----------
+     *
+     * au_slices：当前 AU 已经攒了几个 slice。
+     * au_last_first_mb：最后一个 slice 的 first_mb_in_slice。
+     * au_multislice：这个 AU 是多 slice 帧（>1 个 slice）。只用来打日志
+     *   和统计，判据不依赖它。
+     * au_marker_pending：收到了 marker，但最后那个 slice 的 first_mb != 0，
+     *   说明这多半只是「一个切片组」而不是「一帧结束」，先压着不放。
+     * au_marker_until：压到什么时候必须放（超时兜底）。
+     * au_joined：因为「first_mb!=0 的 slice 接在 marker 之后」而把两段
+     *   拼回一帧的次数 —— 这是修复是否真的在起作用的直接证据。 */
+    int      au_slices;
+    int      au_last_first_mb;
+    int      au_multislice;
+    int      au_marker_pending;
+    uint64_t au_marker_until;
+    uint64_t au_joined;
+    /* au_slice_unknown：本 AU 里有 slice 的 first_mb 解析失败（数据太短、
+     * 编码器用了我们没有预期的结构）。一旦置位就整帧退回「只看 marker」
+     * 的旧行为 —— 解析不出来时宁可行为跟以前一样，也不能把画面卡住。 */
+    int      au_slice_unknown;
 
     /* ---------- 待重传缺口表（收包侧写、发送侧读）----------
      * 每个条目 = 一个我们没收到、希望网关重发的 seq。带优先级和重发轮数，
@@ -369,7 +431,142 @@ static int sps_parse_size(const unsigned char *nal, int n, int *out_w, int *out_
     return 0;
 }
 
+/* 解析 slice NAL（type 1 / 5）的 first_mb_in_slice 与 slice_type。
+ *
+ * 返回 0 成功，-1 失败（数据太短/不是 slice）。失败时调用方必须退回
+ * 「只看 marker」的旧行为，绝不能让解析失败把画面卡住。
+ *
+ * 只解前 3 个 ue(v) 字段（first_mb_in_slice / slice_type /
+ * pic_parameter_set_id），后面的 slice 头字段依赖 PPS，不需要。
+ * 32 字节足够容纳这三个字段（first_mb 最大 8191 时也就 2 字节）。 */
+static int slice_parse(const unsigned char *nal, int n, int *out_first_mb,
+                       int *out_slice_type) {
+    unsigned char rbsp[64];
+    bitr b;
+    unsigned int first_mb, slice_type;
+    int tn;
+
+    if (!nal || n < 2) return -1;
+    tn = nal[0] & 0x1F;
+    if (tn != 1 && tn != 5) return -1;
+    /* 剥掉 1 字节 NAL 头再反转义 —— 忘了这一步 first_mb 会恒等于 1/2，
+     * 这是离线分析时踩过的坑（.tmp/vpu/slice.py 第一版就是这个 bug）。 */
+    n = unescape_rbsp(nal + 1, n - 1, rbsp, (int)sizeof(rbsp));
+    if (n < 2) return -1;
+    b.p = rbsp; b.bits = n * 8; b.pos = 0; b.err = 0;
+    first_mb = br_ue(&b);
+    slice_type = br_ue(&b);
+    if (b.err) return -1;
+    if (first_mb > 8191 || slice_type > 9) return -1;
+    if (out_first_mb) *out_first_mb = (int)first_mb;
+    if (out_slice_type) *out_slice_type = (int)slice_type;
+    return 0;
+}
+
 /* ==================== 帧拼装 ==================== */
+
+/* 前向声明：切片区（下面这几个函数）要用到它们，但它们的定义在文件后半段。 */
+static void rtp_reset_au(void);
+static void flush_frame(cm_sess *s);
+
+/* 把一个 slice 登记进当前 AU，并判断它是不是「新图像的第一个 slice」。
+ *
+ * 返回 1 = 这是一个新图像的开头，调用方必须先把正在攒的 AU 放出去
+ *          （否则两帧会被拼成一个 AU）。
+ * 返回 0 = 同一帧的后续 slice，继续攒。
+ *
+ * ★ 这是本次修复的核心判据。H.264 规定 first_mb_in_slice == 0 的 slice
+ * 一定是图像的起始 slice，所以它比 RTP marker **可靠得多** —— 网关可以在
+ * 一个切片组后面就打 marker，但不能把一个图像的 first_mb 编错。 */
+static int note_slice(int parsed, int first_mb) {
+    if (!parsed) {
+        /* 解析失败：这个 AU 里出现了我们看不懂的 slice。整帧退回旧行为
+         * （只看 marker），宁可和以前一样，也不能把画面卡住。 */
+        g_rtp.au_slice_unknown = 1;
+        return 0;
+    }
+    if (first_mb == 0 && g_rtp.au_slices > 0) {
+        /* 新图像开始。注意 au_slices 在这次调用里还没自增，所以 >0
+         * 就说明「当前 AU 里已经攒了上一帧的 slice」。 */
+        return 1;
+    }
+    g_rtp.au_last_first_mb = first_mb;
+    g_rtp.au_slices++;
+    if (g_rtp.au_slices > 1) g_rtp.au_multislice = 1;
+    return 0;
+}
+
+/* AU 边界放行：先把正在攒的 AU 交出去，再让新图像从干净状态开始。
+ *
+ * 为什么不直接调 flush_frame：它可能因为「IDR 还在等 NACK 重传」而挂起
+ * （IDR hold），挂起时**刻意不复位 AU 状态**（要留着等补洞）。此时若把
+ * 新图像的 slice 直接追加进去，就会把两帧拼成一个畸形 AU 送进解码器 ——
+ * 比丢帧糟糕得多。所以照 FU-A 分支的做法，挂起就强制放行一次。 */
+static void au_flush_boundary(cm_sess *s) {
+    if (!g_rtp.have_data) { rtp_reset_au(); return; }
+    flush_frame(s);
+    if (g_rtp.au_hold_state == 1) {
+        g_rtp.au_hold_state = 2;   /* 已到期：flush_frame 不再重复挂起 */
+        g_rtp.au_hold_until_ms = 0;
+        CM_LOGD("#%d boundary arrived during IDR hold, releasing held AU", s->id);
+        flush_frame(s);
+    }
+}
+
+/* marker 到了 —— 但 marker 未必等于「一帧结束」（见 AU_JOIN_MS 的注释）。
+ *
+ * 单 slice 帧（原神/明日方舟等）marker 就是帧边界，直接放行，零额外延迟。
+ * 多 slice 帧（终末地）marker 可能只结束了一个切片组，先压住，等下一个
+ * first_mb==0 的 slice 到来（那时 note_slice 会返回 1，由 au_flush_boundary
+ * 放出去），或者等超时兜底。
+ *
+ * 超时取 150ms 而不是几十毫秒：正常多 slice 帧靠「下一帧的第一个 slice」
+ * 就能放行，超时只在「码流真的停了」时才用得上；而如果超时太短，一旦某个
+ * slice 稍微晚到就会把**残缺的 IDR** 放给解码器 —— 那正是 VPU 复位的原因。
+ * 宁可画面晚 150ms，也不能再送残缺关键帧。 */
+#define AU_HOLD_MAX_MS 150
+
+static void au_on_marker(cm_sess *s) {
+    uint64_t now = cm_now_ms();
+    if (g_rtp.au_slice_unknown || g_rtp.au_slices <= 1 || !g_rtp.au_multislice) {
+        /* 单 slice 帧，或解析失败：marker 就是帧边界（与修复前完全一致）。 */
+        flush_frame(s);
+        return;
+    }
+    if (!g_rtp.au_marker_pending) {
+        g_rtp.au_marker_pending = 1;
+        g_rtp.au_marker_until = now + AU_HOLD_MAX_MS;
+        /* 每次压住都是一个「切片组被接回同一帧」的机会，计个数。真机上看
+         * 这个数涨没涨，就知道修复到底在不在干活。 */
+        g_rtp.au_joined++;
+    } else {
+        /* 同一个 AU 里又来一个 marker（切片组之间的边界）：续期即可，
+         * 不要重复计数。 */
+        g_rtp.au_marker_until = now + AU_HOLD_MAX_MS;
+    }
+}
+
+/* 供 stat JSON 读「这一局接回了多少个切片组」（cm_media.c 的 emit_stat）。 */
+uint64_t cm_rtp_au_joined(void) {
+    return g_rtp.au_joined;
+}
+
+/* 多 slice AU 的兜底放行。cm_media.c 的主循环每轮调一次。 */
+void cm_rtp_au_join_tick(cm_sess *s) {
+    if (!s) return;
+    pthread_mutex_lock(&g_rtp_mu);
+    if (g_rtp.au_marker_pending && g_rtp.au_marker_until &&
+        (int64_t)(cm_now_ms() - g_rtp.au_marker_until) >= 0) {
+        g_rtp.au_marker_pending = 0;
+        g_rtp.au_marker_until = 0;
+        CM_LOGD("#%d multislice AU held %.0fms without a new picture, flushing "
+                "(%d slices, last fm=%d)", s->id, (double)AU_HOLD_MAX_MS,
+                g_rtp.au_slices, g_rtp.au_last_first_mb);
+        flush_frame(s);
+    }
+    pthread_mutex_unlock(&g_rtp_mu);
+}
+
 
 static int annexb_put(cm_buf *b, const unsigned char *nal, int n) {
     static const unsigned char sc[4] = {0, 0, 0, 1};
@@ -413,6 +610,13 @@ static void rtp_reset_au(void) {
     g_rtp.au_missing = 0;
     g_rtp.au_hold_state = 0;
     g_rtp.au_hold_until_ms = 0;
+    /* 切片区状态随 AU 一起清（au_joined 是全局累计计数，刻意不清）。 */
+    g_rtp.au_slices = 0;
+    g_rtp.au_last_first_mb = 0;
+    g_rtp.au_multislice = 0;
+    g_rtp.au_marker_pending = 0;
+    g_rtp.au_marker_until = 0;
+    g_rtp.au_slice_unknown = 0;
 }
 
 /* 整会话复位。g_rtp 是进程级单例，而 cgmedia 一次只跑一路云游戏：
@@ -428,6 +632,9 @@ static void rtp_reset_all(void) {
     g_rtp.gap_n = 0;
     g_rtp.au_hold_state = 0;
     g_rtp.au_hold_until_ms = 0;
+    /* 换局时把「切片拼接」统计也清零：它是给用户看「这一局到底修好了没有」
+     * 的判据，跨局累加就没有意义了。 */
+    g_rtp.au_joined = 0;
     cm_buf_reset(&g_rtp.sps);
     cm_buf_reset(&g_rtp.pps);
     cm_buf_reset(&g_rtp.au_out);
@@ -1236,7 +1443,17 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
                 }
             }
             if (t == 7 || t == 8) cache_param_set(p + o, sz);
-            if (t == 1 || t == 5) g_rtp.au_has_slice = 1;
+            if (t == 1 || t == 5) {
+                int fm = 0, st = 0;
+                int ok = (slice_parse(p + o, sz, &fm, &st) == 0);
+                /* ★ 多 slice 修复：STAP-A 里如果出现「新图像的第一个 slice」，
+                 * 先把正在攒的 AU 放出去，避免两帧拼成一个 AU。 */
+                if (note_slice(ok, fm)) {
+                    au_flush_boundary(s);
+                    note_slice(ok, fm);   /* 复位后重新登记 */
+                }
+                g_rtp.au_has_slice = 1;
+            }
             if (t == 5) g_rtp.au_has_idr = 1;
             {
                 uint32_t off = (uint32_t)g_rtp.frame.len;
@@ -1255,7 +1472,7 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
          * 刷新 last_kf_ms，cm_kf_tick 就以为「关键帧还新鲜」而不补 PLI，
          * 丢掉的 IDR 永远等不回来 —— 这正是「马赛克残留会一直持续」而不是
          * 「闪一帧就过」的原因。现在关键帧只由 au_has_idr（NAL type 5）决定。 */
-        if (marker) flush_frame(s);
+        if (marker) au_on_marker(s);
         return;
     }
 
@@ -1356,7 +1573,9 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
         }
         if (end) {
             g_rtp.in_fu = 0;
-            flush_frame(s);
+            /* ★ 多 slice 修复：FU-A 承载的也可能是多 slice 帧里的一个 slice，
+             * marker 同样不必等于帧边界。交给 au_on_marker 统一判。 */
+            if (marker) au_on_marker(s); else flush_frame(s);
         }
         return;
     }
@@ -1373,21 +1592,43 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
         }
     }
     if (nal_type == 7 || nal_type == 8) cache_param_set(p, n);
-    if (nal_type == 1 || nal_type == 5) g_rtp.au_has_slice = 1;
+    /* ★ 多 slice 修复：新图像的第一个 slice 到了 → 先把上一帧放出去。
+     * 这一步必须在 annexb_put 之前做，否则新 slice 的字节会被拼进上一帧。 */
+    if (nal_type == 1 || nal_type == 5) {
+        int fm = 0, st = 0;
+        int ok = (slice_parse(p, n, &fm, &st) == 0);
+        if (note_slice(ok, fm)) {
+            au_flush_boundary(s);
+            note_slice(ok, fm);   /* 复位后重新登记这个 slice */
+        }
+        g_rtp.au_has_slice = 1;
+    }
     if (nal_type == 5) g_rtp.au_has_idr = 1;
 
     /* 单 NAL（含 SPS=7 / PPS=8 / 普通切片 1、5） */
     {
         uint32_t off = (uint32_t)g_rtp.frame.len;
-        if (annexb_put(&g_rtp.frame, p, n) == 0)
+        /* ★ 多 slice 修复附带：AU 中途重复出现的参数集不再拼进 frame。
+         * 终末地每 2~3 个 slice 就重发一组 SPS/PPS，把它们原样塞进 AU 中间
+         * 会让解码器在解一帧的中途重新初始化（正是 VPU 复位的一个诱因）。
+         * 参数集本身已经 cache_param_set 过，帧首需要时 flush_frame 会补插。
+         * au_slices==0 时（帧首那组）照常写入。 */
+        int skip = ((nal_type == 7 || nal_type == 8) && g_rtp.au_slices > 0 &&
+                    g_rtp.frame.len > 0);
+        if (skip) {
+            CM_LOGD("#%d drop mid-AU parameter set (type %d, %d bytes)",
+                    s->id, nal_type, n);
+        } else if (annexb_put(&g_rtp.frame, p, n) == 0) {
             au_seg_add(seq, off, 4u + (uint32_t)n);
+        }
     }
     if (nal_type == 5 || nal_type == 7 || nal_type == 8) {
         if (!g_rtp.au_start_ms) g_rtp.au_start_ms = cm_now_ms();
         gap_upgrade_since(g_rtp.au_start_ms);
     }
     g_rtp.have_data = 1;
-    if (marker) flush_frame(s); /* flush_frame 自己按 au_has_idr 判关键帧 */
+    /* marker 未必等于帧边界（网关按切片组打 marker），交给 au_on_marker 判。 */
+    if (marker) au_on_marker(s);
 }
 
 /* ---------------- 对外入口 ---------------- */
