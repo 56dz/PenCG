@@ -239,11 +239,27 @@ D=marker 全丢），并与 `first_mb==0` 切出的 ground truth 比对：
    `au_has_slice=1`，从不解析 slice 头，导致多 slice 流走 FU-A 时修复完全失效。
    现在用 start 包正文前 32 字节解出 `first_mb`（切片头在 NAL 最前面，
    不必等整片拼完）。
-6. **AU 中途的重复 SPS/PPS 不再拼进 frame**：网关在一帧中间反复插入参数集
-   （实测 6 次），旧代码把它们原样 `annexb_put` 进 `g_rtp.frame`。
-   现在 `cache_param_set()` 只负责缓存，中途的重复参数集丢弃
-   （`drop mid-AU parameter set`），帧首由 `flush_frame()` 的注入逻辑补一次。
-7. **兜底**：`slice_parse()` 失败（数据太短 / 结构意外）时置
+6. **`cache_param_set()` 不再置 `au_has_sps` / `au_has_pps`**：这两个标志原本在
+   「看见参数集」时就置位，导致 `flush_frame()` 的补插判据
+   `need_sps = !au_has_sps && sps_ok` 永远不成立，**裸 IDR 直接被推给解码器**。
+   现在由真正 `annexb_put` 进 frame 的地方（单 NAL 与 STAP-A 各一处）置位，
+   缓存与「本帧已带」彻底解耦。
+
+   > 途中试过「把帧中间的重复 SPS/PPS 丢弃、只 cache」，**已撤回**（commit
+   > `57a0d2b`）。理由：整份含 6 组重复参数集的 `au_fail.h264` 用 ffmpeg 解码
+   > 零错误，说明重复参数集本身不是复位原因；而判据 `au_slices > 0` 在单 slice
+   > 流里无法区分「帧中重复」和「新帧开头」，误判会把新 IDR 自己的参数集丢掉。
+7. **头部宏块缺失的 AU 整帧丢弃（乱序安全）**：`note_slice()` 维护
+   `au_min_first_mb`（本 AU 见过的最小 `first_mb`），`flush_frame()` 里判
+   `au_slices > 0 && au_min_first_mb != 0` —— 一帧完整图像必定从 `first_mb==0`
+   开始覆盖宏块，见不到 0 就说明我们**从一帧的中间才开始收**（刚建连、刚从坏
+   AU reset、或前面几个 slice 全丢了）。这种 AU 前半部宏块永远补不回来（那些
+   seq 根本没登记进 gap 表，NACK 也要不回来），所以置 `au_broken=1` 且
+   `au_broken_fixable=0`（不能被「NACK 补洞成功」那个分支清掉），整帧丢弃并补
+   PLI 要一个干净 IDR。
+   判据用「最小值」而不是「先到的那个 slice」，是为了对**乱序**不敏感 ——
+   先到的可能是 fm=1840，`fm=0` 一到就把最小值拉回 0，不会误判。
+8. **兜底**：`slice_parse()` 失败（数据太短 / 结构意外）时置
    `au_slice_unknown`，整帧退回「只看 marker」的旧行为 —— 宁可跟以前一样，
    也不能把画面卡住。
 
@@ -251,6 +267,21 @@ D=marker 全丢），并与 `first_mb==0` 切出的 ground truth 比对：
 - 每 10 秒心跳日志 `video sink pushed=N shown=M join=K`，
   **`join` 增长 = 修复真的在起作用**（被 marker 切碎的帧被接回）；
 - `stat` JSON 增 `"join"` 字段；换局时 `join` 清零（`rtp_reset_all()`）。
+
+### 5.3.1 离线验证（设备离线期间完成，脚本都在 `.tmp/vpu/`）
+
+| 脚本 | 验证什么 | 结果 |
+|---|---|---|
+| `verify_fix.py` | 两种切帧规则对真实码流的 AU 结构 | 终末地 OLD 6 个 AU / 首个 IDR 5409B → NEW 246 个 AU / 首个 15256B；健康局 OLD 1 个 AU → NEW 300 个 AU，无劣化 |
+| `emit_aus.py` | 按 AU 边界切好后重新拼 h264 交给 ffmpeg | 两种规则 stderr 均为空，帧数 250 / 246 ⇒ 字节流合法，问题只在「AU 边界与真实图像边界不符」 |
+| `sim_state.py` | python 复刻 C 的 AU 状态机，4 种 marker 策略 | 终末地 246 / 健康局 300，全部与 ground truth 一致；修复前策略「每个 slice 都打 marker」会切出 1981 个 AU |
+| `sim_fua.py` | FU-A 分片路径（MTU=1000 切包） | 终末地 246、健康局 300，两种 marker 策略都对；证明 start 包前 32 字节足以解出 `first_mb` |
+| `sim_join.py` | 头部缺失判据的 5 个场景 | 完整帧保留 / 中途加入丢弃 / 单 slice 不误伤 / 多 slice 不误伤 / 乱序只丢 1 帧且不级联 |
+
+> 写模拟脚本时踩过两次「模型与 C 不一致」的坑，两次都得出过假结论：
+> ①模型里保留了 C 已经删掉的「单 slice 快速路径」；②模型里 `note_slice` 的
+> 判定顺序与 C 不同（C 先判「新图像开始」并 return，再记录最小 `first_mb`）。
+> **改动 C 之后必须同步模型，否则模拟什么也证明不了。**
 
 ### 5.4 与上屏看门狗（§三）的关系
 
