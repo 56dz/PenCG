@@ -2706,6 +2706,8 @@ export default {
  * 25.4167 = 100vw 在任何画布宽度下都严丝合缝；挖孔用的绝对值仍只由 JS 那份
  * VIDEO 常量提供，CSS 不参与 KMS 坐标计算。 */
 .stage {
+  /* 中栏宽度 = 473/960。这里用 vw 而不是 px，是为了让容器缩放时左右两栏
+     与挖孔始终严丝合缝（三者相加恰好 100vw）。 */
   width: 49.2709vw;
   height: 100vh;
   flex-direction: column;

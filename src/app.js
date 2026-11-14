@@ -3,6 +3,7 @@ import { stopPlay, mediaState, currentGameCode, inputBusy } from './services/med
 import { stopGame } from './services/session.js';
 import { getScreenState, screenStateName, isScreenNotOn } from './services/screen.js';
 import { bootProfile, FALLBACK_WIDTH, FALLBACK_HEIGHT } from './services/device_profile.js';
+import { DEV_DESIGN_WIDTH } from './dev-autostart.js';
 
 // 逻辑画布宽度来自设备 profile（真机截屏 + cfg.json 证实）：
 //   有道 X6 Pro ：Falcon UI 合成面横向条带 960x266，物理面板 480x960（direction=270）
@@ -32,6 +33,13 @@ class App extends $falcon.App {
 
   onLaunch(options) {
     super.onLaunch(options);
+    /* 屏幕适配验收开关：0 = 关闭（量产恒为 0，见 dev-autostart.js）。
+     * 必须在 bootProfile() 之前写，因为它读的就是 custom 通道。 */
+    if (DEV_DESIGN_WIDTH > 0) {
+      try {
+        $falcon.env.custom.$set('pencgDesignWidth', DEV_DESIGN_WIDTH);
+      } catch (e) {}
+    }
     try {
       BOOT = bootProfile();
       DESIGN_WIDTH = BOOT.cfg.width > 0 ? BOOT.cfg.width : FALLBACK_WIDTH;

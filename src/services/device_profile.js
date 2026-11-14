@@ -276,13 +276,38 @@ export function canvasGeom() {
   };
 }
 
+/* 云游戏出的是 16:9（真机 SPS 恒为 1280x720）。
+ *
+ * 挖孔必须保持 16:9，否则 kmssink 会把画面拉伸 —— 管线里
+ * force-aspect-ratio=false（要铺满矩形、不要黑边），所以「矩形不是 16:9」
+ * 就直接等于「画面变形」，而不是出现黑边。
+ *
+ * X6 Pro 上中栏 473x266 恰好就是 16:9（473/266 = 1.778），因此下面的
+ * 适配在它身上算出来与历史值逐像素相同，等于没有变化。 */
+const VIDEO_ASPECT = 16 / 9;
+
 /* 视频挖孔矩形（画布坐标系，单位=设计像素）。
- * y 恒为 0、h 恒为画布高度：三栏都是满高的，只有横向分栏。 */
+ *
+ * 横向：按三栏比例取中栏，必须与 .p2-left 的 25.3125vw 严丝合缝，
+ *       所以宽度优先服从布局，不为了凑 16:9 去动它。
+ * 纵向：在中栏高度内按 16:9 反算高度并垂直居中 —— 画布变高时视频不变形，
+ *       上下留出的空隙由 .stage 的透明背景让页面底色透出来，视觉上就是
+ *       常规的上下留白，不会露出「挖孔没对齐」的错位。 */
 export function stageVideoRect() {
   const g = canvasGeom();
   const x = Math.round(g.width * STAGE_LEFT_RATIO);
   const w = Math.round(g.width * STAGE_VIDEO_RATIO);
-  return { x: x, y: 0, w: w, h: g.height };
+  let h = Math.round(w / VIDEO_ASPECT);
+  let y = 0;
+  if (h > g.height) {
+    /* 画布比 16:9 更扁（例如有人把宽度调得很大）：改成按高度定，横向居中。
+     * X6 Pro 不会走到这里（473/266 正好 16:9，h == height）。 */
+    h = g.height;
+    y = 0;
+  } else {
+    y = Math.round((g.height - h) / 2);
+  }
+  return { x: x, y: y, w: w, h: h };
 }
 
 /* 启动期一次性算好的 profile。app.js 只读 cfg.width。 */

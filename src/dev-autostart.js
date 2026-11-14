@@ -80,3 +80,15 @@ export const DEV_CHROME_FP = false;
  *
  * ★ 取证结束必须改回 false。★ */
 export const DEV_AUTOTAP = false;
+
+/* ★ 仅取证用（屏幕适配测试专用）★
+ *
+ * 在 onLaunch 里、bootProfile() 之前把画布宽度强制覆盖成这个值，
+ * 用来在**同一台 X6 Pro 上**模拟另一块屏（例如 936 宽的 X7 Pro、720 宽的窄屏），
+ * 看布局会不会溢出/错位。0 = 关闭（正常探测）。
+ *
+ * 走的是 device_profile 已有的 custom 通道（$falcon.env.custom.pencgDesignWidth），
+ * 所以和手动在真机上 $set 的效果完全一致，只是省得重新打包。
+ *
+ * ★ 取证/验收结束必须改回 0。★ */
+export const DEV_DESIGN_WIDTH = 0;
