@@ -157,7 +157,7 @@ static int marker_for(int policy, int i) {
     }
 }
 
-static void feed(cm_sess *s, int policy, int mtu) {
+static void feed(cm_sess *s, int policy, int mtu, int drop_every) {
     int i;
     uint16_t seq = 1000;
     unsigned char pkt[2048];
@@ -173,7 +173,8 @@ static void feed(cm_sess *s, int policy, int mtu) {
             pkt[2] = (unsigned char)(seq >> 8); pkt[3] = (unsigned char)seq;
             memset(pkt + 4, 0, 8);
             memcpy(pkt + 12, nal, (size_t)nn);
-            cm_rtp_on_packet(s, pkt, nn + 12, "127.0.0.1", 5000);
+            if (!(drop_every > 0 && (seq % (uint16_t)drop_every) == 0))
+                cm_rtp_on_packet(s, pkt, nn + 12, "127.0.0.1", 5000);
             seq++;
         } else {
             /* FU-A 分片：marker 只打在最后一个分片上 */
@@ -190,7 +191,8 @@ static void feed(cm_sess *s, int policy, int mtu) {
                 pkt[12] = (unsigned char)((nal[0] & 0xE0) | 28);
                 pkt[13] = (unsigned char)((first ? 0x80 : 0) | (last ? 0x40 : 0) | t);
                 memcpy(pkt + 14, nal + off, (size_t)chunk);
-                cm_rtp_on_packet(s, pkt, chunk + 14, "127.0.0.1", 5000);
+                if (!(drop_every > 0 && (seq % (uint16_t)drop_every) == 0))
+                    cm_rtp_on_packet(s, pkt, chunk + 14, "127.0.0.1", 5000);
                 seq++;
                 off += chunk; first = 0;
             }
@@ -212,6 +214,42 @@ static void clear_pushes(void) {
 }
 
 /* 统计第一个 IDR 的字节数、每帧切片数、帧数；并按期望值断言。 */
+/* ★ 核心安全不变量 ★
+ * 任何被推给解码器的 AU，只要它含切片，第一个切片的 first_mb 就必须是 0。
+ * 否则解码器拿到的是一帧的「后半截」，宏块覆盖不足 —— 这正是 RK3562
+ * mppvideodec 越界复位（irq_status 0x001123）的触发条件。
+ * 这个检查不需要知道正确帧数，丢包场景下也能跑。 */
+static int check_head_invariant(void) {
+    int i, bad = 0;
+    for (i = 0; i < g_npush; i++) {
+        const unsigned char *d = g_pushes[i].data;
+        int len = g_pushes[i].len, k = 0, fm = -1;
+        /* 扫 AU 里的 NAL，取第一个切片 */
+        while (k + 3 <= len) {
+            int sc = 0, nl, t;
+            if (d[k] == 0 && d[k+1] == 0 && d[k+2] == 1) sc = 3;
+            else if (k + 4 <= len && d[k] == 0 && d[k+1] == 0 && d[k+2] == 0 && d[k+3] == 1) sc = 4;
+            if (!sc) { k++; continue; }
+            {
+                int p = k + sc;
+                if (p >= len) break;
+                nl = len - p;
+                t = d[p] & 0x1F;
+                if (t == 1 || t == 5) { fm = nalu_first_mb(d + p, nl); break; }
+                /* 跳到下一个 start code */
+                k = p + 1;
+                while (k + 2 < len && !(d[k] == 0 && d[k+1] == 0 && d[k+2] == 1)) k++;
+            }
+        }
+        if (fm > 0) {
+            bad++;
+            if (bad <= 3)
+                printf("    !! AU[%d] len=%d 首切片 first_mb=%d (应从 0 开始)\n", i, len, fm);
+        }
+    }
+    return bad;
+}
+
 static int g_fail = 0;
 static void report(const char *tag, int want_au, int want_idr_min, int want_idr_max) {
     int i, nidr = 0, first_idr = -1, ok = 1;
@@ -225,6 +263,11 @@ static void report(const char *tag, int want_au, int want_idr_min, int want_idr_
      * 才会被 tick 到。真实码流永远有下一帧，所以这不算缺陷。 */
     if (want_au > 0 && g_npush != want_au && g_npush != want_au - 1) ok = 0;
     if (want_idr_min > 0 && (first_idr < want_idr_min || first_idr > want_idr_max)) ok = 0;
+    {
+        int bad = check_head_invariant();
+        if (bad) { ok = 0; printf("  首切片不变量: %d 个 AU 从中间开始", bad); }
+        else printf("  首切片不变量: 全部从 fm=0 开始");
+    }
     printf("  %s\n", ok ? "OK" : "*** FAIL ***");
     if (!ok) g_fail = 1;
 }
@@ -253,17 +296,28 @@ int main(int argc, char **argv) {
     int want_au = strstr(file, "au_fail") ? 246 : (strstr(file, "au_1812") ? 300 : 0);
     int want_idr_min = strstr(file, "au_fail") ? 14000 : (strstr(file, "au_1812") ? 44000 : 0);
     int want_idr_max = strstr(file, "au_fail") ? 17000 : (strstr(file, "au_1812") ? 45000 : 0);
+    /* 第 5 轮 = 策略 A + 每 7 个包丢 1 个（模拟弱网）。丢包时帧数一定对不上，
+     * 所以只检查「首切片不变量」：任何推出去的 AU 都不能从帧中间开始。
+     * 这正是真机 reqeseq=3945 那种场景 —— 丢片被 NACK 补不回来时，
+     * 绝不能把半帧推给 mppvideodec。 */
+    int npol = 5;
+    int drop_every = argc > 3 ? atoi(argv[3]) : 7;
 
     printf("=== 真实 cm_rtp.c 单测: %s (mtu=%d) ===\n", file, mtu);
     load_nals(file);
     printf("  NAL=%d\n", g_nnals);
 
-    for (pol = 0; pol < 4; pol++) {
-        static const char *names[4] = {"A(参数集前)", "B(每帧末)", "C(每片)", "D(无marker)"};
+    for (pol = 0; pol < npol; pol++) {
+        static const char *names[5] = {"A(参数集前)", "B(每帧末)", "C(每片)",
+                                       "D(无marker)", "A+丢包"};
+        int drop = (pol == 4) ? drop_every : 0;
         cm_sess *s = mk_sess();
         clear_pushes();
-        feed(s, pol, mtu);
-        report(names[pol], want_au, want_idr_min, want_idr_max);
+        feed(s, pol == 4 ? 0 : pol, mtu, drop);
+        /* 丢包轮的帧数必然对不上，只检查首切片不变量；其余轮全查。 */
+        if (pol == 4) printf("  (每 %d 包丢 1)\n", drop_every);
+        report(names[pol], (pol == 4) ? 0 : want_au,
+               (pol == 4) ? 0 : want_idr_min, (pol == 4) ? 0 : want_idr_max);
         cm_rtp_reset(s);
         pthread_mutex_destroy(&s->gst_mu);
         free(s);
