@@ -551,11 +551,17 @@ static void au_on_slice_done(cm_sess *s, int marker) {
          * 把被 marker 切碎的帧接回来过几次」。 */
         return;
     }
-    if (g_rtp.au_slices <= 1 && !g_rtp.au_multislice) {
-        /* 单 slice 帧的常态：marker 就是帧边界，零额外延迟。 */
-        flush_frame(s);
-        return;
-    }
+    /* ★ 这里曾经有个「单 slice 帧直接放行、零延迟」的快速路径，已删除。
+     *
+     * 它判断的是「当前 AU 只有 1 个 slice」，可多 slice 帧的**第一个**
+     * slice 也满足这个条件（au_multislice 要等第二个 slice 到来才会置位）。
+     * 于是只要网关在「每组切片之后」都打 marker（我们观察到的正是这种），
+     * 第一个 slice 就会被立刻放行 —— 绕了一圈又回到「把 IDR 切碎推给
+     * 解码器」，等于修复失效。
+     *
+     * 现在一律压住，等下一个 first_mb==0 的 slice 到来才放行；单 slice 流
+     * 也是同样机制，代价只是多等一帧（20~30fps 下 33~50ms）。云游戏里
+     * 一帧的延迟完全是可接受的，换来的是绝不再送残缺关键帧。 */
     if (!g_rtp.au_marker_pending) {
         g_rtp.au_marker_pending = 1;
         g_rtp.au_marker_until = now + AU_HOLD_MAX_MS;
