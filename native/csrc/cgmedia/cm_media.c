@@ -164,6 +164,12 @@ static void emit_stat(cm_sess *s) {
              * au_joined）。终末地修复的判据：这个数持续增长说明 AU 边界
              * 确实被接回来了；恒为 0 说明这一局压根没有多 slice 帧。 */
             "\"join\":%llu,"
+            /* holdRel = 「压住的 AU 被超时兜底放行」的累计次数（cm_rtp.c 的
+             * au_hold_released）。与 join 配合看能区分三种情况：
+             *   join 涨、holdRel 不涨 => 正常接回，没有走兜底（理想）
+             *   join 不涨、holdRel 涨 => 一直在走兜底，说明边界判据没生效
+             *   两个都不涨且 shown 也不涨 => AU 被永久压住（死锁，不该出现） */
+            "\"holdRel\":%llu,"
             /* shown = 真正送进 kmssink 的帧数（sink pad 探针）。
              * 判「画面在不在动」只能看它：pushed/fps 只代表交给了 appsrc，
              * 而 appsrc 是 leaky 的，队列满就默默丢帧，会把下游停摆掩盖掉。
@@ -217,6 +223,7 @@ static void emit_stat(cm_sess *s) {
              * 仍稳定，就是弱网下我们要的健康态。 */
             (unsigned long long)s->stats.vid_p_drop,
             (unsigned long long)cm_rtp_au_joined(),
+            (unsigned long long)cm_rtp_au_hold_released(),
             (unsigned long long)cm_box_shown(s->vbox));
     /* 每 10 秒打一次 PT 直方图（只打非零项），用来确认音频到底有没有到。 */
     {
@@ -239,10 +246,11 @@ static void emit_stat(cm_sess *s) {
              *   两个都不动        → 根本没数据到，问题在上游/网关
              * 把这行留在生产日志里，是因为「有声音没画面」这类报障只能靠它定位，
              * 而 cm_emit 的 stat JSON 不进日志文件。 */
-            CM_LOGI("#%d video sink pushed=%llu shown=%llu join=%llu%s", s->id,
+            CM_LOGI("#%d video sink pushed=%llu shown=%llu join=%llu holdRel=%llu%s", s->id,
                     (unsigned long long)cm_box_pushed(s->vbox),
                     (unsigned long long)cm_box_shown(s->vbox),
                     (unsigned long long)cm_rtp_au_joined(),
+                    (unsigned long long)cm_rtp_au_hold_released(),
                     (s->vbox && cm_box_pushed(s->vbox) > cm_box_shown(s->vbox) + 60)
                         ? " (DOWNSTREAM STALLED)" : "");
         }
