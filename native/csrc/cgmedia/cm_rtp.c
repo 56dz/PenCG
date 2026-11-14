@@ -260,6 +260,10 @@ typedef struct {
     int      au_last_first_mb;
     int      au_multislice;
     int      au_marker_pending;
+    /* au_joined_counted：本次「压住」是否已经计过一次 au_joined。一帧里可能
+     * 有多个切片组（终末地是 4 个），只在第一次接回时计数，避免一个数字既
+     * 表示「接回了几次」又偷偷把一帧算成 4 次。 */
+    int      au_joined_counted;
     uint64_t au_marker_until;
     uint64_t au_joined;
     /* au_slice_unknown：本 AU 里有 slice 的 first_mb 解析失败（数据太短、
@@ -490,6 +494,18 @@ static int note_slice(int parsed, int first_mb) {
          * 就说明「当前 AU 里已经攒了上一帧的 slice」。 */
         return 1;
     }
+    /* ★ 真正的「接回」判定：marker 之后又来了同一帧的后续 slice，说明刚才
+     * 那一下压住是对的 —— 我们确实把被 marker 切碎的一帧接回来了。
+     *
+     * 为什么计数放在这里而不是收到 marker 的地方：单 slice 流（原神、明日
+     * 方舟那些健康局）每一帧都是「一个 slice + 一个 marker」，marker 之后
+     * 直接就是下一帧的 first_mb==0，永远走不到这一行。所以健康局的
+     * au_joined 恒为 0，终末地的 au_joined 才会涨 —— 这个数字因此能在真机
+     * 上区分「修复在干活」和「修复没生效」，否则它只会等于帧数。 */
+    if (g_rtp.au_marker_pending && !g_rtp.au_joined_counted) {
+        g_rtp.au_joined_counted = 1;
+        g_rtp.au_joined++;
+    }
     g_rtp.au_last_first_mb = first_mb;
     g_rtp.au_slices++;
     if (g_rtp.au_slices > 1) g_rtp.au_multislice = 1;
@@ -564,10 +580,11 @@ static void au_on_slice_done(cm_sess *s, int marker) {
      * 一帧的延迟完全是可接受的，换来的是绝不再送残缺关键帧。 */
     if (!g_rtp.au_marker_pending) {
         g_rtp.au_marker_pending = 1;
+        g_rtp.au_joined_counted = 0;
         g_rtp.au_marker_until = now + AU_HOLD_MAX_MS;
-        /* 每次压住都是一个「切片组被接回同一帧」的机会，计个数。真机上看
-         * 这个数涨没涨，就知道修复到底在不在干活。 */
-        g_rtp.au_joined++;
+        /* ★ 这里**不**计 au_joined：压住只是「有机会接回」，能不能接回要看
+         * 后面有没有同一帧的后续 slice（计数在 note_slice 里做）。在这里
+         * 计数会让单 slice 流每帧都 +1，这个数字就退化成帧数了。 */
     } else {
         /* 同一个 AU 里又来一个组边界：续期即可，不要重复计数。 */
         g_rtp.au_marker_until = now + AU_HOLD_MAX_MS;
@@ -643,6 +660,7 @@ static void rtp_reset_au(void) {
     g_rtp.au_last_first_mb = 0;
     g_rtp.au_multislice = 0;
     g_rtp.au_marker_pending = 0;
+    g_rtp.au_joined_counted = 0;
     g_rtp.au_marker_until = 0;
     g_rtp.au_slice_unknown = 0;
 }
