@@ -85,11 +85,40 @@
  *   - 只看 pushed 不够 —— appsrc 是 leaky 的，队列满时它会默默丢旧 AU，
  *     pushed 照样上涨，把下游停摆掩盖掉；
  *   - 只看 shown 不动也不够 —— 起播初期本来就没帧。
- * 两个条件同时成立 VWD_STALL_MS，判定「下游停止消费」，重建解码器管线。
- * 重建后 cm_rtp_after_rebuild() 会关闸并补 PLI，等一个新 IDR 回来。 */
+ * 两个条件同时成立 VWD_STALL_MS，判定「下游停止消费」，先补 PLI，
+ * 再宽限 VWD_PLI_GRACE_MS；还是不出画就报 -7 交 JS 换会话。 */
 #define VWD_CHECK_MS        500    /* 检查粒度 */
-#define VWD_STALL_MS        2500   /* pushed 涨而 shown 不动的容忍时长 */
-#define VWD_MAX_REBUILDS    3      /* 单局最多重建几次，超过就交给 JS 侧换会话 */
+#define VWD_STALL_MS        6000   /* pushed 涨而 shown 不动的容忍时长 */
+#define VWD_PLI_GRACE_MS    4000   /* 先求 IDR 的宽限期，过了才交 JS */
+#define VWD_BACKLOG_SLACK   60     /* 超过正常管线延迟多少帧才算下游停摆 */
+
+/* ★ 为什么不再自己重建管线（2026-11-15 真机定案）★
+ *
+ * 这一局原神的 IDR 是**周期性**的，间隔精确 604 秒（=10 分钟）：
+ *   kf=1 08:02:49 / kf=2 08:13:00 / kf=3 08:23:04 / kf=4 08:33:08
+ * 而 PLI 对网关完全无效（整局 506 条 PLI，零响应，recov=0）。
+ *
+ * 于是「拆管线重建」= 新建的 mppvideodec 拿不到 IDR，参考帧全空，
+ * 只能等下一个周期 IDR —— 平均 5 分钟、最坏 10 分钟黑屏。
+ * 真机 08:12:40 就是这样：2.5 秒的小抖动触发重建，画面直到 08:13:00
+ * 的周期 IDR 才回来（黑 20 秒）；08:38 再触发一次就一直黑到被换会话。
+ * 更糟的是旧代码的 s_vwd_rebuilds 只在换会话时清零，上午用掉的额度
+ * 下午还在，一次小抖动就直接把 -7 抛给 JS（用户看到的「卡 2 秒→闪黑」）。
+ *
+ * 而「交回 JS 换会话（L2 复用网关）」只要约 5 秒，且**游戏进度不丢**
+ * （服务端对局继续跑，只是换了一条媒体通道，实测 56 分钟的局一直在）。
+ * 每局新会话起播时网关必定先发一个 IDR（`AU push key=1`），所以
+ * 换会话 = 立刻拿到新 IDR，比等 604 秒快两个数量级。
+ *
+ * 结论：先发 PLI 求一次（万一以后网关开始响应），宽限 VWD_PLI_GRACE_MS
+ * 之后直接 -7 交给 JS，绝不自己拆管线。 */
+
+/* pushed - shown 的正常水位（滑动均值）。
+ * 真机 2026-11-15：健康会话里这个差值长期稳定在 142~157 帧，
+ * 那是 probe 采样时刻与 kmssink 实际取帧之间的管线延迟，**不是停摆**。
+ * 旧代码的统计行判据是 pushed != shown 就打 "(DOWNSTREAM STALLED)"，
+ * 于是整局每 10 秒都在喊停摆，把真正的冻结淹掉了。 */
+static uint64_t s_sink_backlog_avg = 0;
 
 static void emit_stat(cm_sess *s) {
     uint64_t now = cm_now_ms();
@@ -251,7 +280,9 @@ static void emit_stat(cm_sess *s) {
                     (unsigned long long)cm_box_shown(s->vbox),
                     (unsigned long long)cm_rtp_au_joined(),
                     (unsigned long long)cm_rtp_au_hold_released(),
-                    (s->vbox && cm_box_pushed(s->vbox) > cm_box_shown(s->vbox) + 60)
+                    (s->vbox && s_sink_backlog_avg > 0 &&
+                     cm_box_pushed(s->vbox) >
+                         cm_box_shown(s->vbox) + s_sink_backlog_avg + VWD_BACKLOG_SLACK)
                         ? " (DOWNSTREAM STALLED)" : "");
         }
     }
@@ -280,11 +311,15 @@ void cm_media_loop(cm_sess *s) {
     uint64_t s_vwd_last_shown = 0;
     uint64_t s_vwd_frozen_since = 0;
     int s_vwd_sid = -1;
-    int s_vwd_rebuilds = 0;
-    /* 两次重建之间的等待：2.5s -> 5s -> 10s（上限 8s 用的是「不翻倍」原则，
-       见 VWD_STALL_MS 注释）。终末地的 IDR 只在一局开头给一个，重建后新解码器
-       必须等一个新的 IDR 才能出画，而 PLI 常常石沉大海；硬间隔 2.5s 连打三次
-       会在 8 秒内把额度烧光、然后直接把 -7 抛给 JS，等于没给网关任何反应时间。 */
+    /* 已经报过 -7（只报一次，别每 500ms 刷屏）。
+     * 用完由会话重建时（s_vwd_sid 变化）清零。
+     * 注意：这里刻意不再有 rebuilds 计数 —— 本文件已不自己重建管线，
+     * 原因见 VWD_PLI_GRACE_MS 上方那段注释。 */
+    uint64_t s_vwd_pli_at = 0;
+    int s_vwd_gave_up = 0;
+    /* 判定阈值的当前值：初值 VWD_STALL_MS（6s），发过 PLI 之后
+     * 再加上 VWD_PLI_GRACE_MS（4s），即总共等 10 秒才报 -7。
+     * 画面一恢复就回到 6s。 */
     uint64_t s_vwd_wait_ms = VWD_STALL_MS;
 
     /* 进循环前先建好 GStreamer 盒子（kmssink 一上来就要占住 KMS 平面） */
@@ -425,8 +460,14 @@ void cm_media_loop(cm_sess *s) {
          * 内部按 next_ice_consent_ms 限速，每轮调无代价。 */
         cm_ice_consent_tick(s);
         /* ---- 视频上屏看门狗：pushed 在涨、shown 不动 ⇒ 下游停止消费 ----
-         * 判据与取舍见文件头 VWD_* 的注释。这里只做「发现 + 重建」，
-         * 不做「等待」——终末地的 IDR 稀疏，等是等不来的。 */
+         * 判据与取舍见文件头 VWD_* 的注释。分两级：
+         *   1) 6 秒没上屏 → 只发 PLI 求 IDR，**不拆管线**
+         *   2) 再等 4 秒仍没上屏 → 报 -7 交 JS 换会话，**仍不拆管线**
+         * 为什么不拆：这一局的 IDR 间隔实测 604 秒
+         * （kf 1→2→3→4 的时刻是 08:02:49 / 08:13:00 / 08:23:04 / 08:33:08），
+         * 新解码器拿到 P 帧是解不出来的，一旦重建就必须再等一个 IDR ——
+         * 运气不好就是黑屏十分钟；而换会话 5 秒就有新 IDR（新会话起播
+         * 必然带 key=1 的 AU）。详见 VWD_PLI_GRACE_MS 上方那段注释。 */
         if (s->vbox && now - s_vwd_last_check >= VWD_CHECK_MS) {
             uint64_t vpushed = cm_box_pushed(s->vbox);
             uint64_t vshown = cm_box_shown(s->vbox);
@@ -436,63 +477,62 @@ void cm_media_loop(cm_sess *s) {
                 s_vwd_last_pushed = vpushed;
                 s_vwd_last_shown = vshown;
                 s_vwd_frozen_since = 0;
-                s_vwd_rebuilds = 0;
+                s_vwd_pli_at = 0;
+                s_vwd_gave_up = 0;
                 s_vwd_wait_ms = VWD_STALL_MS;
             }
             if (vshown != s_vwd_last_shown) {
-                /* 有帧真的上屏了：一切正常，清掉冻结计时 */
+                /* 有帧真的上屏了：一切正常，清掉冻结计时。
+                 * 顺手记下 pushed-shown 的水位（EMA），它是判断
+                 * 「下游真停摆」还是「正常管线延迟」的唯一依据。 */
+                uint64_t backlog = (vpushed > vshown) ? (vpushed - vshown) : 0;
+                s_sink_backlog_avg = s_sink_backlog_avg
+                    ? (s_sink_backlog_avg * 15 + backlog) / 16
+                    : backlog;
                 s_vwd_last_shown = vshown;
                 s_vwd_last_pushed = vpushed;
                 s_vwd_frozen_since = 0;
+                s_vwd_pli_at = 0;
+                s_vwd_gave_up = 0;
                 s_vwd_wait_ms = VWD_STALL_MS;
             } else if (vpushed != s_vwd_last_pushed) {
                 /* 我们还在往 appsrc 喂，但 kmssink 一帧都没新吃到 */
                 if (!s_vwd_frozen_since) {
                     s_vwd_frozen_since = now;
                 } else if (now - s_vwd_frozen_since >= s_vwd_wait_ms) {
-                    if (s_vwd_rebuilds >= VWD_MAX_REBUILDS) {
-                        /* 重建到上限还是不出画：交回 JS 换会话（L2/L3）。
-                         * 这里只报错，不自己拆会话 —— 拆会话会让音频也断，
-                         * 而用户此刻听得到的音频是「还能不能继续玩」的判据。 */
-                        CM_LOGE("#%d video still frozen after %d rebuilds "
-                                "(shown=%llu pushed=%llu), asking JS to reconnect",
-                                s->id, s_vwd_rebuilds,
+                    /* 第一级：先求一个新 IDR 回来，别急着拆管线 */
+                    if (!s_vwd_pli_at) {
+                        s_vwd_pli_at = now;
+                        CM_LOGW("#%d video sink stalled %llu ms "
+                                "(shown=%llu pushed=%llu, backlog avg=%llu) "
+                                "-> request IDR (PLI), give it %d ms before "
+                                "handing over to JS",
+                                s->id,
+                                (unsigned long long)(now - s_vwd_frozen_since),
                                 (unsigned long long)vshown,
-                                (unsigned long long)vpushed);
+                                (unsigned long long)vpushed,
+                                (unsigned long long)s_sink_backlog_avg,
+                                VWD_PLI_GRACE_MS);
+                        cm_send_pli(s);
+                        /* 宽限期同样是 wms，但至少 VWD_PLI_GRACE_MS */
+                        s_vwd_wait_ms += VWD_PLI_GRACE_MS;
+                    } else if (!s_vwd_gave_up) {
+                        /* 求 IDR 没用（网关不看 PLI）：交回 JS 换会话。
+                         * 这里只报错，绝不自己拆管线 —— 拆了就要等 604 秒
+                         * 的周期 IDR，而换会话 5 秒就有新 IDR。
+                         * 也不自己拆会话：拆会话会让音频也断，
+                         * 而用户此刻听得到的音频是「还能不能继续玩」的判据。 */
+                        s_vwd_gave_up = 1;
+                        CM_LOGE("#%d video still frozen %llu ms after PLI "
+                                "(shown=%llu pushed=%llu, backlog avg=%llu), "
+                                "asking JS to reconnect instead of rebuilding",
+                                s->id,
+                                (unsigned long long)(now - s_vwd_frozen_since),
+                                (unsigned long long)vshown,
+                                (unsigned long long)vpushed,
+                                (unsigned long long)s_sink_backlog_avg);
                         cm_emit(s, "{\"t\":\"error\",\"msg\":\"video sink frozen\","
                                    "\"code\":-7}");
-                        s_vwd_frozen_since = now; /* 别再连发 */
-                    } else {
-                        s_vwd_rebuilds++;
-                        CM_LOGW("#%d video sink frozen %llu ms "
-                                "(shown=%llu pushed=%llu) -> rebuild decoder #%d",
-                                s->id, (unsigned long long)(now - s_vwd_frozen_since),
-                                (unsigned long long)vshown,
-                                (unsigned long long)vpushed, s_vwd_rebuilds);
-                        /* 必须先 destroy 再 create：kmssink 要重新抢
-                         * plane 76，旧 box 不释放平面新 box 就绑不上。
-                         * 两者之间有一小段没有视频平面的时间窗，
-                         * 表现为视频区短暂显示页面底色，可接受。 */
-                        pthread_mutex_lock(&s->gst_mu);
-                        if (s->vbox) {
-                            cm_box_destroy(s->vbox);
-                            s->vbox = NULL;
-                        }
-                        s->vbox = cm_box_create(s, 1);
-                        pthread_mutex_unlock(&s->gst_mu);
-                        if (s->vbox) {
-                            /* 关闸 + 清半截 AU + 补 PLI，等新 IDR */
-                            cm_rtp_after_rebuild(s);
-                            s_vwd_last_pushed = cm_box_pushed(s->vbox);
-                            s_vwd_last_shown = cm_box_shown(s->vbox);
-                        } else {
-                            CM_LOGE("#%d video pipeline rebuild failed", s->id);
-                            cm_emit(s, "{\"t\":\"error\","
-                                       "\"msg\":\"video rebuild failed\",\"code\":-4}");
-                        }
-                        s_vwd_frozen_since = 0;
-                        /* 退避：下一次给网关更长的反应时间（PLI 有机会落地） */
-                        if (s_vwd_wait_ms < 8000) s_vwd_wait_ms *= 2;
                     }
                 }
             } else {
