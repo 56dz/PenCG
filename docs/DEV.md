@@ -3,7 +3,7 @@
 ## 目录
 ```
 PenCG/
-  package.json          appid 8002026110200003
+  package.json          appid 8002026110200004
   app_icon.png          256x256 桌面图标（必填）
   src/
     app.js             入口（DESIGN_WIDTH=960）
@@ -31,7 +31,7 @@ PenCG/
 cd PenCG
 node ../env/node_modules/aiot-vue-cli/src/cli.js -q -p
 ```
-产物：`8002026110200003.1_0_0.amr` + `.falcon_/`。
+产物：`8002026110200004.1_0_0.amr` + `.falcon_/`。
 > `node_modules/falcon-ui` 是到 `../env/node_modules/falcon-ui` 的目录联接（junction），
 > 已创建。若缺失：`powershell -c "New-Item -ItemType Junction -Path 'node_modules\falcon-ui' -Target '<仓库>\env\node_modules\falcon-ui'"`。
 

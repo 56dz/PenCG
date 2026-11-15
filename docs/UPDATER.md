@@ -128,7 +128,7 @@ PenBili 是 `getJson` / `setJson`，PenCG 是 **`getJSON` / `setJSON`**（大写
 **唯一可行通道**（PenBili 与 PenCG 都在真机上验过）：
 
 ```
-/bin/miniapp_cli install <amr>   ->  {"appid": "8002026110200003", "ret": 0}
+/bin/miniapp_cli install <amr>   ->  {"appid": "8002026110200004", "ret": 0}
 ```
 
 它把包装进 `a`/`b` 槽位，**成功后旧槽被删除**。
@@ -258,7 +258,7 @@ cd PenCG
 node ../env/node_modules/aiot-vue-cli/src/cli.js -q -p
 ```
 
-产物在 PenCG 根目录，名字由 `package.json` 的 `appid` 和 `version` 拼出来：`8002026110200003.1_2_3.amr`（版本号里的点变成下划线）。
+产物在 PenCG 根目录，名字由 `package.json` 的 `appid` 和 `version` 拼出来：`8002026110200004.1_3_0.amr`（版本号里的点变成下划线）。
 
 ### 6.3 发布到两个平台
 

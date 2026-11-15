@@ -113,7 +113,7 @@
       </div>
 
       <div class="mb-foot">
-        <text class="mb-foot-text">PenCG {{ ver }} · appid 8002026110200003</text>
+        <text class="mb-foot-text">PenCG {{ ver }} · appid 8002026110200004</text>
         <text class="mb-foot-text">非官方客户端，仅供个人学习使用</text>
       </div>
      </div>

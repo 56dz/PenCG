@@ -16,7 +16,7 @@ $adb = $env:PENCG_ADB
 if (-not $adb) { $c = Get-Command adb -ErrorAction SilentlyContinue; if ($c) { $adb = $c.Source } }
 if (-not $adb) { $cand = Join-Path $root '..\env\adb\adb.exe'; if (Test-Path $cand) { $adb = (Resolve-Path $cand).Path } }
 if (-not $adb) { throw 'adb not found' }
-$appid = '8002026110200003'
+$appid = '8002026110200004'
 $desktop = '8080222437664451'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 if ($ShotName) { $stamp = $ShotName }

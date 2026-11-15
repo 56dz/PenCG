@@ -11,7 +11,7 @@
 ![platform](https://img.shields.io/badge/X6%20Pro-RK3562-03C47E)
 ![runtime](https://img.shields.io/badge/Falcon-QuickJS%20%2B%20Vue2-03C47E)
 ![media](https://img.shields.io/badge/DTLS--SRTP-self--built-03C47E)
-![version](https://img.shields.io/badge/version-1.2.7-1E2831)
+![version](https://img.shields.io/badge/version-1.3.0-1E2831)
 ![license](https://img.shields.io/badge/license-GPL--3.0-1E2831)
 
 </div>
@@ -85,7 +85,7 @@ PenCG 把[网易云游戏](https://cg.163.com/)搬到了**有道词典笔 X6 Pro
 ## 快速开始
 
 ```powershell
-# 1. 构建前端（产出 8002026110200003.1_0_0.amr）
+# 1. 构建前端（产出 8002026110200004.1_3_0.amr）
 cd PenCG
 node ../env/node_modules/aiot-vue-cli/src/cli.js -q -p
 
@@ -97,7 +97,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File native/build-media.ps1   # l
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/deploy.ps1 -Page index -Shot
 ```
 
-构建产物 `8002026110200003.1_0_0.amr` 里已经包含 `libs/*.so` 与图标资源。
+构建产物 `8002026110200004.1_3_0.amr` 里已经包含 `libs/*.so` 与图标资源。
 
 > ⚠️ 仓库不含 `native/stubs-aarch64*/`、`native/vendor/`、`native/iot-miniapp-sdk/`
 > 这三份设备导入库与交叉编译 SDK（约 10 MB），它们来自设备固件 dump 与 Falcon SDK。

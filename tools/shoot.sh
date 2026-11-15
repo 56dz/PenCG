@@ -12,7 +12,7 @@ WAIT="${2:-8}"
 TMP="${TEMP:-/tmp}"
 
 $ADB shell "hal-screen on" >/dev/null 2>&1 || true
-$ADB shell "miniapp_cli start 8002026110200003 index" >/dev/null 2>&1 || true
+$ADB shell "miniapp_cli start 8002026110200004 index" >/dev/null 2>&1 || true
 sleep "$WAIT"
 
 prev=""

@@ -11,7 +11,7 @@ $adb = $env:PENCG_ADB
 if (-not $adb) { $c = Get-Command adb -ErrorAction SilentlyContinue; if ($c) { $adb = $c.Source } }
 if (-not $adb) { $cand = Join-Path $root '..\env\adb\adb.exe'; if (Test-Path $cand) { $adb = (Resolve-Path $cand).Path } }
 if (-not $adb) { throw '找不到 adb：设置 PENCG_ADB 或把 adb 加入 PATH' }
-$appid = '8002026110200003'
+$appid = '8002026110200004'
 $desktop = '8080222437664451'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $ev = Join-Path $root 'profiles\evidence'
