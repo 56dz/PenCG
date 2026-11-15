@@ -107,8 +107,18 @@
             <text :class="q.tcls">{{ q.label }}</text>
           </div>
         </div>
-        <!-- 画质提示恒定占位（无提示时为空串），避免按钮上下跳动 -->
-        <div class="p2-rhint"><text class="p2-rhint-text">{{ qualityHint }}</text></div>
+        <!-- ★ 网络波动策略（m17715/m17780）。
+             和画质是两个正交维度：画质=网关给多少码率（本机只剩 low 一档），
+             策略=拿不到关键帧时我们怎么取舍。两个按钮直接写代价，不写术语，
+             否则用户会以为「画质优先」是纯升级、选了就更好。
+             代价来自真机定案：网关一个会话的 IDR 周期可以长达 604 秒。 -->
+        <div class="p2-qrow p2-prow">
+          <div v-for="p in policyList" :key="p.id" :class="p.cls" @click="pickPolicy(p.id)">
+            <text :class="p.tcls">{{ p.label }}</text>
+          </div>
+        </div>
+        <!-- 提示行恒定占位（无提示时显示当前策略的代价说明），避免按钮上下跳动 -->
+        <div class="p2-rhint"><text class="p2-rhint-text">{{ hintLine }}</text></div>
 
         <!-- 220px 内容宽放不下一整行 stats（12.3 Mbps · 60fps · 丢包 0 · 1280x720），拆两行 -->
         <div class="p2-rstat">
@@ -137,14 +147,14 @@
 import { navTo, navBack, peekParams, requestHome } from '../../services/nav.js';
 import { restoreSession, isLoggedIn, currentSession } from '../../services/auth.js';
 import { applyTicket, stopGame } from '../../services/session.js';
-import { startPlay, stopPlay, setQuality, setRect, mediaState, setEventHandler, setVideoVisible, setInputBusy, requestKeyFrame, requestKeyFrameBurst } from '../../services/media.js';
+import { startPlay, stopPlay, setQuality, setPolicy, setRect, mediaState, setEventHandler, setVideoVisible, setInputBusy, requestKeyFrame, requestKeyFrameBurst } from '../../services/media.js';
 import { down, move, up, tap, cancel, setInputMode, declarePlatform, keepAlive, mouseMove, mouseDown, mouseUp, sendText, sendKey } from '../../services/input.js';
 import { ImSession } from '../../services/im.js';
 import { initScreen, keepAliveStart, keepAliveStop, getScreenState, screenStateName, isScreenNotOn, KEEP_INTERVAL_MS } from '../../services/screen.js';
 import { loadSettings, saveSettings } from '../../services/settings.js';
 import { DEV_AUTOTAP } from '../../dev-autostart.js';
 import { recordPlay, touchPlay } from '../../services/history.js';
-import { QUALITIES, QUALITY_LABEL, normQuality } from '../../services/const.js';
+import { QUALITIES, QUALITY_LABEL, normQuality, POLICIES, POLICY_LABEL, POLICY_DESC, POLICY_DEFAULT, normPolicy } from '../../services/const.js';
 import { logInfo, logWarn, logError } from '../../services/log.js';
 import { stageVideoRect } from '../../services/device_profile.js';
 import logoImg from '../../assets/logo.png';
@@ -353,6 +363,8 @@ export default {
       logo: logoImg,     // 左栏顶部软件图标
       gameType: 'mobile',
       quality: 'low',
+      // 网络波动策略（POLICIES: smooth/quality）。与画质正交，见 const.js 注释。
+      policy: POLICY_DEFAULT,
       gatewayUrl: '',
       stage: 'boot',
       tip: '',
@@ -628,6 +640,31 @@ export default {
       }
       return out;
     },
+    // 网络波动策略按钮（两个，各占半行）。代价直接写进 label 太挤，
+    // 所以按钮只放名字，代价放在下面的提示行 hintLine 里常显。
+    policyList: function () {
+      var out = [];
+      for (var i = 0; i < POLICIES.length; i++) {
+        var pid = POLICIES[i];
+        var on = this.policy === pid;
+        var cls = 'p2-qbtn p2-pbtn';
+        if (i % 2 === 0) cls += ' p2-gap';
+        cls += on ? ' p2-pbtn-on' : ' p2-pbtn-off';
+        out.push({
+          id: pid,
+          label: POLICY_LABEL[pid] || pid,
+          cls: cls,
+          tcls: on ? 'p2-qbtn-text p2-qbtn-text-on' : 'p2-qbtn-text'
+        });
+      }
+      return out;
+    },
+    // 提示行：有临时提示（切换后的确认语）就显示它，否则常显当前策略的代价。
+    // 恒占一行是为了不让按钮上下跳（本运行时对 v-if 块高度变化很敏感）。
+    hintLine: function () {
+      if (this.qualityHint) return this.qualityHint;
+      return POLICY_DESC[this.policy] || '';
+    },
     canReconnect: function () {
       if (this.busy) return false;
       var s = this.stage;
@@ -778,6 +815,8 @@ export default {
         return;
       }
       loadSettings().then(function (st) {
+        // 策略没有「URL 参数覆盖」的说法：它纯粹是本机偏好，永远读存档。
+        if (st && st.policy) self.policy = normPolicy(st.policy);
         if (p.quality) return null;
         if (st && st.quality) self.quality = normQuality(st.quality);
         return null;
@@ -910,6 +949,7 @@ export default {
       return startPlay({
         gameCode: self.code,
         quality: self.quality,
+        policy: self.policy,
         gatewayUrl: self.gatewayUrl,
         headers: ''
       }).then(function () {
@@ -1114,15 +1154,18 @@ export default {
       }
       if (t === 'error') {
         var d = ev.data || {};
-        /* ★ cgmedia 直接发的错误（没有 data 包装）：目前只有一个 -7。
-         *   -7 = video sink frozen：上屏看门狗把解码器管线重建了 VWD_MAX_REBUILDS
-         *        次，kmssink 仍然一帧新 buffer 都收不到。
-         * 这不是网关错误，把它显示成「服务端错误」既误导玩家又救不回画面。
-         * 真机实测（2026-11-14 18:01 那局）根因是 RK3562 VPU 报
-         *   mpp_rkvdec2 ... irq_status 0x001123 timeout 0 -> resetting -> reset done
-         * 复位后解码器丢掉全部参考帧，而终末地一局只给 1 个 IDR、网关又从不补
-         * NACK，于是永远等不到可解码的起点。唯一有效的动作是**换会话**（L2），
-         * 让新解码器从新的 IDR 开始。 */
+        /* ★ cgmedia 直接发的错误（没有 data 包装）：-7 和 -8。
+         *
+         *   -7 = video sink frozen：上屏看门狗连续 10 秒（VWD_STALL_MS 6s +
+         *        VWD_PLI_GRACE_MS 4s）一帧新 buffer 都没收到，期间已经发过 PLI。
+         *        **注意它不再重建解码器管线**（2026-11-15 定案后删掉了 rebuild
+         *        分支）：拆管线要等下一个 IDR，而网关的 IDR 周期可以长达 604 秒，
+         *        拆一次就是黑十分钟。所以看门狗现在只负责「发现 + 报错」，
+         *        真正的动作交给这里 —— 换会话，新会话 5 秒内必有新 IDR。
+         *   -8 = need fresh IDR：画质优先策略下 IDR 饥饿达到 4 秒，native 拒绝
+         *        放行残缺 P 帧（否则就是马赛克残留），主动要求换会话。
+         *
+         * 两者都不是网关错误，把它显示成「服务端错误」既误导玩家又救不回画面。 */
         var ncode = Number(ev.code) || 0;
         if (!ev.data && ncode === -7) {
           /* ★ 第一次 -7 先试 L2（复用网关重连，代价最小）。
@@ -1136,6 +1179,29 @@ export default {
             var why2 = 'native video sink frozen x' + this.nativeFrozen;
             if (this.nativeFrozen <= 1) this.stallHealL2(Date.now(), 'freeze', why2);
             else this.stallHealL3(Date.now(), 'freeze', why2);
+          }
+          return;
+        }
+        if (!ev.data && ncode === -8) {
+          /* ★ 画质优先策略的「请换会话」（见 cm_rtp.c 的 policy 分支）。
+           *
+           * native 只在每段 IDR 饥饿里发一次（policy_gave_up 保证），所以这里
+           * 不需要额外去重。但仍然要挡三件事：
+           *   1) 已经在忙（上一条自愈还没走完）—— 再调一次会把 stallTries
+           *      连续推进两级，直接跳到 L3 换机位，而换机位会让对局重开。
+           *   2) 不是画质优先 —— 用户中途切回流暢优先了，这个请求已经过时。
+           *   3) 不在可自愈的阶段。
+           * 用 stallHealL2（换会话、保留对局进度），不用 L3。 */
+          if (this.policy !== 'quality') {
+            logWarn('[play] native -8 但当前是流畅优先，忽略');
+            return;
+          }
+          if (this.busy) {
+            logWarn('[play] native -8 但正在自愈中，忽略');
+            return;
+          }
+          if (this.stage === 'live' || this.stage === 'waiting' || this.stage === 'connecting') {
+            this.stallHealL2(Date.now(), 'freeze', 'native 要新 IDR（画质优先，饥饿 4s）');
           }
           return;
         }
@@ -1221,6 +1287,39 @@ export default {
       } catch (e) {}
       logInfo('[play] quality → ' + id);
     },
+    /* ★ 切换网络波动策略（m17715/m17780）。
+     *
+     * 与 pickQuality 的关键区别：**不换码率、不发 quality 指令、不重建会话**。
+     * 它只做两件事：把偏好存下来（下次进游戏还用这档），以及通知 native
+     * 下一次 IDR 饥饿时按新策略取舍。所以切换是瞬时的，不闪黑、不打断对局。
+     *
+     * 画质优先下如果当前正好处在「拿不到 IDR」的状态，native 会在饥饿阈值
+     * 到达时发一次 code:-8，JS 侧的 onMedia 收到后立刻 L2 换会话 —— 这正好
+     * 是用户选这一档时明确接受的代价（闪黑 1~2 秒换干净画面），不需要在这里
+     * 提前做什么。反过来切回流畅优先时也**不能**主动补帧：那一帧就算要到了
+     * IDR，也已经在换会话的路上了。 */
+    pickPolicy: function (id) {
+      var self = this;
+      var pid = normPolicy(id);
+      if (this.policy === pid) {
+        this.setHint('当前已是' + (POLICY_LABEL[pid] || pid));
+        return;
+      }
+      this.policy = pid;
+      /* 提示只写「切到了哪个」，代价说明交给下面的 hintLine 常显。
+       * 两处都写全 -> 加起来 30+ 字，6vh 的行高放不下会折行顶掉下面的按钮。 */
+      this.setHint('已切换到' + (POLICY_LABEL[pid] || pid));
+      try {
+        setPolicy(pid);
+      } catch (e) {
+        logWarn('[play] setPolicy fail');
+      }
+      try {
+        saveSettings({ policy: pid });
+      } catch (e) {}
+      logInfo('[play] policy → ' + pid);
+      return null;
+    },
     /* 换档时排的两个补 PLI 定时器必须能被下一次换档/页面销毁清掉，
      * 否则连点四个档位会留下 8 个定时器，而且旧的会打在新会话上。 */
     clearQualityKf: function () {
@@ -1265,6 +1364,7 @@ export default {
         return startPlay({
           gameCode: self.code,
           quality: self.quality,
+          policy: self.policy,
           gatewayUrl: self.gatewayUrl,
           headers: ''
         }).then(function () {
@@ -2913,6 +3013,44 @@ export default {
 
 .p2-gap {
   margin-right: 0.625vw;
+}
+
+/* ★ 网络波动策略行（两个按钮，各占半行）。
+ *
+ * 高度复用 .p2-qbtn 的 16.5414vh，但**没有 p2-qrow2 的 3vh 上边距**：
+ * 这一行在只剩一档画质时本来是一行空白（画质移除三档后 p2-qrow2 不再渲染），
+ * 上边距留空会让整列重心下移、底部按钮被挤压。1vh 只做视觉分隔。
+ *
+ * 与画质按钮的视觉区分：策略不是「质量高低」而是「取舍」，所以不加 sel-on 的
+ * 金色/蓝色高亮实心块，只在选中时用 accent 描边（见 .p2-pbtn.sel-on 下面）。
+ * 这样用户不会误以为「画质优先」是更高一档的画质。 */
+.p2-prow {
+  margin-top: 1.0019vh;
+}
+
+/* 策略按钮不用 sel-on/sel-off（那是给画质用的实心块），只靠边框颜色区分选中态，
+   避免和上面的画质按钮抢视觉层级。
+   ★ 类名必须是单类：本运行时是 Weex 子集，只支持 single-classname selector，
+     写成 `.p2-pbtn.sel-on` 编译期直接报 ERROR 且样式被整条丢弃。 */
+.p2-pbtn {
+  background-color: @background-color;
+  border-width: 1px;
+  border-style: solid;
+  border-color: @card-border-color;
+}
+
+.p2-pbtn-on {
+  background-color: @card-background-color;
+  border-width: 1px;
+  border-style: solid;
+  border-color: @accent;
+}
+
+.p2-pbtn-off {
+  background-color: @background-color;
+  border-width: 1px;
+  border-style: solid;
+  border-color: @card-border-color;
 }
 
 .p2-qbtn-lock {

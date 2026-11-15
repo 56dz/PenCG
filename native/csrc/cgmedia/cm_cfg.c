@@ -64,6 +64,8 @@ int cm_cfg_parse(cm_cfg *cfg, const char *json) {
     cfg->audio_enabled = cm_json_get_int(json, "audio", 1) ? 1 : 0;
     cfg->no_rtcp = cm_json_get_int(json, "noRtcp", 0) ? 1 : 0;
     cfg->chrome_fp = cm_json_get_int(json, "chromeFp", 0) ? 1 : 0;
+    /* 网络波动策略：0=流畅优先（默认）1=画质优先。见 cm_session.h 的 cm_cfg.policy。 */
+    cfg->policy = cm_json_get_int(json, "policy", 0) ? 1 : 0;
 
     /* 面板换算参数：来自 JS 的 device_profile.canvasGeom()。
      * panelH 的下限用 1（而不是某个具体分辨率）—— 认不出机型时不传，走默认。 */

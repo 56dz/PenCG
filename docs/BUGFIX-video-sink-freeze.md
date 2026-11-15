@@ -131,9 +131,66 @@ rebuild decoder                                   0   ← 旧串
 > 注意：本轮设备在验证后已离线（`adb` 报 device not found），
 > 更长时间的浸泡（跨过一次 604 秒周期 IDR）留待下一轮。
 
-## 五、遗留
+## 五、网络波动策略：流畅优先 / 画质优先（v1.2.6）
+
+修复上面三处缺陷后，用户仍报告「每 2~3 分钟卡死重连」（m17715）。复现确认：
+网关对一个会话的 IDR 周期可以长达 **604 秒**、对 PLI 零响应、对 NACK 不重传。
+在这种前提下，「拿不到 IDR」不是瞬时故障而是一种**可持续十分钟的常态**，
+此时只剩两种消费同一份码流的方式，且各有代价 —— 所以做成了用户可选的两档，
+而不是替用户猜。
+
+| 策略 | IDR 饥饿 4 秒后的动作 | 代价 | 适用 |
+| :-- | :-- | :-- | :-- |
+| **流畅优先**（默认） | 放行残缺 P 帧（`vid_relax++`） | 画面继续动，但错块残留到下一个 IDR（马赛克） | 想不中断地玩 |
+| **画质优先** | 拒绝放行（`vid_relax_dropped++`），发 `code:-8` 让 JS 换会话 | 换会话瞬间闪黑 1~2 秒，对局进度不丢 | 画面必须干净 |
+
+### 5.1 为什么不是「再修一次」而是让用户选
+
+两者都不可能免费：放行 = 花屏，不放行 = 冻结。这不是实现缺陷，是服务端
+（IDR 稀疏 + 不响应 PLI/NACK）强加给客户端的二选一。替用户做选择只会让
+一半人觉得「怎么老是花」、另一半觉得「怎么老是黑」。
+
+### 5.2 落点
+
+- `src/services/const.js`：`POLICIES` / `POLICY_LABEL` / `POLICY_DESC` / `normPolicy`
+- `src/services/settings.js`：`DEFAULTS.policy`（默认 `smooth`）+ 读档纠正
+- `src/services/media.js`：`startMedia` 的 `cfgObj.policy`、`setPolicy()` 热切换
+- `src/pages/play/play.vue`：右栏第二行两个按钮（复用只剩一档画质后空出来的 `p2-qrow2`
+  位置）+ `hintLine` 常显代价 + `onMedia` 的 `code:-8` 分支
+- `native/csrc/cgmedia/cm_session.h`：`cm_cfg.policy`、`cm_sess.policy_gave_up`、
+  `stats.vid_relax_dropped`
+- `native/csrc/cgmedia/cm_cfg.c`：解析 `"policy"`
+- `native/csrc/cgmedia/cm_rtp.c`：`flush_frame()` 的饥饿分支按策略分叉
+- `native/csrc/cgmedia/cm_cmd.c`：`setPolicy` op（热切换，不重建会话）
+
+### 5.3 三个实现要点（别再踩）
+
+1. **`policy_gave_up` 是必需的**。饥饿期间每分钟约有 30 个 P 帧走到闸门，
+   若每帧都发 `code:-8`，JS 侧 `stallTries` 会被瞬间吃满，直接从 L2 跳到
+   L3（换机位 = 对局重开）。所以每段饥饿只发一次，`mark_keyframe()` 里复位。
+2. **热切换必须清 `kf_starve_ms` 和 `relax_until_ms`**。否则从画质优先切回
+   流畅优先时，饥饿计时还带着上一次策略留下的旧起点，会立刻放行一大批
+   残缺帧 —— 用户会觉得「切了反而更花」。
+3. **策略按钮不能用 `.p2-pbtn.sel-on` 这种双类选择器**。本运行时是 Weex 子集，
+   只支持 single-classname selector，双类在编译期直接 `ERROR` 且整条样式被丢弃
+   （页面看起来「点击没反应」，实际是样式没生效）。改用 `.p2-pbtn-on/off`。
+
+### 5.4 真机验证判据
+
+```text
+start #N -> ... policy=smooth-first        ← 起播时策略已生效
+#N policy -> quality-first (...)           ← 热切换生效
+#N IDR starvation 4.0s under quality-first policy: keep gate closed ...   ← 画质优先真的拒收了
+need fresh IDR（code -8）→ L2 复用网关重连                                 ← JS 正确响应
+```
+
+`probe` 行里的 `relax` / `relaxDrop` 互斥增长，可直接在设备上判断当前生效的是哪一档。
+
+## 六、遗留
 
 1. 网关为什么停推、以及为什么换个机位能长活 30 分钟（`.177` vs `.140/.141`）仍未解释，
    根因在服务端（见 `docs/HANDOFF-163CG-API.md`）。
 2. 停推后的冻结画面仍会持续约 10 秒（6 + 4），这 10 秒只能等，不能缩短到误判。
 3. 若网关将来开始响应 PLI，第 1 级就能直接恢复，无需换会话。
+4. **画质优先档的 `code:-8` 换会话尚未在真机上观测到**（需要真的进入 IDR 饥饿）。
+   逻辑已按 `native 只发一次 + JS 挡 busy/非 quality 态` 写好，但缺一次现场样本。

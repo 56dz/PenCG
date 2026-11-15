@@ -975,6 +975,10 @@ static void mark_keyframe(cm_sess *s) {
     /* P1-7：真 IDR 到了，饥饿放行的收紧计时作废 —— 闸门现在有真参考帧支撑。 */
     s->relax_until_ms = 0;
     s->kf_starve_ms = 0;
+    /* 画质优先策略的「已通知 JS 换会话」标记也随之复位：真 IDR 到手说明这一轮
+     * 饥饿结束了（可能是换会话回来了，也可能网关终于给了），下一段饥饿要能
+     * 重新报一次 code:-8。 */
+    s->policy_gave_up = 0;
 }
 
 /* media 事件：首个视频帧上屏后立刻发（带分辨率 + fps），之后不再重复。
@@ -1252,6 +1256,37 @@ static void flush_frame(cm_sess *s) {
     if (!key && !s->have_kf) {
         if (s->kf_starve_ms && now > s->kf_starve_ms &&
             (now - s->kf_starve_ms) >= IDR_STARVE_RELAX_MS) {
+            /* ★★ 网络波动策略在这里分叉（cm_cfg.policy，见 cm_session.h）★★
+             *
+             * 共同事实（2026-11-15 真机定案）：网关对一个会话的 IDR 周期可以
+             * 长达 604 秒、对 PLI 零响应（整局 506 条 PLI，recov=0）、对 NACK
+             * 不重传（9 条 NACK，recov=0）。所以「拿不到 IDR」不是暂时状态，
+             * 而是一个可能持续十分钟的常态。此时只剩两种消费同一份码流的方式：
+             *
+             *   流畅优先（policy=0）：放行 P 帧。画面继续动，但参考帧是残缺的，
+             *     错块会一直残留到下一个 IDR —— 这就是用户说的「马赛克残留」。
+             *   画质优先（policy=1）：绝不放行。宁可冻着等 IDR，同时发一次
+             *     code:-8 通知 JS 立刻换会话（新会话必定给新 IDR，约 5 秒出画、
+             *     对局进度不丢）。用户接受的代价是换会话瞬间闪黑 1~2 秒。
+             *
+             * 画质优先下**不能只发一次就完事**：JS 侧换会话从「判定 → 建连 →
+             * 首帧」要几秒，这期间每分钟会有约 30 个 P 帧走到这里。所以用
+             * policy_gave_up 保证每段饥饿只发一条事件（否则 JS 的 stallTries
+             * 会被瞬间吃满，直接从 L2 跳到放弃）；标记在 mark_keyframe() 里复位。 */
+            if (s->cfg.policy) {
+                s->stats.vid_relax_dropped++;
+                if (!s->policy_gave_up) {
+                    s->policy_gave_up = 1;
+                    CM_LOGW("#%d IDR starvation %.1fs under quality-first policy: "
+                            "keep gate closed (no artifacts), ask JS to switch session",
+                            s->id, (double)(IDR_STARVE_RELAX_MS) / 1000.0);
+                    cm_emit(s, "{\"t\":\"error\",\"msg\":\"need fresh IDR\",\"code\":-8}");
+                }
+                s->stats.vid_gate_drop++;
+                g_rtp.drop_streak++;
+                rtp_reset_au();
+                return;
+            }
             s->stats.vid_relax++;
             s->have_kf = 1;           /* 开门：后续 P 帧不再走闸门 */
             s->last_kf_ms = now;      /* 假装刚有过关键帧，避免 cm_kf_tick 立刻又刷 PLI */

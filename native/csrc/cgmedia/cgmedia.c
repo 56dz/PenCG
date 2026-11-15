@@ -300,10 +300,15 @@ static JSValue js_start(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     JS_FreeCString(ctx, json);
 
     cm_log_set_level(s->cfg.log_level);
-    CM_LOGI("start #%d -> %s:%d ufrag=%s pt=%d/%d rect=%d,%d,%d,%d",
+    /* policy 一定要打进这一行：它是「同一份码流两种消费方式」的唯一开关，
+     * 真机排查马赛克/冻结投诉时第一件事就是确认用户当时在哪一档。
+     * 只在这一行打还不够 —— 用户可能在游玩中热切换（cm_cmd.c 的 setPolicy
+     * 会另打一条 "policy -> ..."），两条日志合起来才是完整轨迹。 */
+    CM_LOGI("start #%d -> %s:%d ufrag=%s pt=%d/%d rect=%d,%d,%d,%d policy=%s",
             s->id, s->cfg.remote_ip, s->cfg.remote_port, s->cfg.ufrag,
             s->cfg.video_pt, s->cfg.audio_pt,
-            s->cfg.rect_x, s->cfg.rect_y, s->cfg.rect_w, s->cfg.rect_h);
+            s->cfg.rect_x, s->cfg.rect_y, s->cfg.rect_w, s->cfg.rect_h,
+            s->cfg.policy ? "quality-first" : "smooth-first");
 
     if (pthread_create(&s->rx_thread, NULL, cm_rx_main, s) != 0) {
         sess_unlink(s);

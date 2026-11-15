@@ -188,7 +188,7 @@ static void emit_stat(cm_sess *s) {
             "\"auDrop\":%llu,\"gateDrop\":%llu,\"kfReq\":%llu,\"dup\":%llu,"
             "\"reorder\":%llu,\"spsInject\":%llu,\"rtcpIn\":%llu,\"rrSent\":%llu,"
             "\"nackSent\":%llu,\"nackReq\":%llu,\"nackRecovered\":%llu,"
-            "\"relax\":%llu,\"staleRtx\":%llu,\"pDrop\":%llu,"
+            "\"relax\":%llu,\"relaxDrop\":%llu,\"staleRtx\":%llu,\"pDrop\":%llu,"
             /* join = 「一个残缺的切片组被接回同一帧」的次数（cm_rtp.c 的
              * au_joined）。终末地修复的判据：这个数持续增长说明 AU 边界
              * 确实被接回来了；恒为 0 说明这一局压根没有多 slice 帧。 */
@@ -245,6 +245,9 @@ static void emit_stat(cm_sess *s) {
             (unsigned long long)s->stats.vid_nack_req,
             (unsigned long long)s->stats.vid_nack_recovered,
             (unsigned long long)s->stats.vid_relax,
+            /* relaxDrop = 画质优先策略下被闸门拒收的 P 帧数（见 cm_session.h）。
+             * 与 relax 互斥，用来在真机上区分用户当前生效的是哪一档。 */
+            (unsigned long long)s->stats.vid_relax_dropped,
             (unsigned long long)s->stats.vid_stale_rtx,
             /* pDrop = 因为丢包整帧丢掉的 P 帧个数（L1）。
              * 和 gateDrop 的区别：gateDrop 是「没关键帧所以不放行」，

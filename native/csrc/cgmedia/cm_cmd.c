@@ -546,6 +546,33 @@ int cm_cmd_apply(cm_sess *s, const char *op, const char *json) {
         return 0;
     }
 
+    if (strcmp(op, "setPolicy") == 0) {
+        /* ★ 网络波动策略热切换（见 cm_session.h 的 cm_cfg.policy）。
+         *
+         * 只改一个字段，不碰管线、不碰 RTP 状态 —— 下一次 flush_frame() 走进
+         * IDR 饥饿分支时就会按新策略取舍，当前这一帧不受影响。
+         *
+         * 从「画质优先」切回「流畅优先」时要顺手清掉两样东西，否则用户会觉得
+         * 切了没反应：
+         *   policy_gave_up ——  否则下一次饥饿不会再发 code:-8（虽然流畅优先
+         *     本来就不发 -8，但留着标记会干扰「切回画质优先」后的第一次通知）；
+         *   kf_starve_ms    ——  否则饥饿计时还是上一个策略留下的旧起点，
+         *     切回流畅优先会立刻（甚至马上）触发一次放宽，白白显示一堆花屏。
+         */
+        int pol = cm_json_get_int(json, "policy", 0) ? 1 : 0;
+        if (s->cfg.policy != pol) {
+            s->cfg.policy = pol;
+            s->policy_gave_up = 0;
+            s->kf_starve_ms = 0;
+            s->relax_until_ms = 0;
+            CM_LOGW("#%d policy -> %s (%s)", s->id,
+                    pol ? "quality-first" : "smooth-first",
+                    pol ? "freeze and switch session on IDR starvation"
+                        : "allow artifacts to keep the picture moving");
+        }
+        return 0;
+    }
+
     if (strcmp(op, "setAudio") == 0 || strcmp(op, "setAudioEnabled") == 0) {
         int on = cm_json_get_int(json, "on", 1);
         pthread_mutex_lock(&s->gst_mu);

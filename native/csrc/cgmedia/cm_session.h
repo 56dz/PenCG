@@ -81,6 +81,19 @@ typedef struct {
      * （只含 TLS1.2 现代套件、去掉静态 RSA），用来 A/B「网关是否按
      * DTLS/JA3 类指纹风控」。use_srtp/扩展集合不动。默认 0。 */
     int  chrome_fp;
+    /* ★ 网络波动策略（cm_rtp.c 的 IDR 饥饿闸门怎么取舍）
+     *
+     *   0 = 流畅优先（默认）：连续 IDR_STARVE_RELAX_MS 拿不到 IDR 就**放行**
+     *       P 帧（接受马赛克残留），到期 RELAX_RESET_MS 再收紧。画面一直在动。
+     *   1 = 画质优先：绝不把残缺参考帧推给解码器，宁可冻着；饥饿到阈值时发
+     *       一次 code:-8 事件让 JS 立刻换会话（新会话必定给新 IDR，约 5 秒
+     *       出画、对局进度不丢）。代价是换会话瞬间画面会闪黑 1~2 秒。
+     *
+     * 为什么必须二选一：网关对一个会话的 IDR 周期可以长达 604 秒、对 PLI 零
+     * 响应、对 NACK 不重传（2026-11-15 真机定案，见 docs/BUGFIX-video-sink-freeze.md）。
+     * 「画面在动但花」和「画面干净但可能黑一下」是同一份码流的两种消费方式，
+     * 只能由用户选。热切换走 cm_cmd.c 的 setPolicy op，不需要重建会话。 */
+    int  policy;
 } cm_cfg;
 
 /* ---------------- 事件（JSON 文本，poll 时拼数组） ---------------- */
@@ -169,6 +182,15 @@ typedef struct {
      * >0 说明用户看到过花屏 —— 但那是我们**主动**用花屏换回画面在动，
      * 比永久冻结好。持续增长说明网关侧真的太差。 */
     uint64_t vid_relax;
+    /* ★ 画质优先策略下「宁可丢掉也不放行」的 P 帧个数（cm_rtp.c 的 policy 分支）。
+     *
+     * 只有在 cfg.policy=1 时才会增长。它和 vid_relax 是一对互斥的计数器：
+     *   vid_relax 涨、vid_relax_dropped 不涨 => 流畅优先，用户看到过花屏
+     *   vid_relax_dropped 涨、vid_relax 不涨 => 画质优先，画面是冻的但没有错块
+     * 两者同时涨 => 中途热切换过策略（cm_cmd.c 的 setPolicy）。
+     *
+     * 排查「马赛克残留」投诉时先看它：不涨就说明错块不是来自饥饿放行。 */
+    uint64_t vid_relax_dropped;
     /* 落在当前 AU seq 范围之外的重传包数（R2 修正后才有的计数）。
      * >0 说明缺口表 TTL 跨过了 AU 边界 —— 归零不影响功能，是健康信号。 */
     uint64_t vid_stale_rtx;
@@ -338,6 +360,10 @@ typedef struct cm_sess {
     /* IDR 饥饿兜底的计时基准：第一次因「没有 IDR」而走闸门丢弃的时刻。
      * 0 = 当前不在饥饿状态（有 IDR，或刚恢复）。 */
     uint64_t kf_starve_ms;
+    /* 画质优先策略专用：本次饥饿段是否已经报过 code:-8 让 JS 换会话。
+     * 0 = 还没报；1 = 已报，等到下一个完整 IDR 再复位。
+     * 没有这个标记会每秒发一条事件，JS 侧会把 stallTries 一次吃满。 */
+    int      policy_gave_up;
     /* P1-7 修正（REVIEW-report P1-7）：饥饿放行的「重新收紧」期限。
      *
      * 旧行为：放行时把 have_kf 置 1 就再也不管了 —— 若网关此后只发

@@ -23,7 +23,10 @@ const S = {
    * Falcon 会给我们发 App 级 onHide —— 而 app.js 的 onHide 会 stopPlay()。
    * 不加这个闸门，用户在云游戏里刚点开输入框，整局就被拆掉了。
    * PenBili 用同样的 imBusy 守卫（src/pages/index/index.vue:3298-3310）。 */
-  imBusy: false
+  imBusy: false,
+  /* 网络波动策略：'smooth' | 'quality'。由 startPlay 从调用方传入、
+     由 setPolicy 热改；只影响 native 闸门（cm_cfg.policy）与 JS 侧判据。 */
+  policy: 'smooth'
 };
 
 function parseSdp(sdp) {
@@ -494,6 +497,7 @@ export async function startPlay(cfg) {
   const o = cfg || {};
   S.gameCode = o.gameCode;
   S.quality = o.quality || 'low';
+  S.policy = o.policy === 'quality' ? 'quality' : 'smooth';
   S.offset = currentOffset();
   S.phase = 'connecting';
   S.lastError = '';
@@ -580,7 +584,11 @@ export async function startMedia() {
     // ★ 取证开关（DTLS 指纹 A/B）：DEV_CHROME_FP=1 时 native 的 ClientHello
     // 用 Chrome 序 cipher_list（见 docs/DTLS-CLIENTHELLO-FINGERPRINT.md）。
     // 量产/默认恒为 0。来源：src/dev-autostart.js 的 DEV_CHROME_FP。
-    chromeFp: DEV_CHROME_FP ? 1 : 0
+    chromeFp: DEV_CHROME_FP ? 1 : 0,
+    // ★ 网络波动策略（cm_cfg.policy）：0=流畅优先（IDR 饥饿 4s 后放行、允许花屏），
+    // 1=画质优先（饥饿时不放行、宁可冻结，由 JS 立刻换会话拿新 IDR）。
+    // 与 noRtcp/chromeFp 同模式；游玩中切换走 setPolicy() 的 setPolicy op，热改不重连。
+    policy: S.policy === 'quality' ? 1 : 0
   };
   const r = callJSON(mm, 'start', [JSON.stringify(cfgObj)]);
   if (!r || !r.id) throw new Error('cgmedia start 失败: ' + JSON.stringify(r));
@@ -596,6 +604,31 @@ export function sendInput(cmd) {
 
 export function setQuality(q) {
   return send('game_set_quality', { quality: q });
+}
+
+/* 切换网络波动策略（游玩中热切换，不重建会话）。
+ *
+ * 语义见 const.js 的 POLICIES 注释：
+ *   'smooth'  流畅优先：IDR 饥饿 4s 后放行残缺参考帧，画面继续动，允许马赛克残留
+ *   'quality' 画质优先：饥饿时不放行，宁可冻结等 IDR，JS 侧立刻换会话拿新 IDR
+ *
+ * native 侧只改一个 int（cm_cfg.policy），闸门下一帧就按新策略走，不牵涉
+ * 任何管线/会话状态，所以可以在游玩中直接调用。 */
+export function setPolicy(p) {
+  var v = p === 'quality' ? 'quality' : 'smooth';
+  S.policy = v;
+  if (!S.mediaId || !globalThis.__cgMedia) return false;
+  try {
+    callJSON(globalThis.__cgMedia, 'cmd', [
+      S.mediaId,
+      JSON.stringify({ op: 'setPolicy', policy: v === 'quality' ? 1 : 0 })
+    ]);
+    logInfo('[media] policy → ' + v);
+    return true;
+  } catch (e) {
+    logWarn('[media] setPolicy 失败: ' + ((e && e.message) || e));
+    return false;
+  }
 }
 
 /* 主动向网关要一个关键帧（RTCP PLI，走 SRTCP 加密）。
