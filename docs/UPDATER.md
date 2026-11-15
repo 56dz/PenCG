@@ -111,33 +111,69 @@ PenBili 是 `getJson` / `setJson`，PenCG 是 **`getJSON` / `setJSON`**（大写
 
 另外 PenCG 的 `storage.js` 没有导出 `logWarn`（PenBili 的 `storage.js` 导出了），日志统一从 `services/log.js` 拿。
 
-### 4.3 没有 `installAmr`（关键差异）
+### 4.3 `installAmr` 走 native（v1.2.7 起已补齐）
 
 | | PenBili | PenCG |
 | :-- | :-- | :-- |
-| native 模块 | `player2` / `cgmedia` | `cgnative` / `cgmedia` |
-| 安装接口 | `player2.installAmr(path)` | **无** |
-| 实现 | `native/csrc/jsapi_player2.c` 的 `js_install_amr`，内部调 `/bin/miniapp_cli install <path>` | - |
+| native 模块 | `player2` | `cgnative` |
+| 安装接口 | `player2.installAmr(path)`（`jsapi_player2.c:518`） | **`cgnative.installAmr(path)`**（`cgnative.c` 的 `js_install_amr`） |
+| 实现 | 内部调 `/bin/miniapp_cli install <path>` | 同左，判据/超时/错误码语义完全照抄 |
+| 导出注册 | `X("installAmr", ...)` | `CG_EXPORTS` 里 `F("installAmr", js_install_amr, 1)` |
 
-已 grep 全仓核实：
+**为什么必须绕到 native**：设备上的 `$falcon.jsapi` 里**没有 pm 模块**
+（`strings /usr/lib/libfalcon.so` 的模块名池只有 http/storage/modal/nvue/updater，
+虽然有 `register_pm_jsapi` 符号，但运行时取不到），JS 侧调
+`pm.installPackage` 一律拿到 `undefined`。
+
+**唯一可行通道**（PenBili 与 PenCG 都在真机上验过）：
 
 ```
-grep -rn "installAmr|miniapp_cli" PenCG/
+/bin/miniapp_cli install <amr>   ->  {"appid": "8002026110200003", "ret": 0}
 ```
 
-- `installAmr` 命中 0 处。
-- `miniapp_cli` 只出现在 `PenCG/tools/*.ps1` 与 `docs/` 里（部署脚本和文档），**没有任何 native 导出**。
-- `PenCG/native/csrc/cgnative/cgnative.c` 的 `CG_EXPORTS` 宏（约 3004-3029 行）导出的是：`postSync` `requestSync` `startRequest` `startPost` `takeResult` `cancelAll` `sha256Hex` `md5Hex` `b64enc` `b64dec` `tripleDesB64` `randomHex` `hmacSha1B64` `utf8Hex` `version` `wsOpen` `wsState` `wsSend` `wsPoll` `wsPollEx` `wsClose` `wsList` `wsLastFrame` `imgScan` `imgConv`。没有安装类接口。
+它把包装进 `a`/`b` 槽位，**成功后旧槽被删除**。
 
-因此 `installAmr()` 目前恒返回：
+三个必须记住的坑（都真机踩过）：
+
+1. **成败只能看 stdout 里的 `"ret": 0`**。`miniapp_cli` 失败时 shell 退出码
+   依然是 0：`install /tmp/nope.amr` ⇒ `{"reason": "install failed: 1", "ret": -1}`
+   但 `RC=0`；`echo hello > /tmp/bad.amr` 再装 ⇒ `ret: -1` 同样 `RC=0`。
+   用 rc 判定会全部假阳性，rc 只能当诊断信息回传给 JS。
+2. **宿主把 SIGCHLD 设成 `SIG_IGN`**（`SigIgn` 含 `0x10000`），子进程被内核自动回收，
+   `waitpid` 立刻返回 `-1/ECHILD`。`img_ffmpeg_to_png` 就曾因此把成功当失败
+   （见 `cgnative.c` 里那段注释）。`js_install_amr` 改用**读到 EOF** 作为子进程
+   结束的信号，ECHILD 一律不算错。
+3. **装完不会自动重启 App**：槽位已切到新版本，但当前进程仍跑旧代码。
+   `upd-view.js` 的 `tryInstall()` 据此提示「已安装 vX」+「重新打开软件即可使用新版本」，
+   实测 `kill -9` 后宿主自动拉起即新版本。
+
+`installAmr` 的返回形态与 PenBili 一致：
 
 ```js
-{ ok: false, code: 'NO_INSTALLER', message: '当前版本不支持自动安装，请手动下载' }
+{ ok: true,  rc: 0 }                                  // 成功
+{ ok: false, code: 'INSTALL_FAILED', message: '...', rc: 0, out: '...' }   // 装失败
+{ ok: false, code: 'FILE_NOT_FOUND', message: 'amr not found or not readable' } // 包没下下来
+{ ok: false, code: 'INSTALL_TIMEOUT', message: '...' } // 60s 超时后 SIGKILL
 ```
 
-`upd-view.js` 的 `tryInstall()` 对这个 code **特殊处理**：不判成「安装失败」（那样会吓到用户），而是进 `stage:'downloaded'`，提示「安装包已下载到设备」并把落盘路径显示出来。
+`FILE_NOT_FOUND` 与 `INSTALL_FAILED` 必须分开：前者是「下载没成功」，
+提示应该指向网络；后者是「包坏了/装不上」，提示应该指向重试或手动安装。
 
-`updateCapability()` 返回 `{canDownload, canInstall:false}`，弹窗据此把主按钮文案从「立即更新」改成「下载安装包」—— 不能让用户点了一个写着「立即更新」的按钮，最后只下到一个包。
+### 4.3.1 按钮文案不再探测能力
+
+`updateCapability()` 的 `canInstall` **恒为 `true`**，与 PenBili 一致
+（PenBili 的弹窗里三个主按钮全部写死「立即更新」，从不探测）。
+
+早期的写法是同步探测 `typeof mod.installAmr === 'function'`，这有两个问题：
+
+- 探测是「同步 API 不能 await」的妥协产物，模块加载时序稍有偏差就误判成
+  `false`，把「立即更新」降级成「下载安装包」——**这正是用户报的
+  「显示当前版本更新不了」**（1.2.4 上 `canInstall` 还是写死的 `false`）。
+- v1.2.7 起 native `installAmr` 是**编译期一定存在**的导出，不存在
+  「新前端 + 旧 .so」的组合（前端与 `.so` 在同一个 `.amr` 里一起发）。
+
+真装不了时 `installAmr()` 会返回 `ok:false` 并带上 `rc` 与原始 `out`，
+走 `upd-view.js` 的 error 分支如实报错，比提前降级按钮更诚实。
 
 ### 4.4 版本号来源不同
 
@@ -171,10 +207,39 @@ PenBili 在 `updater.js` 里自己定义 `APP_VERSION`；PenCG 已经有唯一�
 | 弹窗渲染 | 通过 | 把 `version.js` 临时改成 1.2.2 后装机，自动弹出对话框：标题「发现新版本 v1.2.3」、徽标 `v1.2.3`、`325 KB`、副标题「新版本 v1.2.3 · 当前 v1.2.2」，正文多行未被裁切 |
 | 双源按钮文案 | 通过 | 两个下载按钮的括号里是**当前命中的源名**（GitCode / GitHub），不是写死的 |
 | 整页替换 | 通过 | 弹窗出现时首页整体不渲染，没有叠层（本运行时禁用 position:absolute/z-index，靠 `v-if` 换页） |
-| 下载 + 安装 | **未验证** | 没点过下载按钮；`installAmr` 在本仓库恒返回 `NO_INSTALLER`，按钮文案已降级为「下载安装包」 |
+| 下载 + 安装 | 通过（v1.2.7） | `DEV_UPD_PROBE` 探针跑完整链路：`check ok=1 tag=v1.2.6 asset=PenCG.amr size=339190` → `download ok=1 path=/userdisk/miniapp/downloaded/40b1ceef...` → `install ok=1 rc=0` → `done PASS`；装完槽位从 `a/`(1.2.6) 切到 `b/`(1.2.7)。详见 §4.7 |
 
 自动检查失败或断网时的表现（回落 GitHub、再回落镜像）也只有单测覆盖，
 真机上没制造过断网场景。
+
+### 4.7 链路自证探针 `DEV_UPD_PROBE`（照 PenBili 的 `runUpdateProbe`）
+
+真机上有个死结：**版本一旦追平远端就再也不会弹「发现新版本」**，也就永远没机会
+点「立即更新」，整条链路无法验收。所以留了一个开关
+（`src/dev-autostart.js`，取证结束必须改回 `null`）：
+
+| 形态 | 行为 |
+| :-- | :-- |
+| `{ delay: 5000 }` | 走完整链路：`fetchLatestRelease` → `downloadFileToDisk` → `installAmr`；版本比较只记录不拦截（与 PenBili 一致） |
+| `{ path: '/userdisk/miniapp/data/x.amr', delay: 5000 }` | 跳过网络，直接喂本地包验装机那一跳 |
+
+判据是逐行日志，一条 grep 就能定论：
+
+```
+[dev] upd-probe start local=1.2.7 fixed=(none) in 5000ms
+[dev] upd-probe check ok=1 stage=- msg=- tag=v1.2.6 asset=PenCG.amr size=339190
+[dev] upd-probe newer=0 (仅记录，不拦截)
+[dev] upd-probe url=https://gitcode.com/dz56dz/PenCG/releases/download/v1.2.6/PenCG.amr
+[dev] upd-probe download ok=1 path=/userdisk/miniapp/downloaded/40b1ceef518bf374ff8f360bb7b74f75 msg=-
+[dev] upd-probe install ok=1 rc=0 msg=-
+[dev] upd-probe done PASS
+```
+
+失败会停在具体环节：`done FAIL at check` / `at url` / `at download`。
+
+> 注意：探针里的 `installAmr` 是**真的装包**。跑 `{delay}` 形态时，远端若是旧版本，
+> 装完设备会**被降级**到那个版本（本次实测：v1.2.7 的探针把设备装成了 v1.2.6，
+> 槽位从 `b/` 变回 `a/`）。验完必须把当前版本重新推上去。
 
 ### 6.1 版本号
 
@@ -210,6 +275,38 @@ node ../env/node_modules/aiot-vue-cli/src/cli.js -q -p
 - **不是 draft、不是 prerelease**（GitCode 还要 `release_status` 不是 `'pre'`）；
 - **资产文件名必须是 `PenCG.amr`** —— `normalizeRelease()` 优先挑 `name === ASSET_NAME` 的资产，没有才退回 `assets[0]`。用别的名字也能工作，但一旦将来一个 release 挂了多个资产（比如同时放 debug 包），挑错的风险就出现了。
 - **更新说明（body）** 会原样显示在弹窗左栏，`bodyLines()` 会去掉 Markdown 标记（标题 `#`、引用 `>`、列表 `-`/`*`/`+` 换成 `·`、`**粗体**`、`` `代码` ``、`[文字](链接)` 只留文字）。**不要用 emoji** —— 设备没有 emoji 字体，会渲染成方块（`docs/AI-CODE-RULES.md` §1.2）。
+
+#### 6.3.1 GitCode 上附件（`upload_url` + OBS PUT）
+
+GitCode 建 release 只带 4 个源码包（`v1.2.7.zip/.tar.gz/.tar.bz2/.tar`），
+**`PenCG.amr` 必须另外传**。踩过的坑与唯一可行路径（都实测过）：
+
+1. **`target_commitish` 必须是完整 40 位 sha**。传 `main` 或短 sha `919c8d4f` 都会
+   返回 `{"error_code":400,...,"error_message":"919c8d4f is not exist"}`。
+2. **`git credential` 取不到 gitcode 的密码**（远端是 SSH，没有 HTTPS 凭据），
+   而 `POST /releases` 一类的接口需要 `access_token`（24 字符）。
+3. 上传走两跳，**没有** `attach_files` / `upload` / `assets` 这类捷径
+   （全部 404，不用再试）：
+
+```bash
+TOK=<24位 access_token>
+# 第一跳：要一个预签名 OBS 地址
+curl -s "https://api.gitcode.com/api/v5/repos/dz56dz/PenCG/releases/v$VER/upload_url?file_name=PenCG.amr&access_token=$TOK"
+# -> {"url":"https://file.gitcode.com/<projectId>/releases/untagger_<uuid>/PenCG.amr?AccessKeyId=...&Signature=...",
+#     "headers":{"x-obs-meta-project-id":"...","x-obs-acl":"private",
+#                "x-obs-callback":"<base64>","Content-Type":"application/octet-stream"}}
+
+# 第二跳：PUT 原文件，headers 必须原样带上（缺 x-obs-callback 则文件传上去了但不挂到 release）
+curl -s -X PUT --data-binary @PenCG.amr   -H "x-obs-meta-project-id: ..." -H "x-obs-acl: private"   -H "x-obs-callback: <base64>" -H "Content-Type: application/octet-stream"   "$URL"     # 响应体是 success
+```
+
+验证：`GET .../releases/v$VER` 的 `assets` 里应多出一项
+`{"name":"PenCG.amr","type":"attach",...}`；再 `curl -sL` 下载回来比字节数。
+
+GitHub 侧简单得多：`POST https://api.github.com/repos/56dz/PenCG/releases`（`Authorization: token <gho_...>`）
+拿 `upload_url`，再 `POST "$upload_url?name=PenCG.amr"` + `Content-Type: application/octet-stream`
+即可。本机没有 `gh` CLI，token 用
+`git-credential-manager get` 从 `~/.git-credentials` 之类的位置取（别回显到日志里）。
 
 ### 6.4 发布顺序
 
@@ -260,6 +357,6 @@ node ../env/node_modules/aiot-vue-cli/src/cli.js -q -p
 | `upd source ... parse fail` | 返回 200 但字段对不上（通常是 draft/prerelease/没有资产） |
 | `upd auto suppressed (skip=... quiet=...)` | 用户设过跳过/今天不提示，自动检测被拦 |
 | `upd downloadFile no path, raw=...` | `downloadFile` 回调没给路径，`raw` 是原始回调对象 |
-| `upd install unsupported, amr at ...` | 下载成功但 native 没有安装接口（当前必然出现） |
+| `upd install unsupported, amr at ...` | 下载成功但 native 没有安装接口（v1.2.6 及更早才会出现；v1.2.7 起走 `install ok via miniapp_cli rc=N`） |
 
 真机上想手动验证下载链路，可以直接在 `diag` 页（只有 `DEV_AUTOSTART` 能进）或者临时加一个按钮调 `downloadFileToDisk(下载直链)`，看回调里的 `result` 字段是什么形态。

@@ -150,12 +150,20 @@ import {
 import { restoreSession, isLoggedIn, sessionVersionAsync, sessionAge, logout } from '../../services/auth.js';
 import { navTo, takeTabParam } from '../../services/nav.js';
 import { logInfo, logWarn } from '../../services/log.js';
+import { APP_VERSION } from '../../services/version.js';
 import logoImg from '../../assets/logo.png';
 import sponsorImg from '../../assets/sponsor.png';
 import MineBody from '../../components/mine-body.vue';
 import UpdateDialog from '../../components/update-dialog.vue';
 import { bindView, unbindView, autoCheckUpdate as runAutoCheck } from '../../services/upd-view.js';
-import { DEV_AUTOSTART, DEV_LOGOUT } from '../../dev-autostart.js';
+import { DEV_AUTOSTART, DEV_LOGOUT, DEV_UPD_PROBE } from '../../dev-autostart.js';
+import {
+  installAmr,
+  fetchLatestRelease,
+  downloadFileToDisk,
+  downloadUrl,
+  isNewer
+} from '../../services/updater.js';
 
 // 所有栏目都是「原地换内容」，不再有跳页的 tab。
 // 「搜索」入口已移除：每个栏目顶部都有搜索框，不需要重复一个搜索 tab。
@@ -451,6 +459,74 @@ export default {
        * 不会白屏等它。autoCheckUpdate 内部整体 try/catch 且永不 reject，
        * 静默失败（连日志都是 W 级），用户不点「检查更新」时完全无感。 */
       runAutoCheck();
+      this.devUpdProbe();
+    },
+    /* ★ 仅取证用（见 src/dev-autostart.js 的 DEV_UPD_PROBE 说明）：
+     * 照 PenBili runUpdateProbe 的同构探针，把「检测 → 下载 → 安装」三步
+     * 逐行打出来。给了 path 就跳过网络直接验装机那一跳。
+     * 装完**不会**自动重启，槽位已切，需推回当前版本。 */
+    devUpdProbe() {
+      const d = DEV_UPD_PROBE;
+      if (!d) return;
+      const delay = Number(d.delay) || 4000;
+      const fixed = d.path || '';
+      logWarn('[dev] upd-probe start local=' + APP_VERSION +
+        ' fixed=' + (fixed || '(none)') + ' in ' + delay + 'ms');
+      setTimeout(function () {
+        if (fixed) {
+          logWarn('[dev] upd-probe skip check/download (fixed path)');
+          installAmr(fixed)
+            .then(function (ins) {
+              logWarn('[dev] upd-probe install ok=' + (ins && ins.ok ? 1 : 0) +
+                ' rc=' + ((ins && ins.rc == null) ? '?' : ins.rc) +
+                ' msg=' + ((ins && ins.message) || '-'));
+              logWarn('[dev] upd-probe done ' + (ins && ins.ok ? 'PASS' : 'FAIL'));
+            })
+            .catch(function (e) {
+              logWarn('[dev] upd-probe install 抛错 ' + ((e && e.message) || e));
+              logWarn('[dev] upd-probe done FAIL');
+            });
+          return;
+        }
+        fetchLatestRelease()
+          .then(function (r) {
+            logWarn('[dev] upd-probe check ok=' + (r.ok ? 1 : 0) +
+              ' stage=' + (r.stage || '-') + ' msg=' + (r.message || '-') +
+              ' tag=' + (r.ok ? r.release.tag : '-') +
+              ' asset=' + (r.ok ? (r.release.assetName || '-') : '-') +
+              ' size=' + (r.ok ? r.release.assetSize : 0));
+            if (!r.ok) {
+              logWarn('[dev] upd-probe done FAIL at check');
+              return null;
+            }
+            logWarn('[dev] upd-probe newer=' + (isNewer(r.release.tag, APP_VERSION) ? 1 : 0) +
+              ' (仅记录，不拦截)');
+            const link = downloadUrl(r.release.assetUrl, false);
+            logWarn('[dev] upd-probe url=' + (link || '(none)'));
+            if (!link) {
+              logWarn('[dev] upd-probe done FAIL at url');
+              return null;
+            }
+            return downloadFileToDisk(link).then(function (dl) {
+              logWarn('[dev] upd-probe download ok=' + (dl.ok ? 1 : 0) +
+                ' path=' + (dl.filePath || '-') + ' msg=' + (dl.message || '-'));
+              if (!dl.ok) {
+                logWarn('[dev] upd-probe done FAIL at download');
+                return null;
+              }
+              return installAmr(dl.filePath).then(function (ins) {
+                logWarn('[dev] upd-probe install ok=' + (ins && ins.ok ? 1 : 0) +
+                  ' rc=' + ((ins && ins.rc == null) ? '?' : ins.rc) +
+                  ' msg=' + ((ins && ins.message) || '-'));
+                logWarn('[dev] upd-probe done ' + (ins && ins.ok ? 'PASS' : 'FAIL'));
+              });
+            });
+          })
+          .catch(function (e) {
+            logWarn('[dev] upd-probe 抛错 ' + ((e && e.message) || e));
+            logWarn('[dev] upd-probe done FAIL');
+          });
+      }, delay);
     },
     /* ★ 仅取证用（见 src/dev-autostart.js 的 DEV_LOGOUT 说明）：
      * 让 app 自己在启动后走一次生产 logout()（清 cg.js 的 G + 删盘上

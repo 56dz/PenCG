@@ -3000,6 +3000,167 @@ static JSValue js_img_conv(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     return r;
 }
 
+/* ---------------- JS: installAmr ---------------- */
+
+/*
+ * installAmr(path) -> { ok, rc, out } / { ok:false, code, error }
+ *
+ * 为什么必须绕到 native：设备上的 $falcon.jsapi 里**没有 pm 模块**
+ * （libfalcon.so 的模块名池只有 http/storage/modal/nvue/updater），
+ * JS 侧拿不到任何安装入口，所以只能下沉到 native 起子进程。
+ *
+ * 唯一可行通道是 PenBili 上真机验证过的：
+ *   /bin/miniapp_cli install <amr>
+ * 它把包装进 a/b 槽位（成功后**旧槽被删除**）并输出
+ *   {"appid": "8002026110200003", "ret": 0}
+ *
+ * 三个坑（都真机踩过，改之前先读）：
+ *  1) **成败只能看 stdout 里的 "ret": 0**。miniapp_cli 失败时 shell 退出码
+ *     依然是 0（`install /tmp/nope.amr` 实测 RC=0 而 ret=-1），用 rc 判定
+ *     会全部假阳性；反过来说 rc 只能当诊断信息。
+ *  2) 宿主把 SIGCHLD 设成 SIG_IGN（SigIgn 含 0x10000），子进程被内核自动
+ *     回收，waitpid 立刻返回 -1/ECHILD。ffmpeg 那次就因此把成功当失败
+ *     （见 img_ffmpeg_to_png 的注释）。这里改用**读到 EOF** 作为子进程结束
+ *     的信号，ECHILD 一律不算错。
+ *  3) **装完不会自动重启 App**：槽位已切到新版本，但当前进程仍跑旧代码。
+ *     JS 侧据此提示「重新打开软件即可使用新版本」（实测 kill -9 后宿主
+ *     自动拉起即新版本）。
+ *
+ * 60s 超时：解包 + md5 校验 + 落盘，339KB 的包实测 ~2s，留足余量给更大包
+ * 与慢速 eMMC；超时后 SIGKILL 并返回 TIMEOUT，绝不卡住 JS 线程。
+ */
+#define INSTALL_CMD        "/bin/miniapp_cli"
+#define INSTALL_OUT_CAP    1024
+#define INSTALL_TIMEOUT_MS 60000
+
+static JSValue install_fail(JSContext *ctx, const char *code, const char *msg) {
+    JSValue res = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, res, "ok", JS_NewBool(ctx, 0));
+    JS_SetPropertyStr(ctx, res, "code", JS_NewString(ctx, code));
+    JS_SetPropertyStr(ctx, res, "error", JS_NewString(ctx, msg));
+    return res;
+}
+
+static JSValue js_install_amr(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    const char *path;
+    size_t plen = 0;
+    int pipefd[2] = {-1, -1};
+    pid_t pid;
+    char out[INSTALL_OUT_CAP];
+    int used = 0;
+    long t0;
+    int rc = 0;
+    int timedOut = 0;
+    int ok;
+    JSValue res;
+
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "cgnative.installAmr(path)");
+    path = arg_cstr(ctx, argv[0], &plen);
+    if (!path || !plen) {
+        if (path) JS_FreeCString(ctx, path);
+        return JS_ThrowTypeError(ctx, "cgnative.installAmr(path)");
+    }
+    /* 先验文件：把「下载没成功」和「装包失败」分开，两者对用户的提示完全不同 */
+    if (access(path, R_OK) != 0) {
+        JS_FreeCString(ctx, path);
+        return install_fail(ctx, "FILE_NOT_FOUND", "amr not found or not readable");
+    }
+    if (pipe(pipefd) != 0) {
+        JS_FreeCString(ctx, path);
+        return install_fail(ctx, "PIPE_FAILED", "pipe() failed");
+    }
+    pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        JS_FreeCString(ctx, path);
+        return install_fail(ctx, "SPAWN_FAILED", "fork() failed");
+    }
+    if (pid == 0) {
+        int dn;
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        if (pipefd[1] > 2) close(pipefd[1]);
+        dn = open("/dev/null", O_RDONLY);
+        if (dn >= 0) {
+            dup2(dn, STDIN_FILENO);
+            if (dn > 2) close(dn);
+        }
+        execl(INSTALL_CMD, "miniapp_cli", "install", path, (char *)NULL);
+        _exit(127);
+    }
+    close(pipefd[1]);
+    out[0] = '\0';
+    t0 = now_ms();
+    for (;;) {
+        struct pollfd pf;
+        int n;
+        ssize_t r;
+        if ((now_ms() - t0) >= INSTALL_TIMEOUT_MS) {
+            timedOut = 1;
+            break;
+        }
+        pf.fd = pipefd[0];
+        pf.events = POLLIN;
+        pf.revents = 0;
+        n = poll(&pf, 1, 200);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (n == 0) {
+            /* 没数据：探一下子进程（ECHILD 属正常，见注释 2） */
+            waitpid(pid, &rc, WNOHANG);
+            continue;
+        }
+        if (used >= (int)sizeof(out) - 1) {
+            /* 缓冲满：继续排空但不存，避免子进程写阻塞 */
+            char sink[256];
+            r = read(pipefd[0], sink, sizeof(sink));
+            if (r <= 0) break;
+            continue;
+        }
+        r = read(pipefd[0], out + used, sizeof(out) - 1 - used);
+        if (r > 0) {
+            used += (int)r;
+            out[used] = '\0';
+            continue;
+        }
+        if (r == 0) break; /* EOF：子进程关掉了 stdout，安装已结束 */
+        if (errno == EINTR || errno == EAGAIN) continue;
+        break;
+    }
+    out[used] = '\0';
+    close(pipefd[0]);
+    if (timedOut) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &rc, WNOHANG);
+        JS_FreeCString(ctx, path);
+        {
+            JSValue r = install_fail(ctx, "INSTALL_TIMEOUT", "miniapp_cli install timed out");
+            JS_SetPropertyStr(ctx, r, "rc", JS_NewInt32(ctx, rc));
+            JS_SetPropertyStr(ctx, r, "out", JS_NewString(ctx, out));
+            return r;
+        }
+    }
+    waitpid(pid, &rc, WNOHANG);
+    JS_FreeCString(ctx, path);
+
+    /* 判据见注释 1：只有 "ret": 0 代表装包成功 */
+    ok = (strstr(out, "\"ret\": 0") != NULL) || (strstr(out, "\"ret\":0") != NULL);
+    res = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, res, "ok", JS_NewBool(ctx, ok ? 1 : 0));
+    JS_SetPropertyStr(ctx, res, "rc", JS_NewInt32(ctx, rc));
+    JS_SetPropertyStr(ctx, res, "out", JS_NewString(ctx, out));
+    if (!ok) {
+        JS_SetPropertyStr(ctx, res, "code", JS_NewString(ctx, "INSTALL_FAILED"));
+        JS_SetPropertyStr(ctx, res, "error", JS_NewString(ctx, "miniapp_cli install failed"));
+    }
+    return res;
+}
+
 /* ---------------- 模块定义 ---------------- */
 #define CG_EXPORTS(F) \
     F("postSync",     js_post_sync,      4) \
@@ -3026,7 +3187,8 @@ static JSValue js_img_conv(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     F("wsList",       js_ws_list,        0) \
     F("wsLastFrame",  js_ws_last_frame,  1) \
     F("imgScan",      js_img_scan,       1) \
-    F("imgConv",      js_img_conv,       1)
+    F("imgConv",      js_img_conv,       1) \
+    F("installAmr",   js_install_amr,    1)
 
 static int cgnative_module_init(JSContext *ctx, JSModuleDef *m) {
     JSValue def = JS_NewObject(ctx);

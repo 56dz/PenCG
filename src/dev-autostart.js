@@ -92,3 +92,25 @@ export const DEV_AUTOTAP = false;
  *
  * ★ 取证/验收结束必须改回 0。★ */
 export const DEV_DESIGN_WIDTH = 0;
+
+/* ★ 仅取证用（更新链路自证探针）★
+ *
+ * 照 PenBili 的 `runUpdateProbe` 做的同构探针：把「检测 → 下载 → 安装」
+ * 三次调用的结论逐行打出来，一条 grep 就能判定整条链路通不通。
+ *
+ * 为什么需要：
+ *   1) 真机上的版本一旦追平远端，就再也不会弹「发现新版本」，也就没有机会
+ *      点「立即更新」——整条链路永远无法验收；
+ *   2) `.amr` 装完**不会自动重启**，槽位切了但进程还在跑旧代码，
+ *      验完必须再推一次当前版本回来。
+ *
+ * 两种形态：
+ *   - `{ delay: 4000 }`（无 path）：走完整链路
+ *     fetchLatestRelease → downloadFileToDisk → installAmr，
+ *     版本比较只记录不拦截（和 PenBili 的 probe 一致）。
+ *   - `{ path: '/userdisk/miniapp/data/xxx.amr', delay: 4000 }`：
+ *     跳过网络，直接喂一个本地包验装机那一跳（最快、最省流量）。
+ *
+ * 判据：`[dev] upd-probe done PASS` / `FAIL at <stage>`。
+ * ★ 取证结束必须改回 null。★ */
+export const DEV_UPD_PROBE = null;

@@ -30,6 +30,19 @@ import { httpText } from './net.js';
 import { logWarn } from './log.js';
 import { getJSON, setJSON, KEYS } from './storage.js';
 import { APP_VERSION } from './version.js';
+import { loadNative } from './native.js';
+
+/* 只为诊断而保留：启动时确认 native 模块真的导出了 installAmr，
+ * 打一行日志便于真机排查（不能导出时 installAmr() 会走 NO_INSTALLER）。 */
+try {
+  loadNative().then(function (m) {
+    if (m && typeof m.installAmr === 'function') {
+      logWarn('[cg] upd installer ready (cgnative.installAmr)');
+    } else {
+      logWarn('[cg] upd installer missing: cgnative.installAmr');
+    }
+  }).catch(function () {});
+} catch (e) {}
 
 export { APP_VERSION };
 
@@ -559,35 +572,27 @@ export function downloadFileToDisk(url) {
 }
 
 /**
- * 安装 .amr —— **PenCG 目前没有可用的安装通道**，本函数恒返回失败。
+ * 安装 .amr —— 走 native `cgnative.installAmr(path)`。
  *
- * 事实（已 grep 全仓核实，见 docs/UPDATER.md）：
- *   - PenBili 的安装走 native `player2.installAmr(path)`，内部调
- *     `/bin/miniapp_cli install <path>`（源码见 PenBili/native/csrc/jsapi_player2.c
- *     的 js_install_amr，约 495-555 行）。
- *   - PenCG 的 native 模块是 cgnative / cgmedia，`CG_EXPORTS` 宏里
- *     （native/csrc/cgnative/cgnative.c 约 3004-3029 行）只有
- *     postSync/requestSync/wsOpen/sha256Hex 等，**没有 installAmr**。
- *   - `$falcon.jsapi` 里也没有 pm 模块（PenBili 真机实测，模块名池只有
- *     http/storage/modal/nvue/updater），JS 侧调 pm.installPackage 永远是 undefined。
- * 所以这里不能假装能装：下载完成后如实告诉用户「手动安装」，
- * 而不是转圈转到超时。等 native 侧补上 installAmr 后，只改这一个函数即可
- * （把下面的注释块打开，其余逻辑与 PenBili 完全一致）。
+ * 背景（v1.2.7 补上的最后一段链路，见 docs/UPDATER.md §4.3）：
+ *   - `$falcon.jsapi` 里**没有 pm 模块**（libfalcon.so 模块名池只有
+ *     http/storage/modal/nvue/updater），JS 侧调 pm.installPackage 恒 undefined。
+ *   - 唯一可行通道是 PenBili 上真机验证过的
+ *     `/bin/miniapp_cli install <path>`；v1.2.7 起它被包进
+ *     `PenCG/native/csrc/cgnative/cgnative.c` 的 `js_install_amr`，
+ *     与 PenBili `jsapi_player2.c` 的语义一致（先 access 验文件，
+ *     再判 stdout 里的 `"ret": 0`，rc 只做诊断）。
+ *   - **装完不会自动重启**：槽位已切，但进程仍跑旧代码。调用方据此
+ *     提示「重新打开软件即可使用新版本」。用户反馈 1.2.4 看不到「立即更新」
+ *     就是这一段缺失导致的（canInstall 写死 false）。
  *
  * @param {string} filePath 已落盘的本地绝对路径
- * @returns {Promise<{ok:boolean, code?:string, message?:string}>}
+ * @returns {Promise<{ok:boolean, code?:string, message?:string, rc?:number}>}
  */
 export async function installAmr(filePath) {
   if (!filePath || typeof filePath !== 'string') {
     return { ok: false, code: 'NO_PATH', message: '安装包路径为空' };
   }
-  logWarn('[cg] upd install unsupported, amr at ' + filePath);
-  return {
-    ok: false,
-    code: 'NO_INSTALLER',
-    message: '当前版本不支持自动安装，请手动下载'
-  };
-  /* ---- native 侧补上 installAmr 之后，把上面的 return 换成下面这段 ----
   let mod = null;
   try {
     mod = await loadNative();
@@ -610,7 +615,6 @@ export async function installAmr(filePath) {
   }
   logWarn('[cg] upd install fail code=' + (o.code || '-') + ' msg=' + (o.error || '-'));
   return { ok: false, code: o.code || '', message: o.error || '安装失败', rc: o.rc };
-  ---- */
 }
 
 /**
@@ -622,7 +626,17 @@ export function updateCapability() {
   const api = httpJsapi();
   return {
     canDownload: !!(api && typeof api.downloadFile === 'function'),
-    // 与 installAmr 保持一致：PenCG 当前恒 false
-    canInstall: false
+    /* 恒 true —— 照 PenBili 的做法（src/pages/index/index.vue 的弹窗里
+     * 三个主按钮全部写死「立即更新」，从不探测能力）。
+     *
+     * 为什么不再探测：v1.2.7 起 native `cgnative.installAmr` 是**编译期
+     * 一定存在**的导出（CG_EXPORTS 里的一行），不存在「装了新前端但 native
+     * 还是旧的」这种组合 —— 前端与 .so 在同一个 .amr 里一起发。
+     * 而探测是同步 API 的妥协产物：按钮文案在 render 里算、不能 await，
+     * 一旦模块加载时序有任何偏差就会误判成 false，把「立即更新」降级成
+     * 「下载安装包」—— 那正是用户报的「显示当前版本更新不了」。
+     * 真装不了时 installAmr 会返回 ok:false 并带上 rc 与原始 out，走
+     * upd-view.js 的 error 分支如实报错，比提前降级按钮更诚实。 */
+    canInstall: true
   };
 }
