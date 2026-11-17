@@ -364,6 +364,20 @@ typedef struct cm_sess {
      * 0 = 还没报；1 = 已报，等到下一个完整 IDR 再复位。
      * 没有这个标记会每秒发一条事件，JS 侧会把 stallTries 一次吃满。 */
     int      policy_gave_up;
+    /* ★ 2026-11-17 校园网现场新增：本会话是否已经把 SPS/PPS 推给过下游。
+     *
+     * appsrc 用 format=bytes 之后（v1.3.6 为修时间轴断裂而改），h264parse
+     * 会自己从字节流里找 start code 重新分帧，并且**必须先拿到 SPS/PPS
+     * 才能协商 src pad 的 caps**。拿不到就一直不吐 buffer。
+     *
+     * 现场（campus1.log 的 #2/#4/#6/#10）：这些会话整局没有任何 IDR，闸门
+     * 在 IDR_STARVE_RELAX_MS 后放开，于是一条裸 P 帧被推出去 —— 而参数集
+     * 注入过去只在 `if (key)` 里做，所以 h264parse 永远等不到 SPS/PPS，
+     * parsed/vdecin/decoded/shown 全程 0，画面从来没有出现过。
+     *
+     * 0 = 还没推过带参数集的 AU；1 = 已经推过。
+     * 会话建立 / cm_rtp_after_rebuild() 时复位。 */
+    int      params_pushed;
     /* P1-7 修正（REVIEW-report P1-7）：饥饿放行的「重新收紧」期限。
      *
      * 旧行为：放行时把 have_kf 置 1 就再也不管了 —— 若网关此后只发

@@ -20,6 +20,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <time.h>
 
 #include "cm_session.h"
@@ -45,6 +46,22 @@ typedef unsigned long long GstClockTime;
 /* appsrc 内部队列的条数上限（约 1 秒的 30fps 视频）。
  * 见 cm_box_create 末尾注释：单靠 max_bytes=2MB 兜不住小 AU 的静默堆积。 */
 #define CM_APP_SRC_MAX_BUFFERS 30ull
+
+/* ★ 2026-11-18：视频源默认改成 fdsrc + pipe（见 struct cm_box 里 use_fdsrc 注释）。
+ * 这三个宏必须放在文件前部：video_pipeline_fmt() 在 struct 之前定义。 */
+/* ★ 2026-11-18：fdsrc 源改为**可选**（默认仍是 appsrc）。
+ * 开关文件存在 → 走 fdsrc + 进程内 pipe；不存在 → 走 appsrc。
+ * 两种源模型在真机上都验证过（`decoder stalled`=0、`-7`=0，见
+ * docs/BUGFIX-video-sink-freeze.md §8），默认选 appsrc 是因为它更成熟、
+ * 只有进程内一个 fd 且不涉及写管道丢帧；fdsrc 留作应急与对照。 */
+#define VIDEO_FDSRC_SWITCH    "/userdisk/miniapp/data/vsrc_fdsrc.txt"
+#define CM_PIPE_BLOCKSIZE     3000
+/* fcntl(F_SETPIPE_SZ) 的常量在 bionic/musl 头文件里不一定有，按 ABI 取值写死
+ * （Linux 通用值 F_LINUX_SPECIFIC_BASE(1024) + 7）。取值只影响管道容量，
+ * 命令码写错会直接返回 EINVAL，属可控失败。 */
+#ifndef F_SETPIPE_SZ
+#define F_SETPIPE_SZ          1031
+#endif
 
 /* GstState 枚举（GStreamer 1.x 实测值，顺序极易搞错）：
  *   GST_STATE_VOID_PENDING = 0   <- 不是 NULL！
@@ -259,6 +276,24 @@ struct cm_box {
     volatile uint64_t last_recover_ms;
     /* READY 重置（第二级恢复手段）的时刻，限速用。见 cm_box_reset_decoder。 */
     volatile uint64_t last_reset_ms;
+    /* ★ 2026-11-18：视频源从 appsrc 换成 fdsrc + pipe（默认走这条路）。
+     *
+     * 现场（v1.3.7 五段探针 + 离线对照实验）：
+     *   同一份码流（au.h264，96417B）用 filesrc/multifilesrc 喂 mppvideodec
+     *   能连解 300 帧 / 循环 5 分钟 11597 帧零停摆；走 appsrc 就几十帧后
+     *   vdecin 涨、decoded 死钉。⇒ 码流与解码器都没问题，问题在 appsrc 这条源。
+     *   同机型 PenBili 用 fdsrc(fifo) 长期稳定，native 侧一个 appsrc 都没有。
+     *
+     * 这里用进程内 pipe(fd) 而不是 mkfifo+fork gst-launch：
+     *   fdsrc 的 fd 属性接受任意 fd 号，不需要固定成 3（那是 fork/exec 才需要的），
+     *   所以直接 gst_parse_launch 建管线、把 pipe 读端号写进 desc 即可，
+     *   省掉子进程与 FIFO 生命周期管理，也不会和音频的 fdsink 抢 fd 号。
+     *   vfd 是写端（置 O_NONBLOCK，管道满就丢帧并计数，绝不阻塞收包线程）。 */
+    int use_fdsrc;
+    int vfd;              /* pipe 写端；-1 表示未启用 */
+    int vpipe_r;          /* pipe 读端（建完管线后我们不再需要，保留仅供诊断） */
+    uint64_t pipe_drop;   /* 管道满时丢掉的 AU 数 */
+
     int failed;
     char *caps_str;
 
@@ -365,7 +400,7 @@ static int gst_ensure(void) {
     " ! kmssink name=vsink plane-id=76 driver-name=rockchip " \
     "force-aspect-ratio=false can-scale=true sync=false restore-crtc=false"
 
-static const char *video_pipeline_fmt(void) {
+static const char *video_pipeline_fmt(char *out, size_t outlen, int use_fdsrc, int fd) {
     /* rect 不在这里拼；由 apply_rect() 用 gst_util_set_object_arg 单独设 */
     /* 【旋转必须在解码器里做】面板 480x960 竖屏、逻辑画布 960x266 横屏，
      * weston 合成 UI 时替我们转了 90°，但 KMS 视频平面**绕过了 weston**，
@@ -379,16 +414,26 @@ static const char *video_pipeline_fmt(void) {
      *   ignore-error  布尔, Default: true   —— 解码出错时是「只 warn 继续」还是「上报致命错误」
      *   max-errors    整数, Range -1..2^31-1, Default: -1 —— -1 = 不限次数
      * 两个属性都存在且可设。这里显式写死，不依赖插件默认值。
-     * 为什么要 ignore-error=false（视频 teammate 的真机结论，见
-     * docs/BUGFIX-bug3-bug4-video.md §hunk 1）：默认 true 是「解坏了也不报错、
-     * 把坏帧直接吐出去上屏」，现象就是花屏且日志里一条都没有。RTP 层已经拦住
-     * 了残帧（bug3/bug4 的第一道防线），这里是**第二道**：让网关侧编码器自身
-     * 出错这类我们识别不出的坏帧变成 GST_MSG_ERROR，被 cm_box_drain_bus 抓进
-     * 日志，而不是悄悄糊在屏幕上。max-errors=16 是连续错误上限 —— 连续错 16 次
-     * 才让解码器吐 flow error，偶发单帧坏不会立刻停摆。
-     * ⚠ 真机若看到「画面卡住 + 日志有 mpp 解码错误」，就是这道防线在生效
-     *   （16 次连续错误后 flow error）；回退只需去掉这两个属性恢复插件默认值，
-     *   详见 docs/BUGFIX-bug3-bug4-gst.md「hunk 1」。 */
+     * 【★ 2026-11-18 反转：恢复插件默认值，并加 discard-corrupted-frames ★】
+     *
+     * 曾经设 `ignore-error=false max-errors=16`（理由是「让坏帧变成 GST_MSG_ERROR
+     * 被 cm_box_drain_bus 抓进日志，而不是悄悄糊在屏幕上」）。1.3.1 ~ 1.3.8 的
+     * 真机数据把这套策略证伪了：
+     *
+     *   - 冻结现场永远是 `pushed/parsed/vdecin 继续涨，decoded 死钉`
+     *     （1.3.5 五段探针，缺口稳定 43~58 帧）；
+     *   - 同时 `bus ERROR`=0、`marked failed`=0、`appsrc push flow`=0 ——
+     *     **一条 ERROR 都没有**。也就是说 ignore-error=false 并没有把
+     *     「解码出问题」翻译成可见的错误，反而让 MPP 内部停摆后完全静默；
+     *   - 同一份码流（au.h264，300 帧）走 `filesrc ! h264parse ! mppvideodec`
+     *     在**同一台设备**上 raw=414720000 一帧不丢；
+     *   - 同机型 PenBili 的可用管线（native/csrc/player.c）用的是**插件默认值**
+     *     （ignore-error=true、max-errors=-1），从不设置这两个属性。
+     *
+     * 所以现在跟 PenBili 对齐：让解码器「坏帧就丢、继续解」，配合
+     * `discard-corrupted-frames=true` 把损坏帧直接丢弃而不是吐出去花屏。
+     * 我们自己的残帧拦截仍在 RTP 层（bug3/bug4 的第一道防线），
+     * 不依赖解码器上抛错误。 */
     /* ★ 2026-11-17 A/B 实验：源改成 format=bytes，彻底不让时间轴参与调度。
      *
      * 现场（1.3.5 五段探针）：健康期 `pushed==parsed==vdecin==decoded==shown`，
@@ -409,20 +454,54 @@ static const char *video_pipeline_fmt(void) {
      * 下游 kmssink 本来就是 `sync=false`（见 KMS_SINK_PROPS 上方长注释），
      * 不依赖 PTS 调度，所以这条链上没有东西需要时间戳。
      * ⚠ 这是可回退的单点改动：出问题把这一段换回原来的两行即可。 */
-    return "appsrc name=vsrc is-live=true format=bytes do-timestamp=false "
-           "caps=video/x-h264,stream-format=byte-stream,alignment=au "
-           "! h264parse name=vparse ! mppvideodec name=vdec rotation=270 ignore-error=false max-errors=16 "
-           "! videoconvert" KMS_SINK_PROPS;
+    /* ★ 2026-11-18：源从 appsrc 换成 fdsrc（见 struct cm_box 里 use_fdsrc 注释）。
+     * use_fdsrc=0 时退回老 appsrc 行为，用于真机 A/B。
+     * 注意 fdsrc 不能给 caps 属性（它只吐 bytes，caps 由下游 h264parse 定），
+     * 所以这里只在 appsrc 分支拼 caps。 */
+    if (use_fdsrc) {
+        /* ⚠ 这里**不能**加 capsfilter。
+         *
+         * 2026-11-18 真机实测踩了两次：
+         *   a) 只给 fdsrc 一个 `video/x-h264,stream-format=byte-stream,alignment=au`
+         *      的 capsfilter → 立刻报
+         *        "Filter caps do not completely specify the output format
+         *         Output caps are unfixed: video/x-h264, width=[1,32767],
+         *         height=[1,32767], framerate=[0/1,...]"
+         *      然后 `pipeline doesn't want to preroll` + fdsrc
+         *      `Internal data stream error / streaming stopped, reason error (-5)`。
+         *      原因：那个 capsfilter 把 width/height/framerate 留成了范围，
+         *      capsfilter 要求输出 caps 必须 fixed，于是它直接拒绝第一个 buffer。
+         *   b) 干脆不加 capsfilter → `fdsrc ! h264parse ! mppvideodec` 正常：
+         *      同一份 au.h264（300 帧）经 FIFO 灌进去，filesink 实测
+         *      raw=414720000 = 300 帧，一帧不丢。
+         * h264parse 自己会从字节流里扫 start code 并产出 fixed caps，
+         * 不需要我们在前面指定。 */
+        snprintf(out, outlen,
+                 "fdsrc name=vsrc fd=%d blocksize=%d ! "
+                 "h264parse name=vparse ! mppvideodec name=vdec rotation=270 "
+                 "ignore-error=true max-errors=-1 discard-corrupted-frames=true ! videoconvert" KMS_SINK_PROPS,
+                 fd, CM_PIPE_BLOCKSIZE);
+    } else {
+        snprintf(out, outlen,
+                 "appsrc name=vsrc is-live=true format=bytes do-timestamp=false "
+                 "caps=video/x-h264,stream-format=byte-stream,alignment=au "
+                 "! h264parse name=vparse ! mppvideodec name=vdec rotation=270 "
+                 "ignore-error=true max-errors=-1 discard-corrupted-frames=true ! videoconvert" KMS_SINK_PROPS);
+    }
+    return out;
 }
 
-static const char *video_pipeline_soft(void) {
+static const char *video_pipeline_soft(char *out, size_t outlen) {
     /* 软解兜底分支：avdec_h264 没有 rotation 属性，用 videoflip 做同样的旋转。
      * videoflip 的 method 枚举：1=clockwise(顺90) 3=counterclockwise(逆90)。
      * 与 mppvideodec rotation=270（逆时针 90°）等价 -> method=counterclockwise。
      * 注意显式写 method 而不是 video-direction，后者在本机型 1.22 上部分枚举不支持。 */
-    return "appsrc name=vsrc is-live=true format=time do-timestamp=true "
-           "caps=video/x-h264,stream-format=byte-stream,alignment=au "
-           "! h264parse ! avdec_h264 ! videoflip method=counterclockwise ! videoconvert" KMS_SINK_PROPS;
+    snprintf(out, outlen,
+             "appsrc name=vsrc is-live=true format=time do-timestamp=true "
+             "caps=video/x-h264,stream-format=byte-stream,alignment=au "
+             "! h264parse ! avdec_h264 ! videoflip method=counterclockwise ! videoconvert"
+             KMS_SINK_PROPS);
+    return out;
 }
 
 /* ---------------- X6 Pro 音频路由：尊重系统音量 + 完整还原 ----------------
@@ -1322,28 +1401,92 @@ cm_box *cm_box_create(cm_sess *s, int is_video) {
          *   硬解全黑 + 软解也全黑 ⇒ 锅在我们的 AU 组装 / SPS-PPS 注入。
          * 纯诊断，默认不打开（文件不存在 = 正常走硬解）。 */
         int force_soft = 0;
+        char desc[1024];
         {
             FILE *sf = fopen(VIDEO_SOFTDEC_SWITCH, "r");
             if (sf) { force_soft = 1; fclose(sf); }
         }
+        /* ★ 源选择：默认 fdsrc + pipe；touch vsrc_appsrc.txt 退回老 appsrc。
+         * 软解分支仍用 appsrc（avdec_h264 的稳定性没被怀疑过，不必动它）。 */
+        b->vfd = -1;
+        b->vpipe_r = -1;
+        b->use_fdsrc = 0;
+        if (!force_soft) {
+            FILE *af = fopen(VIDEO_FDSRC_SWITCH, "r");
+            if (!af) {
+                CM_LOGI("video: default appsrc source (create %s to switch to fdsrc)",
+                        VIDEO_FDSRC_SWITCH);
+            } else {
+                fclose(af);
+                CM_LOGW("video: %s exists -> switching to fdsrc + pipe source",
+                        VIDEO_FDSRC_SWITCH);
+                int pfd[2];
+                if (pipe(pfd) == 0) {
+                    /* 写端必须非阻塞：管道满时宁可丢帧也不能卡住收包线程。 */
+                    int fl = fcntl(pfd[1], F_GETFL, 0);
+                    if (fl >= 0) (void)fcntl(pfd[1], F_SETFL, fl | O_NONBLOCK);
+                    /* 管道默认容量只有 64KB，而单个 IDR 可达 44KB —— 一旦下游
+                     * 慢半拍就会 EAGAIN 丢掉整个关键帧，代价太大。这里尽量把
+                     * 容量提到 1MB（F_SETPIPE_SZ，非特权进程上限由
+                     * /proc/sys/fs/pipe-max-size 决定，失败就沿用默认值）。 */
+                    if (fcntl(pfd[1], F_SETPIPE_SZ, 1024 * 1024) < 0) {
+                        CM_LOGI("video pipe: could not grow to 1MB (%d: %s), using default",
+                                errno, strerror(errno));
+                    }
+                    b->vfd = pfd[1];
+                    b->vpipe_r = pfd[0];
+                    b->use_fdsrc = 1;
+                } else {
+                    CM_LOGW("video: pipe() failed (%d), falling back to appsrc", errno);
+                }
+            }
+        }
         if (force_soft) {
             CM_LOGW("video: forcing software h264 decoder (%s exists)", VIDEO_SOFTDEC_SWITCH);
-            b->pipeline = launch(video_pipeline_soft());
+            b->pipeline = launch(video_pipeline_soft(desc, sizeof(desc)));
         } else {
-            b->pipeline = launch(video_pipeline_fmt());
+            /* ⚠ 这里必须传**读端** vpipe_r：fdsrc 从这个 fd 读字节。
+             * 2026-11-18 踩过一次 —— 误传了写端 vfd，fdsrc 在只写 fd 上 read()
+             * 直接 EBADF，一个字节都不读，管道永远满（真机：queue=26727 恒定、
+             * parsed 恒 0、pushed 却在涨，因为我们的 write 全都成功了）。 */
+            b->pipeline = launch(video_pipeline_fmt(desc, sizeof(desc), b->use_fdsrc,
+                                                    b->vpipe_r));
+        }
+        if (!b->pipeline && b->use_fdsrc) {
+            /* fdsrc 建不起来就把管道收掉、退回 appsrc 再试一次，别让画面直接黑。 */
+            CM_LOGW("video: fdsrc pipeline failed, falling back to appsrc");
+            if (b->vfd >= 0) { close(b->vfd); b->vfd = -1; }
+            if (b->vpipe_r >= 0) { close(b->vpipe_r); b->vpipe_r = -1; }
+            b->use_fdsrc = 0;
+            b->pipeline = launch(video_pipeline_fmt(desc, sizeof(desc), 0, -1));
         }
         if (!b->pipeline) {
             CM_LOGW("mppvideodec pipeline unavailable, trying software h264");
-            b->pipeline = launch(video_pipeline_soft());
+            if (b->vfd >= 0) { close(b->vfd); b->vfd = -1; }
+            if (b->vpipe_r >= 0) { close(b->vpipe_r); b->vpipe_r = -1; }
+            b->use_fdsrc = 0;
+            b->pipeline = launch(video_pipeline_soft(desc, sizeof(desc)));
         }
         if (!b->pipeline) { free(b); return NULL; }
-        b->src = (GstAppSrc *)gst_bin_get_by_name((GstBin *)b->pipeline, "vsrc");
         b->sink = gst_bin_get_by_name((GstBin *)b->pipeline, "vsink");
-        {
-            GstCaps *caps = gst_caps_from_string(
-                "video/x-h264,stream-format=byte-stream,alignment=au");
-            if (caps && b->src) gst_app_src_set_caps(b->src, caps);
-            if (caps) gst_caps_unref(caps);
+        if (b->use_fdsrc) {
+            /* fdsrc 不回吐 caps（它只吐 bytes），但把元素指针留在 b->src 里没有意义：
+             * 后面 cm_box_push 走管道写，不碰 b->src。这里置空以杜绝误用。 */
+            CM_LOGI("video source: fdsrc via pipe (write fd=%d, read fd=%d, blocksize=%d)",
+                    b->vfd, b->vpipe_r, CM_PIPE_BLOCKSIZE);
+            /* ⚠ 读端必须一直开着，不能提前 close：
+             * fdsrc 的 fd 属性只是「用这个 fd 号」，它**不会 dup 一份自己的**，
+             * 我们一旦 close，这个 fd 号就会被进程里其它 open 复用掉，
+             * fdsrc 再 poll 时读到的可能是别人的文件 —— 表现为画面卡住或读到垃圾。
+             * 所以读端由 cm_box 保管，cm_box_destroy() 里在管线进 NULL 之后才关。 */
+        } else {
+            b->src = (GstAppSrc *)gst_bin_get_by_name((GstBin *)b->pipeline, "vsrc");
+            {
+                GstCaps *caps = gst_caps_from_string(
+                    "video/x-h264,stream-format=byte-stream,alignment=au");
+                if (caps && b->src) gst_app_src_set_caps(b->src, caps);
+                if (caps) gst_caps_unref(caps);
+            }
         }
         if (b->sink) {
             /* ★ 挂一个 BUFFER 探针，数「kmssink 真的吃进去多少帧」。
@@ -1461,7 +1604,9 @@ cm_box *cm_box_create(cm_sess *s, int is_video) {
         }
     }
 
-    if (!b->src) {
+    /* fdsrc 模式（视频默认）下 b->src 为 NULL 是正常的：源是 fdsrc，不是 appsrc。
+     * 只有 appsrc 模式才要求拿到元素指针。 */
+    if (!b->use_fdsrc && !b->src) {
         CM_LOGE("%s: appsrc not found in pipeline", is_video ? "video" : "audio");
         cm_box_destroy(b);
         return NULL;
@@ -1471,10 +1616,14 @@ cm_box *cm_box_create(cm_sess *s, int is_video) {
      * 但只靠 max_bytes 兜不住「解码器停摆时队列静默堆积」：
      * 100~600 字节的小 AU 堆 138 帧也才 140KB，离 2MB 很远，leaky 不触发。
      * 所以再加一条按「条数」的上限，把陈旧帧深度钉在 ~1 秒。 */
-    gst_app_src_set_max_bytes(b->src, 2u * 1024u * 1024u);
-    gst_app_src_set_leaky_type(b->src, GST_APP_LEAKY_DOWNSTREAM);
-    gst_app_src_set_max_buffers(b->src, CM_APP_SRC_MAX_BUFFERS);
-    gst_app_src_set_stream_type(b->src, GST_APP_STREAM_TYPE_STREAM);
+    if (b->src) {
+        gst_app_src_set_max_bytes(b->src, 2u * 1024u * 1024u);
+        gst_app_src_set_leaky_type(b->src, GST_APP_LEAKY_DOWNSTREAM);
+        gst_app_src_set_max_buffers(b->src, CM_APP_SRC_MAX_BUFFERS);
+        gst_app_src_set_stream_type(b->src, GST_APP_STREAM_TYPE_STREAM);
+    }
+    /* fdsrc 模式下「队列水位」由管道本身承担：写端是非阻塞的，管道满就丢帧
+     * （b->pipe_drop 计数），所以这里不需要（也不存在）appsrc 那套上限配置。 */
 
     gst_element_set_state(b->pipeline, GST_STATE_PLAYING_);
     CM_LOGI("%s pipeline PLAYING", is_video ? "video" : "audio");
@@ -1512,7 +1661,8 @@ int cm_box_recover_decoder(cm_box *b, uint64_t now_ms) {
     GstState pend = GST_STATE_VOID_PENDING_;
     GstPad *pad;
     GstEvent *ev;
-    if (!b || !b->is_video || !b->pipeline || !b->src) return 0;
+    if (!b || !b->is_video || !b->pipeline) return 0;
+    if (!b->use_fdsrc && !b->src) return 0;
     if (b->last_recover_ms && now_ms > b->last_recover_ms &&
         (now_ms - b->last_recover_ms) < CM_RECOVER_MIN_MS) {
         return 0;
@@ -1520,9 +1670,20 @@ int cm_box_recover_decoder(cm_box *b, uint64_t now_ms) {
     /* 只在 PLAYING 下 flush：READY/NULL 时下一次 PLAYING 自然会重新协商。 */
     gst_element_get_state(b->pipeline, &got, &pend, 0 /* 不等待 */);
     if (got != GST_STATE_PLAYING_) return 0;
-    pad = gst_element_get_static_pad((GstElement *)b->src, "src");
+    if (b->use_fdsrc) {
+        /* fdsrc 也有 src pad，flush 事件同样能往下推；元素指针从管线里按名字取。 */
+        GstElement *fsrc = gst_bin_get_by_name((GstBin *)b->pipeline, "vsrc");
+        if (!fsrc) {
+            CM_LOGW("video recover: fdsrc element not found, skip flush");
+            return 0;
+        }
+        pad = gst_element_get_static_pad(fsrc, "src");
+        gst_object_unref(fsrc);
+    } else {
+        pad = gst_element_get_static_pad((GstElement *)b->src, "src");
+    }
     if (!pad) {
-        CM_LOGW("video recover: appsrc src pad not found, skip flush");
+        CM_LOGW("video recover: source src pad not found, skip flush");
         return 0;
     }
     b->last_recover_ms = now_ms;
@@ -1609,6 +1770,8 @@ void cm_box_destroy(cm_box *b) {
                 b->is_video ? "video" : "audio", r, (int)got, (int)pend);
     }
     if (b->src) { gst_object_unref(b->src); b->src = NULL; }
+    if (b->vfd >= 0) { close(b->vfd); b->vfd = -1; }
+    if (b->vpipe_r >= 0) { close(b->vpipe_r); b->vpipe_r = -1; }
     if (b->sink) { gst_object_unref(b->sink); b->sink = NULL; }
     if (b->pipeline) { gst_object_unref(b->pipeline); b->pipeline = NULL; }
     /* fdsink 释放后才关管道写端，aplay 读到 EOF 会正常 flush 退出。 */
@@ -1645,10 +1808,12 @@ int cm_box_drain_bus(cm_box *b) {
      * （docs/BUGFIX-bug3-bug4-gst.md §5.3：bus 报错只打印、盒子里永远
      * failed=0，于是 appsrc 继续收帧、画面永久停在最后一帧，表现就是全黑）。
      *
-     * 对视频而言这个置位尤为关键：我们给 mppvideodec 加了
-     * ignore-error=false max-errors=16，连续 16 次解码错误后它一定会
-     * post flow error。以前那条 ERROR 只是被打印一句，push 继续成功，
-     * 上层看到的是「fps 正常、appsrc 全部接受」，而屏幕上什么都没有。 */
+     * 对视频而言这个置位尤为关键：以前 mppvideodec 设了 ignore-error=false
+     * max-errors=16，理论上连续 16 次解码错误后它会 post flow error；但 1.3.1~
+     * 1.3.8 的真机现场里一次都没出现过（解码器停摆时是静默的）。
+     * 现在改为插件默认 ignore-error=true + discard-corrupted-frames=true，
+     * 靠「丢坏帧继续解」而不是「上抛错误」，所以这条置位更多是兜底：
+     * 真有 ERROR 时仍要能把 b->failed 置上，别让上层以为「fps 正常」。 */
     for (guard = 0; guard < 4; guard++) {
         GstMessage *msg = gst_bus_timed_pop_filtered(bus, 0, GST_MSG_ERROR);
         GErrorDetail *err = NULL;
@@ -1709,12 +1874,56 @@ int cm_box_drain_bus(cm_box *b) {
     return errs;
 }
 
+/* 把整块数据写进管道。fdsrc 模式专用。
+ *
+ * 写端是 O_NONBLOCK：管道满（EAGAIN）就**丢掉这一块**并计数，绝不重试等待 ——
+ * 这个函数跑在 cm_media_loop 的收包线程上，一旦阻塞，UDP 收包就停了，
+ * 下一个症状会是「RTP 全部丢失」，比丢一帧严重得多。
+ * 丢整块而不是丢半块：h264parse 靠 start code 重新分帧，写半块会留下
+ * 半截 NAL，下游要么丢帧要么报错；整块丢弃等价于这个 AU 从未到达。
+ *
+ * 返回 0 表示「管道已接收或已主动丢弃，可继续」，-1 表示管道已断（EPIPE）。 */
+static int pipe_write_au(cm_box *b, const unsigned char *data, int len) {
+    const unsigned char *p = data;
+    int left = len;
+    while (left > 0) {
+        ssize_t n = write(b->vfd, p, (size_t)left);
+        if (n > 0) { p += n; left -= (int)n; continue; }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            /* 管道满：整块放弃。计数只在首次和每 100 次打印，避免刷屏。 */
+            b->pipe_drop++;
+            if (b->pipe_drop == 1 || (b->pipe_drop % 100u) == 0) {
+                CM_LOGW("video pipe full, dropped %llu AU(s) (len=%d)",
+                        (unsigned long long)b->pipe_drop, len);
+            }
+            return 0;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        /* EPIPE 等：管线那头已经不读了。 */
+        CM_LOGW("video pipe write failed (%d: %s) -> mark box failed",
+                errno, strerror(errno));
+        b->failed = 1;
+        return -1;
+    }
+    b->pushed++;
+    b->pushed_bytes += (uint64_t)len;
+    return 0;
+}
+
 int cm_box_push(cm_box *b, const unsigned char *data, int len, uint64_t pts_ns, int key) {
     GstBuffer *buf;
     size_t wrote;
     GstFlowReturn fr;
     (void)pts_ns;   /* 见下方 hunk 2 说明：PTS 这一半无法落地 */
-    if (!b || !b->src || b->failed || len <= 0) return -1;
+    if (!b || b->failed || len <= 0) return -1;
+    /* ★ fdsrc 模式：原样写字节流。既不打 DELTA_UNIT 也不管 key ——
+     * 这些元信息本来就只服务于 appsrc 的 buffer 标志位，字节流里没有位置放。
+     * 下游 h264parse 自己从 NAL 类型判断帧边界与关键帧。 */
+    if (b->use_fdsrc) {
+        if (b->vfd < 0) return -1;
+        return pipe_write_au(b, data, len);
+    }
+    if (!b->src) return -1;
     buf = gst_buffer_new_allocate(NULL, (size_t)len, NULL);
     if (!buf) return -1;
     wrote = gst_buffer_fill(buf, 0, data, (size_t)len);
@@ -1832,7 +2041,11 @@ int cm_box_set_rect(cm_box *b, int x, int y, int w, int h) {
 
 void cm_box_set_caps_video(cm_box *b, int w, int h) {
     int old_w, old_h;
-    if (!b || !b->src) return;
+    if (!b || (!b->use_fdsrc && !b->src)) return;
+    /* fdsrc 模式：没有 appsrc 的 pad 可以推 flush 事件，而且也没必要 ——
+     * h264parse 自己从字节流里发现 SPS，分辨率变化会让它重新协商 caps。
+     * 这里只记录统计值。 */
+    if (b->use_fdsrc || !b->src) { b->width = w; b->height = h; return; }
     /* h264parse 会重算 caps，这里只在拿到真实分辨率时更新统计值 */
     old_w = b->width;
     old_h = b->height;
@@ -1901,8 +2114,12 @@ void cm_box_set_caps_video(cm_box *b, int w, int h) {
 
 void *cm_box_pipeline(cm_box *b) { return b ? (void *)b->pipeline : NULL; }
 const char *cm_box_desc(cm_box *b) {
+    /* 仅供诊断读取（js 侧 debug 输出用）。管线描述串现在要带 fd 参数，
+     * 必须落到静态 buffer 里返回；fd 用 -1 占位，反正这里只是给人看的。 */
+    static char vbuf[1024];
     if (!b) return "";
-    return b->is_video ? video_pipeline_fmt() : audio_pipeline_desc();
+    if (!b->is_video) return audio_pipeline_desc();
+    return video_pipeline_fmt(vbuf, sizeof(vbuf), b->use_fdsrc, b->use_fdsrc ? b->vpipe_r : -1);
 }
 
 uint64_t cm_box_pushed(cm_box *b) { return b ? b->pushed : 0; }
@@ -1921,6 +2138,13 @@ uint64_t cm_box_recoveries(cm_box *b) { return b ? b->recoveries : 0; }
 /* appsrc 内部队列当前积压的 buffer 条数（0 表示下游跟得上）。
  * 这是「解码器停摆时到底堆了多少帧」的唯一直接读数。 */
 uint64_t cm_box_queue_depth(cm_box *b) {
+    /* fdsrc 模式没有 appsrc 队列。返回管道里「已写未读」的字节数，
+     * 语义仍等价于「上游积压」，只是单位从「条」变成「字节」。 */
+    if (b && b->use_fdsrc && b->vfd >= 0) {
+        int n = 0;
+        if (ioctl(b->vfd, FIONREAD, &n) == 0 && n > 0) return (uint64_t)n;
+        return 0;
+    }
     if (!b || !b->src) return 0;
     return (uint64_t)gst_app_src_get_current_level_buffers(b->src);
 }

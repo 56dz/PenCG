@@ -288,3 +288,127 @@ pushed=2470 parsed=2476 vdecin=2476 decoded=2470 shown=2464  queue=0 recov=0
   不必再动源模型。
 - 竖条纹副作用未消除（见 7.5 ⚠）。
 - 网关侧为什么会周期性停推仍未解释，根因在服务端。
+
+---
+
+## 八、2026-11-18 定案：`ignore-error=false` 才是周期性停摆的最后一层
+
+### 8.1 现象与已排除项
+
+1.3.1 ~ 1.3.7 的真机现场永远是同一个形状：
+
+```
+#N video sink pushed=2069 parsed=2074 vdecin=2074 decoded=1943 shown=1943 queue=0
+```
+
+- `parsed == vdecin`：h264parse 一个 buffer 都没丢；
+- `queue == 0`：appsrc 没有积压，帧确实被下游取走了；
+- `decoded` 死钉：**mppvideodec 收下了 buffer，却一帧都不吐**；
+- 同时 `bus ERROR = 0`、`marked failed = 0`、`appsrc push flow = 0`：
+  解码器停摆时是**完全静默**的。
+
+已经用真机离线实验排除的：
+
+| 假设 | 结论 |
+|---|---|
+| 码流坏 | 否。`au.h264`（300 帧）ffmpeg 解 0 错误 |
+| 解码器 element 坏 | 否。同设备 `filesrc ! h264parse ! mppvideodec` 解满 300 帧 |
+| h264parse 丢帧 | 否。`parsed == vdecin` 恒成立 |
+| appsrc 积压/背压 | 否。`queue = 0` |
+| MPP 硬件复位 | 否。停摆期间 `dmesg` 无 `irq_status` / `resetting` |
+| flush 上游能救 | 否。1.3.3 实测 `decoded` 完全不动 |
+| 源模型（appsrc 通路）坏 | 否。1.3.9 换回 appsrc 仍健康（见 8.6a） |
+| READY 重置能救 | 部分。能救回解码器（`decoded` 800→2275），但需网关补发 IDR；且引出竖条纹 |
+
+### 8.2 真因：我们把解码器的错误策略设反了
+
+`gst-inspect-1.0 mppvideodec` 的插件默认值是：
+
+```
+ignore-error   Boolean  Default: true    —— 解码出错只 warn，继续解
+max-errors     Integer  Default: -1      —— 不限次数
+```
+
+而我们从 bug3/bug4 时期起一直显式设成 **`ignore-error=false max-errors=16`**。
+当时的理由是「让坏帧变成 `GST_MSG_ERROR` 被 `cm_box_drain_bus` 抓进日志，
+而不是悄悄糊在屏幕上」。但真机数据把这个理由证伪了：
+
+- 停摆时**一条 ERROR 都没有** —— `ignore-error=false` 并没有把「解码出问题」
+  翻译成可见的错误；
+- 反而让 MPP 内部一处出错后**整条会话静默停摆**（收下 buffer、不再出帧、
+  不报错、不 flow error），必须靠我们自己的看门狗去猜；
+- 而同机型、同面板的 PenBili（`PenBili/native/csrc/player.c`）用的是
+  **插件默认值**，从不设这两个属性。
+
+### 8.3 修复
+
+```diff
+- ignore-error=false max-errors=16
++ ignore-error=true max-errors=-1 discard-corrupted-frames=true
+```
+
+- `ignore-error=true`：坏帧只 warn，继续解，不停摆；
+- `max-errors=-1`：恢复插件默认（不限次数）；
+- `discard-corrupted-frames=true`：**新增**，让解码器把判定为损坏的帧直接丢弃，
+  而不是吐出去造成花屏。这道防线替代了原来「靠上抛错误」的思路。
+
+RTP 层的残帧拦截（`drop broken P AU` / `drop broken IDR AU`）完全保留，
+它才是第一道防线；解码器不再承担「报告坏帧」的职责。
+
+### 8.4 真机验证（2026-11-17 23:47 起，原神）
+
+```
+#1 start -> 111.32.221.19:36235  policy=smooth-first
+#1 video sink pushed=1698 parsed=1696 vdecin=1696 decoded=1696 shown=1696 queue=0 recov=0
+#1 video sink pushed=4081 parsed=4079 vdecin=4079 decoded=4079 shown=4079 queue=0 recov=0
+```
+
+- **单会话连续解码 4079 帧（约 159 秒）零停摆**：`decoder stalled = 0`、
+  `native -7 = 0`、`start # = 1`、`bus ERROR = 0`。
+- 同期网络并不好：`rtp gap = 47`、`drop broken = 20` —— **照样一次没停**。
+  这直接证明「丢包 → 解码器静默停摆」这条链被切断了。
+- 切换会话（#1→#2）是测试时执行 `hal-screen off` 触发 `app onHide → stopPlay`，
+  不是卡死。
+
+### 8.5 与第七章的关系
+
+第七章的 `appsrc format=bytes do-timestamp=false` 修复同样有效且必须保留：
+它解决的是**时间轴断裂**（`format=time` 下 appsrc 按到达时刻打绝对时钟戳，
+丢包后时间轴跳变，h264parse 判 buffer「还没到」而整体丢弃）。
+本章解决的是**解码器错误策略**。两者是不同层、不同症状：
+
+| 章 | 症状 | 根因 | 判据 |
+|---|---|---|---|
+| 七 | `pushed` 涨、`parsed` 不涨 | appsrc 时间轴断裂 | `parsed == 0` 或严重滞后 |
+| 八 | `parsed == vdecin` 涨、`decoded` 不涨 | 解码器错误策略 | 缺口稳定 43~58 帧 |
+
+### 8.6a 源模型 A/B（确认修复与源无关）
+
+`ignore-error` 修好后，两种源模型都单独做过真机长时间验证（同一台设备、原神）：
+
+| 源模型 | 单会话连续解码 | `decoder stalled` | `native -7` | `queue` |
+|---|---|---|---|---|
+| `fdsrc` + 进程内 pipe | 23153 帧（约 9 分钟） | 0 | 0 | 0 |
+| `appsrc`（默认） | 4157 帧 | 0 | 0 | 0 |
+
+两者 `parsed == vdecin == decoded == shown` 全程对齐。所以在真机上
+**「解码器静默停摆」与源模型无关**，`fdsrc` 改造不是必需的。
+
+最终决定：**默认回到 `appsrc`**（更成熟、进程内只有一个 fd、不存在写管道丢帧），
+`fdsrc` 保留为应急与对照开关 —— 建 `/userdisk/miniapp/data/vsrc_fdsrc.txt` 即切换。
+
+### 8.6 保留下来的恢复机制
+
+八章的修复不等于「不再需要看门狗」：网关停推、真弱网仍可能触发，
+所以第 0 / 1.5 / 2 级恢复（flush → READY → `code:-7`）继续保留。
+1.3.8 起希望它们**永远不被触发**；一旦日志里出现 `decoder stalled`，
+说明又出现了新的解码器停摆原因，应当重新取证而不是依赖自愈。
+
+### 8.7 遗留
+
+- 竖条纹（READY 重置副作用）未消除，见 7.5 ⚠；
+- `fdsrc` + 进程内 pipe 的源模型在本版一起落地，但**默认仍走 appsrc**：
+  建 `/userdisk/miniapp/data/vsrc_fdsrc.txt` 才切到 fdsrc。真机 A/B 已确认
+  8.3 的修复在两种源下都生效（appsrc 单会话 4157 帧零停摆、fdsrc 单会话
+  23153 帧零停摆），所以没有理由把成熟度更低的 fdsrc 设为默认；
+- 网关侧为什么会周期性停推仍未解释，根因在服务端。

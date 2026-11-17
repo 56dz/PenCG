@@ -1397,10 +1397,27 @@ static void flush_frame(cm_sess *s) {
         }
     }
 
-    /* --- 3) IDR 缺参数集时补插（在重排之后做，否则会被重排覆盖）--- */
+    /* --- 3) 缺参数集时补插（在重排之后做，否则会被重排覆盖）---
+     *
+     * ★ 2026-11-17 校园网现场修正：注入条件从 `if (key)` 放宽到
+     *   「key 帧，或者本会话还没往下游推过任何参数集」。
+     *
+     * 旧行为只在 IDR 上注入，理由是「P 帧带 SPS/PPS 会让 h264parse 反复
+     * 重新协商」。那个理由成立于 format=time 时代 —— 我们每个 buffer 就是
+     * 一个 AU，h264parse 原样转发，P 帧确实不该带头。
+     *
+     * v1.3.6 为解决时间轴断裂改成 format=bytes 之后，语义变了：h264parse
+     * 自己重新扫描 start code 分帧，并且**必须先见到 SPS/PPS 才能协商出
+     * src pad 的 caps**。校园网现场（campus1.log 的 #2/#4/#6/#10）正是
+     * 「整局没有 IDR → 闸门 4 秒后放开 → 第一条推出去的是裸 P 帧」，
+     * 于是 h264parse 永远等不到参数集，parsed/vdecin/decoded/shown 全程 0，
+     * 画面一次都没出现过。
+     *
+     * 所以：只要没推过参数集，任何一帧都补。推过一次之后回到旧规则，
+     * 只有 IDR 才补（避免每帧重复 SPS/PPS 触发反复重协商）。 */
     out_p = base_p;
     out_n = base_n;
-    if (key) {
+    if (key || !s->params_pushed) {
         need_sps = !g_rtp.au_has_sps && g_rtp.sps_ok;
         need_pps = !g_rtp.au_has_pps && g_rtp.pps_ok;
         if (need_sps || need_pps) {
@@ -1414,12 +1431,18 @@ static void flush_frame(cm_sess *s) {
                 out_p = g_rtp.au_out.p;
                 out_n = (int)g_rtp.au_out.len;
                 s->stats.vid_sps_inject++;
-                CM_LOGI("#%d IDR without %s%s, injected cached parameter sets "
+                s->params_pushed = 1;
+                CM_LOGI("#%d %s without %s%s, injected cached parameter sets "
                         "(sps=%dB pps=%dB au=%dB)",
-                        s->id, need_sps ? "SPS" : "", need_pps ? "PPS" : "",
+                        s->id, key ? "IDR" : "first AU",
+                        need_sps ? "SPS" : "", need_pps ? "PPS" : "",
                         (int)g_rtp.sps.len, (int)g_rtp.pps.len, base_n);
             }
         }
+    } else if (g_rtp.au_has_sps || g_rtp.au_has_pps) {
+        /* AU 自带参数集（网关开局那个 STAP-A 就在这一帧里）：即使不是 key
+         * 也说明下游已经拿到过参数集，别再重复注入。 */
+        s->params_pushed = 1;
     }
 
     if (key) mark_keyframe(s);
@@ -1942,6 +1965,10 @@ void cm_rtp_after_rebuild(cm_sess *s) {
     s->have_kf = 0;
     s->kf_starve_ms = 0;
     s->relax_until_ms = 0;
+    /* ★ READY 重置换掉了整个解码器实例：新实例的 DPB 是空的，h264parse 也
+     * 重新开始协商 caps —— 所以「下游已有参数集」这个事实作废，要重新补。
+     * 不清的话，重置后第一条 P 帧仍然不带 SPS/PPS，新实例又卡在等参数集。 */
+    s->params_pushed = 0;
     pthread_mutex_unlock(&g_rtp_mu);
     kf_request(s, "pipeline rebuild");
 }
