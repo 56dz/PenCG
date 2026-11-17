@@ -194,3 +194,97 @@ need fresh IDR（code -8）→ L2 复用网关重连                            
 3. 若网关将来开始响应 PLI，第 1 级就能直接恢复，无需换会话。
 4. **画质优先档的 `code:-8` 换会话尚未在真机上观测到**（需要真的进入 IDR 饥饿）。
    逻辑已按 `native 只发一次 + JS 挡 busy/非 quality 态` 写好，但缺一次现场样本。
+
+## 七、2026-11-17 定案：appsrc 时间轴是周期性卡死的真因
+
+### 7.1 五段计数把断点夹到解码器内部
+
+v1.3.5 在管线上挂了五个 BUFFER 探针，把「一帧从我们手里到屏幕上」切成四段：
+
+```
+appsrc 推入 -> parsed (h264parse 出口) -> vdecin (mppvideodec 入口)
+            -> decoded (mppvideodec 出口) -> shown (kmssink 入口)
+```
+
+真机一次冻结的现场（`DictPen_20261117_122152.log`）：
+
+```
+健康  pushed=1881 parsed=1886 vdecin=1886 decoded=1881 shown=1881  queue=0
+冻结  pushed=2069 parsed=2074 vdecin=2074 decoded=1943 shown=1943  queue=0
+                     ↑ 继续涨            ↑ 死钉
+```
+
+131 帧进了解码器的 sink pad，一帧都没从 src pad 出来。这个组合一次性排掉四条：
+
+| 假设 | 排除依据 |
+|---|---|
+| 我们组帧 / RTP 丢帧 | `parsed == vdecin`，且全份 `drop broken P` 只有 3 次 |
+| appsrc 内部积压 | `queue = 0`（v1.3.3 起可读的 `current_level_buffers`）|
+| h264parse 吞帧 | `parsed` 与 `vdecin` 完全相等 |
+| MPP 硬件复位 | `dmesg | grep -c resetting` = **0** |
+| 解码器报错 | `bus ERROR` = 0、`appsrc push flow` = 0 |
+| dma-buf 泄漏耗尽输出池 | `fd` 稳定 153、`dmabuf` 稳定 65，6 次采样无增长 |
+
+注意 `dmesg` 那条是**反例排除**的关键：v1.3.3 那次冻结确实伴随
+`mpp_rkvdec2 ... irq_status 0x000017 / resetting / reset done`（2 次），
+但 v1.3.4/v1.3.5 这几十次冻结**一次复位都没有**，说明另有软件层原因。
+
+### 7.2 真因：`do-timestamp=true` 产生的时间轴丢失包后断裂
+
+原管线源是 `appsrc is-live=true format=time do-timestamp=true`。这种配置下
+appsrc 按**到达时刻**给每个 buffer 打绝对时钟戳。RTP 层一旦丢包
+（`rtp gap: lost N pkt`），我们就少推几帧，下一个 buffer 的时间戳随即跳变，
+解码器侧的时间线因此断裂 —— 之后它把后续帧判成「不在时间轴上」而静默弃掉，
+表现为**收下 buffer 却永不出帧**，且 `flush` / READY 重置都救不回来。
+
+这与 bug3/bug4 那次「kmssink `sync=true` 因时间轴错位整体丢帧」是同一类故障，
+只是这次发生在解码器而不是 sink。
+
+### 7.3 修复：源改成字节流，时间轴完全不参与
+
+```diff
+- appsrc name=vsrc is-live=true format=time  do-timestamp=true
++ appsrc name=vsrc is-live=true format=bytes do-timestamp=false
+```
+
+`format=bytes` 下 appsrc 只维护字节 offset、不产生时间戳，h264parse 拿不到
+依赖时间的 segment，解码器也就没有「按时间轴弃帧」的依据。下游 kmssink 本来就是
+`sync=false`（见 `KMS_SINK_PROPS` 上方长注释：那次定案不是「补准 PTS」而是
+「不再让 SINK 依赖 PTS」），所以整条链上没有东西需要时间戳。
+
+### 7.4 验证数据
+
+同一台设备、同一个游戏（原神），三版对照：
+
+| 版本 | 会话数 | 中位续航 | 最长 | `native -7` |
+|---|---|---|---|---|
+| v1.3.4 | 40 | 496 帧 ≈ **17 秒** | 6773 帧 | 37 次 |
+| v1.3.5 | 4 | 2493 帧 ≈ **83 秒** | 5740 帧 ≈ 3 分钟 | 3 次 |
+| **v1.3.6** | **1** | — | **2470 帧 ≈ 323 秒，全程零停摆** | **0 次** |
+
+v1.3.6 单会话从 `12:39:13` 连续健康到 `12:44:36`（5 分 23 秒），
+`-7` / `decoder stalled` / `rtp gap` 全为 0，计数一路对齐：
+
+```
+pushed=2470 parsed=2476 vdecin=2476 decoded=2470 shown=2464  queue=0 recov=0
+```
+
+### 7.5 保留下来的三层恢复机制
+
+时间轴修好之后，周期性停摆的主因消失，但下面三层仍保留作兜底
+（网关停推、真实弱网等场景仍会触发）：
+
+1. **第 0 级** `decoded` 停涨 1 秒 → flush 上游重新协商；
+2. **第 1.5 级** 再停 1 秒 → READY 重置整条视频管线（重建 h264parse 与解码器实例）；
+3. **第 2 级** 再停 4 秒 → 发 `code:-7` 交给 JS 换会话。
+
+⚠ 第 1.5 级有已知副作用：READY 重置瞬间 `plane 76` 上残留的旧帧会被重新绑定，
+短时间出现**全屏竖条纹**，数秒后新帧覆盖即自愈（用户 2026-11-17 07:00 观察确认）。
+若将来要消除，方向是重置前先用 1x1 把平面藏起来，重置后再放开。
+
+### 7.6 遗留
+
+- 未改用 `filesrc` + FIFO（同机型 PenBili 的做法）：`format=bytes` 已经解决，
+  不必再动源模型。
+- 竖条纹副作用未消除（见 7.5 ⚠）。
+- 网关侧为什么会周期性停推仍未解释，根因在服务端。

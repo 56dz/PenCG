@@ -535,6 +535,29 @@ uint64_t cm_box_pushed_bytes(cm_box *b);
 /* 真正送进 kmssink 的帧数（sink pad 探针计数）。cm_box_pushed 只代表
  * 「交给了 appsrc」，它涨而本函数不涨 = 下游停止消费（终末地全黑/冻结）。 */
 uint64_t cm_box_shown(cm_box *b);
+/* 解码器输出帧数（mppvideodec src pad 的 BUFFER 探针）。
+ * 三段关系：pushed（交给了 appsrc）>= decoded（解码器吐出）>= shown（进了 kmssink）。
+ *   pushed 涨 / decoded 不涨 -> 卡在 h264parse 或 mppvideodec
+ *   decoded 涨 / shown 不涨  -> 卡在 videoconvert 或 kmssink */
+uint64_t cm_box_decoded(cm_box *b);
+/* 解析器出口 / 解码器入口的 buffer 计数（2026-11-17 加）。
+ * 用途：冻结时 queue=0 说明帧已离开 appsrc，用这两个计数判断它断在
+ * h264parse 内部还是 h264parse→解码器之间。 */
+uint64_t cm_box_parsed(cm_box *b);
+uint64_t cm_box_vdecin(cm_box *b);
+/* 解码器静默停摆后的就地恢复：向上游推一对 flush-start/flush-stop，
+ * 逼 h264parse 与解码器重新协商。返回 1 表示发起了恢复。
+ * 为什么是 flush 而不是重建管线，见 cm_gst.c 里本函数的实现注释。 */
+int cm_box_recover_decoder(cm_box *b, uint64_t now_ms);
+/* 第二级恢复：把整条视频管线过一遍 READY，逼 GStreamer 重新实例化
+ * h264parse 与 mppvideodec（连同按首个 SPS 分配的 DPB / 输出池）。
+ * 用于 flush 救不回来的场景（硬件解码会话已被驱动 reset，见 cm_gst.c）。
+ * 返回 1 表示发起了重置；调用方必须随后让 RTP 层回到「等 IDR」并发 PLI。 */
+int cm_box_reset_decoder(cm_box *b, uint64_t now_ms);
+/* 成功发起过的恢复次数 */
+uint64_t cm_box_recoveries(cm_box *b);
+/* appsrc 队列当前积压条数（解码器停摆时它会持续增长） */
+uint64_t cm_box_queue_depth(cm_box *b);
 /* 调试用：把内部 GstElement* pipeline 暴露给测试工具（gtest）看 bus/state。
  * 生产路径不调用；返回 NULL 表示没有管线。 */
 void   *cm_box_pipeline(cm_box *b);

@@ -42,6 +42,10 @@ typedef unsigned long long GstClockTime;
 #define GST_APP_LEAKY_NO 0
 #define GST_APP_LEAKY_DOWNSTREAM 2
 
+/* appsrc 内部队列的条数上限（约 1 秒的 30fps 视频）。
+ * 见 cm_box_create 末尾注释：单靠 max_bytes=2MB 兜不住小 AU 的静默堆积。 */
+#define CM_APP_SRC_MAX_BUFFERS 30ull
+
 /* GstState 枚举（GStreamer 1.x 实测值，顺序极易搞错）：
  *   GST_STATE_VOID_PENDING = 0   <- 不是 NULL！
  *   GST_STATE_NULL         = 1
@@ -139,6 +143,15 @@ extern void gst_app_src_set_caps(GstAppSrc *appsrc, GstCaps *caps);
 extern GstFlowReturn gst_app_src_push_buffer(GstAppSrc *appsrc, GstBuffer *buffer);
 extern void gst_app_src_set_max_bytes(GstAppSrc *appsrc, unsigned long long max);
 extern void gst_app_src_set_leaky_type(GstAppSrc *appsrc, int leaky);
+/* ★ 2026-11-16 新增：给 appsrc 的内部队列加「条数」上限，并把队列水位读出来。
+ * 只设 max_bytes（2MB）是不够的：本局的 AU 大多只有 100~600 字节，138 帧
+ * 才 ~140KB，离 2MB 差了十几倍，leaky 压根没触发，于是解码器停摆后
+ * 队列能静静堆到 4~5 秒的陈旧帧 —— 就算之后恢复，也会先播一大段过时画面。
+ * 加 max_buffers=30（约 1 秒）把「陈旧度」钉在可接受范围，同时 leaky 仍然
+ * 生效（不会阻塞收包线程，这一点必须保住：见 cm_box_create 末尾注释）。
+ * 这两个符号在真机 /usr/lib/libgstapp-1.0.so.0 的 .dynsym 里都确认存在。 */
+extern void gst_app_src_set_max_buffers(GstAppSrc *appsrc, unsigned long long max);
+extern unsigned long long gst_app_src_get_current_level_buffers(GstAppSrc *appsrc);
 extern void gst_app_src_set_stream_type(GstAppSrc *appsrc, int type);
 extern GstFlowReturn gst_app_src_end_of_stream(GstAppSrc *appsrc);
 extern int gst_app_src_get_type(void);
@@ -201,6 +214,51 @@ struct cm_box {
      * 跨线程读写（探针跑在 kmssink 的流任务里），用 volatile 即可 ——
      * 64 位对齐的单调计数器，读者只做「与上次是否相等」的比较，不需要原子性。 */
     volatile uint64_t shown;
+    /* ★ 解码器输出帧计数：mppvideodec 的 src pad 上挂 BUFFER 探针数出来的。
+     *
+     * 加这一层是为了把「pushed 涨、shown 不动」这个二元现象拆成三段：
+     *   pushed  涨、decoded 不涨  → 卡在 h264parse/mppvideodec（要么进不去，
+     *                               要么解码器内部停摆不出帧）
+     *   decoded 涨、shown 不涨    → 卡在 videoconvert/kmssink（下游不消费）
+     * 2026-11-16 现场：v1.3.1 上 pushed 从 442 涨到 996 而 shown 死钉在 376，
+     * 当时只有这两个计数，两种可能都无法排除，只能靠再补这一层来定案。
+     *
+     * 同样是跨线程只写单调计数器，volatile 足够。 */
+    volatile uint64_t decoded;
+    /* ★ 2026-11-17：把「消失的那一段」再拆一层。
+     *
+     * 现场（v1.3.4，原神，44 个会话）：冻结时 queue=0（appsrc 队列是空的）、
+     * pushed 继续涨、decoded 死钉不动。queue=0 直接否掉了「解码器背压」
+     * —— 真有背压队列会涨到 max_buffers(30) 上限。也就是说帧确实离开了
+     * appsrc、被 h264parse 取走了，然后就此消失：既没到解码器，也没堆积。
+     *
+     * 我们自己的计数器只覆盖「我们组帧」这一段，看不到 h264parse 内部。
+     * h264parse 在等参数集 / 判定流状态变化时会静默丢帧，所以补两个探针：
+     *   parsed —— h264parse 的 src pad（出口）上收到的 buffer 数
+     *   vdecin —— mppvideodec 的 sink pad（入口）上收到的 buffer 数
+     * 三个计数的组合能唯一定位：
+     *   pushed 涨 parsed 不涨 → h264parse 入口就没收（appsrc/上游问题）
+     *   parsed 涨 vdecin 不涨 → h264parse 与解码器之间断（协商/链接问题）
+     *   vdecin 涨 decoded 不涨 → 解码器收下不出帧（MPP 内部问题）
+     * 全都涨但 shown 不涨   → videoconvert/kmssink 下游问题 */
+    volatile uint64_t parsed;
+    volatile uint64_t vdecin;
+    /* ★ 2026-11-16：解码器停摆后的就地恢复计数。
+     *
+     * 现场（v1.3.2，2026-11-16 22:45:19，原神）：pushed 913 涨到 959，
+     * decoded / shown 双双死钉 821，bus 无 ERROR、appsrc 无 flow error ——
+     * 也就是 h264parse/mppvideodec 静默停止消费，而不是报错退出。
+     * 触发它的事件只是一次「lost 1 pkt」的丢包。
+     *
+     * 恢复手段是向上游（appsrc 的 src pad）推一对 flush-start/flush-stop，
+     * 逼 h264parse 与解码器重新协商（同一手法已在 caps 变化时验证可用，
+     * 见 cm_box_set_caps_video）。这里记两个数便于现场判断：
+     *   recoveries：整条管线生命周期里成功发起过几次恢复
+     *   last_recover_ms：最近一次恢复的时刻（避免 500ms 粒度下反复 flush） */
+    volatile uint64_t recoveries;
+    volatile uint64_t last_recover_ms;
+    /* READY 重置（第二级恢复手段）的时刻，限速用。见 cm_box_reset_decoder。 */
+    volatile uint64_t last_reset_ms;
     int failed;
     char *caps_str;
 
@@ -331,9 +389,29 @@ static const char *video_pipeline_fmt(void) {
      * ⚠ 真机若看到「画面卡住 + 日志有 mpp 解码错误」，就是这道防线在生效
      *   （16 次连续错误后 flow error）；回退只需去掉这两个属性恢复插件默认值，
      *   详见 docs/BUGFIX-bug3-bug4-gst.md「hunk 1」。 */
-    return "appsrc name=vsrc is-live=true format=time do-timestamp=true "
+    /* ★ 2026-11-17 A/B 实验：源改成 format=bytes，彻底不让时间轴参与调度。
+     *
+     * 现场（1.3.5 五段探针）：健康期 `pushed==parsed==vdecin==decoded==shown`，
+     * 一旦冻结就变成 `pushed 2069 / parsed 2074 / vdecin 2074 / decoded 1943`，
+     * 即 131 帧进了 mppvideodec 的 sink pad 却一帧都没从 src pad 出来。
+     * 同步排除：appsrc 无积压（queue=0）、h264parse 无丢帧（parsed==vdecin）、
+     * 无 MPP 硬件复位（dmesg 无 resetting）、无解码错误（bus ERROR=0）、
+     * 无 dma-buf 泄漏（fd/dmabuf 计数稳定）。⇒ 停摆在解码器内部。
+     *
+     * 最可疑的是时间轴：原来源是 `format=time do-timestamp=true`，appsrc 会按
+     * **到达时刻**给每个 buffer 打绝对时钟戳。RTP 层一丢包（`rtp gap: lost N`）
+     * 我们就少推几帧，下一个 buffer 的时间戳随即出现跳跃 —— 解码器侧的时间线
+     * 因此断裂。这与 bug3/bug4 那次「kmssink sync=true 因时间轴错位整体丢帧」
+     * 是同一类故障，只是这次发生在解码器而不是 sink。
+     *
+     * 改成 `format=bytes` 后 appsrc 只维护字节 offset、不产生时间戳，
+     * h264parse 拿不到依赖时间的 segment，解码器也就无从「按时间轴判弃帧」。
+     * 下游 kmssink 本来就是 `sync=false`（见 KMS_SINK_PROPS 上方长注释），
+     * 不依赖 PTS 调度，所以这条链上没有东西需要时间戳。
+     * ⚠ 这是可回退的单点改动：出问题把这一段换回原来的两行即可。 */
+    return "appsrc name=vsrc is-live=true format=bytes do-timestamp=false "
            "caps=video/x-h264,stream-format=byte-stream,alignment=au "
-           "! h264parse ! mppvideodec rotation=270 ignore-error=false max-errors=16 "
+           "! h264parse name=vparse ! mppvideodec name=vdec rotation=270 ignore-error=false max-errors=16 "
            "! videoconvert" KMS_SINK_PROPS;
 }
 
@@ -1173,6 +1251,41 @@ static GstPadProbeReturn cb_sink_buffer(GstPad *pad, GstPadProbeInfo *info,
     return GST_PAD_PROBE_OK;
 }
 
+/* mppvideodec src pad 的 BUFFER 探针：同样只计数。
+ * 这一层证明「解码器到底有没有在出帧」，是区分「解码器停摆」与
+ * 「下游不消费」的唯一手段（见 struct cm_box 里 decoded 字段的注释）。 */
+static GstPadProbeReturn cb_dec_src_buffer(GstPad *pad, GstPadProbeInfo *info,
+                                           void *ud) {
+    cm_box *b = (cm_box *)ud;
+    (void)pad;
+    (void)info;
+    if (b) b->decoded++;
+    return GST_PAD_PROBE_OK;
+}
+
+/* h264parse src pad（出口）的 BUFFER 探针。
+ * 与 cb_dec_src_buffer 的区别：它在解析器刚吐出来的位置数，
+ * 不经过解码器。三者（pushed / parsed / vdecin）一起才能区分
+ * 「解析器没收」「解析器收了但没往下游送」「解码器收了不出帧」。 */
+static GstPadProbeReturn cb_parse_src_buffer(GstPad *pad, GstPadProbeInfo *info,
+                                             void *ud) {
+    cm_box *b = (cm_box *)ud;
+    (void)pad;
+    (void)info;
+    if (b) b->parsed++;
+    return GST_PAD_PROBE_OK;
+}
+
+/* mppvideodec sink pad（入口）的 BUFFER 探针 —— 数「解码器到底收下了多少帧」。 */
+static GstPadProbeReturn cb_dec_sink_buffer(GstPad *pad, GstPadProbeInfo *info,
+                                            void *ud) {
+    cm_box *b = (cm_box *)ud;
+    (void)pad;
+    (void)info;
+    if (b) b->vdecin++;
+    return GST_PAD_PROBE_OK;
+}
+
 cm_box *cm_box_create(cm_sess *s, int is_video) {
     cm_box *b;
     if (gst_ensure() != 0) return NULL;
@@ -1244,6 +1357,57 @@ cm_box *cm_box_create(cm_sess *s, int is_video) {
             } else {
                 CM_LOGW("video: sink pad not found, sink watchdog unavailable");
             }
+            /* 解码器输出探针：把 pushed/decoded/shown 三段拆开看。
+             * vdec 是 video_pipeline_fmt() 里给 mppvideodec 写的名字。 */
+            {
+                GstElement *dec = gst_bin_get_by_name((GstBin *)b->pipeline, "vdec");
+                if (dec) {
+                    GstPad *dp = gst_element_get_static_pad(dec, "src");
+                    if (dp) {
+                        gst_pad_add_probe(dp, GST_PAD_PROBE_TYPE_BUFFER,
+                                          cb_dec_src_buffer, b, NULL);
+                        gst_object_unref(dp);
+                    } else {
+                        CM_LOGW("video: decoder src pad not found, decoded counter unavailable");
+                    }
+                    gst_object_unref(dec);
+                } else {
+                    CM_LOGW("video: decoder element vdec not found, decoded counter unavailable");
+                }
+            }
+            /* ★ 2026-11-17：定位「帧离开 appsrc 后消失」的那一段。
+             * 现场 queue=0 却没新帧上屏，嫌疑在 h264parse 静默丢帧。
+             * 这里数「解析器出口」与「解码器入口」，谁不涨就是断在谁那里。 */
+            {
+                GstElement *par = gst_bin_get_by_name((GstBin *)b->pipeline, "vparse");
+                if (par) {
+                    GstPad *psp = gst_element_get_static_pad(par, "src");
+                    if (psp) {
+                        gst_pad_add_probe(psp, GST_PAD_PROBE_TYPE_BUFFER,
+                                          cb_parse_src_buffer, b, NULL);
+                        gst_object_unref(psp);
+                    } else {
+                        CM_LOGW("video: parser src pad not found, parsed counter unavailable");
+                    }
+                    gst_object_unref(par);
+                } else {
+                    CM_LOGW("video: parser element vparse not found, parsed counter unavailable");
+                }
+            }
+            {
+                GstElement *dec2 = gst_bin_get_by_name((GstBin *)b->pipeline, "vdec");
+                if (dec2) {
+                    GstPad *dsp = gst_element_get_static_pad(dec2, "sink");
+                    if (dsp) {
+                        gst_pad_add_probe(dsp, GST_PAD_PROBE_TYPE_BUFFER,
+                                          cb_dec_sink_buffer, b, NULL);
+                        gst_object_unref(dsp);
+                    } else {
+                        CM_LOGW("video: decoder sink pad not found, vdecin counter unavailable");
+                    }
+                    gst_object_unref(dec2);
+                }
+            }
             apply_rect(b);
         }
     } else {
@@ -1302,14 +1466,133 @@ cm_box *cm_box_create(cm_sess *s, int is_video) {
         cm_box_destroy(b);
         return NULL;
     }
-    /* 不阻塞收包线程：满了丢旧数据 */
+    /* 不阻塞收包线程：满了丢旧数据（leaky 必须保留 —— 关掉它 appsrc 在队列
+     * 打满时会阻塞 push_buffer，直接卡死 cm_media_loop 的收包线程）。
+     * 但只靠 max_bytes 兜不住「解码器停摆时队列静默堆积」：
+     * 100~600 字节的小 AU 堆 138 帧也才 140KB，离 2MB 很远，leaky 不触发。
+     * 所以再加一条按「条数」的上限，把陈旧帧深度钉在 ~1 秒。 */
     gst_app_src_set_max_bytes(b->src, 2u * 1024u * 1024u);
     gst_app_src_set_leaky_type(b->src, GST_APP_LEAKY_DOWNSTREAM);
+    gst_app_src_set_max_buffers(b->src, CM_APP_SRC_MAX_BUFFERS);
     gst_app_src_set_stream_type(b->src, GST_APP_STREAM_TYPE_STREAM);
 
     gst_element_set_state(b->pipeline, GST_STATE_PLAYING_);
     CM_LOGI("%s pipeline PLAYING", is_video ? "video" : "audio");
     return b;
+}
+
+/*
+ * cm_box_recover_decoder() —— 解码器静默停摆后的就地恢复（2026-11-16 新增）。
+ *
+ * 为什么需要（真机定案，v1.3.2 22:45:19 现场）：
+ *   一次 `rtp gap: lost 1 pkt` 之后，pushed 从 913 涨到 959，
+ *   而 decoded 与 shown 双双死钉在 821，bus 没有任何 ERROR、
+ *   appsrc push 也一直返回 OK —— h264parse / mppvideodec 进了
+ *   「不报错、不消费、不出帧」的状态，且永远不会自己恢复。
+ *
+ * 为什么用 flush 而不是重建管线：
+ *   重建要把 pipeline 打到 NULL，会解绑 KMS 平面（闪黑），而且新解码器
+ *   必须等一个 IDR 才能出画 —— 本局 IDR 间隔实测可达 604 秒。flush 不碰
+ *   状态机、不解绑平面，只让 h264parse 与解码器重新走一次协商，
+ *   配合随后的 PLI 就有机会在上百毫秒内恢复。
+ *
+ * 三条硬约束（与 cm_box_set_caps_video 里那三条同源，别违反）：
+ *   1) 只许发 event，绝不许 gst_element_set_state —— 本函数在 cm_media
+ *      主循环里被调用，set_state 会同步等状态切换，与收包线程抢锁会死锁。
+ *   2) flush-start 必须配 flush-stop(reset_time=TRUE)，否则管线永远停在
+ *      flushing 状态，之后 push 的 buffer 全被丢（表现为 pushed 涨、无画面）。
+ *   3) 两次恢复之间留 CM_RECOVER_MIN_MS，别在 500ms 粒度下反复 flush。
+ *
+ * 返回 1 表示发起了恢复，0 表示没做（未到间隔 / 管线不在 PLAYING / 拿不到 pad）。
+ */
+#define CM_RECOVER_MIN_MS 1500ull
+
+int cm_box_recover_decoder(cm_box *b, uint64_t now_ms) {
+    GstState got = GST_STATE_VOID_PENDING_;
+    GstState pend = GST_STATE_VOID_PENDING_;
+    GstPad *pad;
+    GstEvent *ev;
+    if (!b || !b->is_video || !b->pipeline || !b->src) return 0;
+    if (b->last_recover_ms && now_ms > b->last_recover_ms &&
+        (now_ms - b->last_recover_ms) < CM_RECOVER_MIN_MS) {
+        return 0;
+    }
+    /* 只在 PLAYING 下 flush：READY/NULL 时下一次 PLAYING 自然会重新协商。 */
+    gst_element_get_state(b->pipeline, &got, &pend, 0 /* 不等待 */);
+    if (got != GST_STATE_PLAYING_) return 0;
+    pad = gst_element_get_static_pad((GstElement *)b->src, "src");
+    if (!pad) {
+        CM_LOGW("video recover: appsrc src pad not found, skip flush");
+        return 0;
+    }
+    b->last_recover_ms = now_ms;
+    b->recoveries++;
+    CM_LOGW("video decoder stalled -> flush upstream to renegotiate (recovery #%llu)",
+            (unsigned long long)b->recoveries);
+    ev = gst_event_new_flush_start();
+    if (ev && !gst_pad_push_event(pad, ev)) {
+        CM_LOGW("video recover: flush-start push failed");
+    }
+    ev = gst_event_new_flush_stop(1 /* reset_time=TRUE */);
+    if (ev && !gst_pad_push_event(pad, ev)) {
+        CM_LOGW("video recover: flush-stop push failed");
+    }
+    gst_object_unref(pad);
+    return 1;
+}
+
+/*
+ * cm_box_reset_decoder() —— 第二级恢复：把整条视频管线过一遍 READY，
+ * 逼 GStreamer 重新实例化 h264parse 与 mppvideodec（连同它按首个 SPS
+ * 分配的 DPB / 输出 buffer 池）。
+ *
+ * 为什么第二级用它，而不是继续 flush（真机 2026-11-16 23:0x 定案）：
+ *   flush 只让现存元素重新协商，元素实例还是同一个；现场的病是
+ *   `decoded` 死钉 1051 不动、`pushed` 继续涨、`queue` 恒 0~1 ——
+ *   输入被收下、输出一帧都没有，说明卡在解码器实例内部，
+ *   而 dmesg 显示 `mpp_rkvdec2 ... irq_status 0x000017 / resetting /
+ *   reset done`：硬件会话已经被驱动自己重置过，GStreamer 层的
+ *   flush 事件根本到不了已死的硬件会话，所以 flush 永远救不回来。
+ *   READY 会让这些元素整体 re-instantiate，等于换一套硬件会话。
+ *
+ * 与 cm_box_reset_rect 的区别：矩形不动，不会碰到「缩小可热改、
+ * 放大必须过 READY」那条棘轮；也不销毁 appsrc / caps，WS 会话不受影响。
+ *
+ * 代价：几百毫秒黑屏（READY 期间没有任何东西往 plane 上送帧）。
+ * 比换会话（5 秒 + 重新 auth/取流 + 闪黑 + 烧机位）便宜一个数量级。
+ *
+ * ★ 调用方必须紧接着让 RTP 层回到「等 IDR」并重新要关键帧 ——
+ *   新实例的 DPB 是空的，直接喂 P 帧只会再死一次。
+ */
+#define CM_RESET_MIN_MS 1500ull
+
+int cm_box_reset_decoder(cm_box *b, uint64_t now_ms) {
+    GstState got = GST_STATE_VOID_PENDING_;
+    GstState pend = GST_STATE_VOID_PENDING_;
+    if (!b || !b->is_video || !b->pipeline) return 0;
+    /* 限速：VWD 的检查粒度是 500ms，不加限速会连续 READY 好几次。
+     * 注意这里不先置 last_reset_ms —— 置早了会吞掉真正生效的那次。 */
+    if (b->last_reset_ms && now_ms > b->last_reset_ms &&
+        (now_ms - b->last_reset_ms) < CM_RESET_MIN_MS) {
+        return 0;
+    }
+    /* 注意：这是同步等待，会在这段时间里卡住调用方线程（收包主循环），
+     * 期间 UDP 包落在内核 rcvbuf 里（212992B，约 100~200ms 的量）。
+     * 所以超时给 500ms 而不是 1.5s：真要卡住也宁可让这次恢复失败，
+     * 由下一级「求 IDR → 交 JS」接手，而不是把收包堵死两秒。 */
+    gst_element_set_state(b->pipeline, GST_STATE_READY_);
+    gst_element_get_state(b->pipeline, &got, &pend, 500000000ULL /* 500ms */);
+    /* READY 下重新下发矩形：kmssink 在下一轮 READY->PAUSED 里会重读它。
+     * 矩形没变，这一步只是保证平面按原尺寸重新绑回来。 */
+    apply_rect(b);
+    gst_element_set_state(b->pipeline, GST_STATE_PLAYING_);
+    gst_element_get_state(b->pipeline, &got, &pend, 500000000ULL /* 500ms */);
+    b->last_reset_ms = now_ms;
+    b->recoveries++;
+    CM_LOGW("video decoder reset via READY: pipeline re-instantiated "
+            "(state=%d pending=%d, recovery #%llu)",
+            (int)got, (int)pend, (unsigned long long)b->recoveries);
+    return 1;
 }
 
 void cm_box_destroy(cm_box *b) {
@@ -1626,4 +1909,19 @@ uint64_t cm_box_pushed(cm_box *b) { return b ? b->pushed : 0; }
 /* 真正送到 kmssink 的帧数（探针计数）。与 cm_box_pushed 的区别见 struct
  * cm_box 里 shown 字段的注释 —— 判断画面上没上屏只能看这个。 */
 uint64_t cm_box_shown(cm_box *b) { return b ? b->shown : 0; }
+/* 解码器输出帧数（mppvideodec src pad 探针）。介于 pushed 与 shown 之间，
+ * 用来区分「解码器不出帧」与「下游不消费」。 */
+uint64_t cm_box_decoded(cm_box *b) { return b ? b->decoded : 0; }
+/* 解析器出口 / 解码器入口的 buffer 计数：与 pushed/decoded/shown 一起
+ * 把「帧在哪一段消失」唯一定位（见 struct cm_box 里 parsed/vdecin 注释）。 */
+uint64_t cm_box_parsed(cm_box *b) { return b ? b->parsed : 0; }
+uint64_t cm_box_vdecin(cm_box *b) { return b ? b->vdecin : 0; }
+/* 就地恢复（flush 上游）的次数，见 cm_box_recover_decoder。 */
+uint64_t cm_box_recoveries(cm_box *b) { return b ? b->recoveries : 0; }
+/* appsrc 内部队列当前积压的 buffer 条数（0 表示下游跟得上）。
+ * 这是「解码器停摆时到底堆了多少帧」的唯一直接读数。 */
+uint64_t cm_box_queue_depth(cm_box *b) {
+    if (!b || !b->src) return 0;
+    return (uint64_t)gst_app_src_get_current_level_buffers(b->src);
+}
 uint64_t cm_box_pushed_bytes(cm_box *b) { return b ? b->pushed_bytes : 0; }

@@ -113,10 +113,23 @@
 /* IDR AU 在 marker 之后额外等待重传的窗口。
  *
  * 这是 NACK 真正能救回 IDR 的关键：一个 AU 的所有分片是连着到的，marker
- * 一到就可以 flush；被 NACK 点名的那几个包最快也要一个 RTT（云游戏网关
- * 通常 10~40ms）才回来。所以对 IDR 单独压住 30ms 不放，让补包有机会落位。
- * 只对 IDR 生效：P 帧压 30ms 就是纯延迟，丢一帧才 33ms，不值。 */
-#define IDR_HOLD_MS 30
+ * 一到就可以 flush；被 NACK 点名的那几个包最快也要一个 RTT 才回来。
+ * 只对 IDR 生效：P 帧压这么久是纯延迟，丢一帧才 33ms，不值。
+ *
+ * ★ 2026-11-16 现场定案：原来写 30ms，而实测 RTT 是 65~258ms（中位数
+ * 176ms）——窗口比一个 RTT 还短，等于从来没等到过重传。更要命的是窗口
+ * 还被「下一帧的第一个 slice 到了就强制放行」这条路径绕过（30fps 下
+ * 下一帧只隔 33ms，60fps 只隔 16.7ms），真机上 hold 日志与 drop 日志
+ * 永远相邻两行，hold 实际等于 0。后果是「IDR 缺 1 片 → 整帧丢弃 →
+ * have_kf=0 → 该会话再无 IDR（实测会话内 IDR 间隔可长达 604 秒）→
+ * 画面永久停住 → 上屏看门狗 4 秒后报 -7 换会话」，用户看到的就是
+ * 「玩几十秒就卡一下然后重连」。
+ *
+ * 现在取 250ms（≈1.4 个中位 RTT），并配套两件事：
+ *   1. 窗口内到达的**新图像**整帧丢弃（见 handle_h264 开头的闸门），
+ *      绝不允许拼进挂起的 AU；
+ *   2. 只有 NACK 补回来的重传包能进，到期由 cm_rtp_flush_held 统一放行。 */
+#define IDR_HOLD_MS 250
 
 /* ---------- 切片区：AU 边界的真正判据（终末地全黑根因修复） ----------
  *
@@ -244,6 +257,11 @@ typedef struct {
     /* IDR 的 hold 窗口：marker 到了但还在等重传时的放行时刻。
      * 0 = 没有挂起的 AU。见 IDR_HOLD_MS 的注释。 */
     uint64_t au_hold_until_ms;
+    /* pkt_is_rtx：当前这个 RTP 包是 NACK 补回来的重传包（RTP 层判完 seq
+     * 归属后置位）。hold 期间只允许重传包入帧，见 handle_h264 开头。
+     * au_hold_drop：hold 期间被丢掉的新图像包数（诊断用，配合 holdRel/join）。 */
+    int      pkt_is_rtx;
+    uint64_t au_hold_drop;
 
     /* ---------- 切片区：真正的 AU 边界（见文件开头「切片区」大注释） ----------
      *
@@ -555,13 +573,11 @@ static int note_slice(int parsed, int first_mb) {
  * 比丢帧糟糕得多。所以照 FU-A 分支的做法，挂起就强制放行一次。 */
 static void au_flush_boundary(cm_sess *s) {
     if (!g_rtp.have_data) { rtp_reset_au(); return; }
+    /* hold 中：新图像的包已被 handle_h264 顶部的闸门挡在门外，所以这里
+     * 根本走不到「把两帧拼成畸形 AU」的危险路径；直接返回，让挂起的 IDR
+     * 继续等重传，到期由 cm_rtp_flush_held 统一放行。 */
+    if (g_rtp.au_hold_state == 1) return;
     flush_frame(s);
-    if (g_rtp.au_hold_state == 1) {
-        g_rtp.au_hold_state = 2;   /* 已到期：flush_frame 不再重复挂起 */
-        g_rtp.au_hold_until_ms = 0;
-        CM_LOGD("#%d boundary arrived during IDR hold, releasing held AU", s->id);
-        flush_frame(s);
-    }
 }
 
 /* 一个 slice 传输完了 —— 判断现在能不能把 AU 交出去。
@@ -697,6 +713,7 @@ static void rtp_reset_au(void) {
     g_rtp.au_missing = 0;
     g_rtp.au_hold_state = 0;
     g_rtp.au_hold_until_ms = 0;
+    g_rtp.pkt_is_rtx = 0;
     /* 切片区状态随 AU 一起清（au_joined 是全局累计计数，刻意不清）。 */
     g_rtp.au_slices = 0;
     g_rtp.au_last_first_mb = 0;
@@ -722,6 +739,7 @@ static void rtp_reset_all(void) {
     g_rtp.gap_n = 0;
     g_rtp.au_hold_state = 0;
     g_rtp.au_hold_until_ms = 0;
+    g_rtp.pkt_is_rtx = 0;
     /* 换局时把「切片拼接」统计也清零：它是给用户看「这一局到底修好了没有」
      * 的判据，跨局累加就没有意义了。 */
     g_rtp.au_joined = 0;
@@ -1157,6 +1175,10 @@ static void flush_frame(cm_sess *s) {
      * 那几个包最快也要一个 RTT 才回来。IDR 丢一片整帧就废，所以这里单独
      * 压住 IDR_HOLD_MS 不放。**只对 IDR 生效**：P 帧压 30ms 是纯延迟，
      * 丢一帧才 33ms，不值。au_hold_state：0=没挂起 1=挂起中 2=已到期放行。 */
+    /* 已经挂起且还没到期：任何路径都不许把它放掉（含 join_tick 的超时兜底、
+     * hold 期间到达的 AU 边界）。到期由 cm_rtp_flush_held 放行。 */
+    if (g_rtp.au_hold_state == 1 && now < g_rtp.au_hold_until_ms) return;
+
     if (key && g_rtp.au_broken && g_rtp.au_hold_state == 0) {
         g_rtp.au_hold_state = 1;
         g_rtp.au_hold_until_ms = now + IDR_HOLD_MS;
@@ -1565,6 +1587,48 @@ static int gap_take(uint16_t seq) {
 static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, uint16_t seq) {
     int nal_type;
     if (n < 1) return;
+
+    /* --- hold 闸门：IDR 挂着等重传时，只允许重传包进来 ---
+     *
+     * 旧实现的 bug（2026-11-16 现场定案）：flush_frame 把残缺 IDR 挂起后，
+     * 下一帧的第一个 slice 一到就会走 au_flush_boundary / FU-A start 的
+     * 「强制放行」分支，于是 hold 窗口在一帧之内（16.7~33ms）就被捅穿，
+     * 日志里 hold 与 drop 永远是相邻两行 —— 窗口等于 0，NACK 补回来的包
+     * 永远赶不上。
+     *
+     * 现在改成「hold 期间新图像的包一律不进 AU」：既不 append（避免把两帧
+     * 拼成畸形 AU 送进解码器），也不 reset（避免把还在路上的重传包丢掉）。
+     * 到期由 cm_rtp_flush_held 统一放行：补上了就推，没补上就当坏 IDR 丢。
+     * 被丢弃的包不需要额外要：flush 之后的闸门会重新走 PLI 流程。 */
+    if (g_rtp.au_hold_state == 1 && !g_rtp.pkt_is_rtx) {
+        /* 例外：如果来的正是一个**新的 IDR 起点**（网关回应了我们的 PLI），
+         * 它比「等一片重传」值钱得多 —— 立刻放弃挂起的坏 IDR，改用新 IDR。
+         * 判据只需看 NAL 头：单 NAL 的 type 5，或 FU-A start 且 inner type 5。
+         * （hold 期间当前 AU 一定是那个坏 IDR，所以 type 5 必然是「新的」。） */
+        int fresh_idr = 0;
+        int nt = p[0] & 0x1F;
+        if (nt == 28) {
+            if (n >= 2 && (p[1] & 0x80) && ((p[1] & 0x1F) == 5)) fresh_idr = 1;
+        } else if (nt == 5) {
+            fresh_idr = 1;
+        }
+        if (fresh_idr) {
+            CM_LOGI("#%d new IDR arrived during IDR hold, dropping the broken one instead of waiting",
+                    s->id);
+            g_rtp.au_hold_state = 2;
+            g_rtp.au_hold_until_ms = 0;
+            rtp_reset_au();
+            /* 落到下面正常入帧路径 */
+        } else {
+            g_rtp.au_hold_drop++;
+            if (g_rtp.au_hold_drop == 1 || (g_rtp.au_hold_drop % 100u) == 0) {
+                CM_LOGI("#%d IDR hold: dropped %llu new-AU pkt(s) waiting for retransmits",
+                        s->id, (unsigned long long)g_rtp.au_hold_drop);
+            }
+            return;
+        }
+    }
+
     nal_type = p[0] & 0x1F;
 
     if (nal_type == 24) { /* STAP-A */
@@ -1662,13 +1726,6 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
              * 现在：先置 state=2（flush_frame 不会重复挂起）并把 deadline 清零，
              * 然后直接 flush_frame —— 洞补上了就推、没补上就走「坏 IDR」丢弃
              * 路径并补 PLI，两种情况都比「默默消失」正确。 */
-            if (g_rtp.au_hold_state == 1) {
-                g_rtp.au_hold_state = 2;
-                g_rtp.au_hold_until_ms = 0;
-                CM_LOGD("#%d next AU start arrived during IDR hold, releasing held AU",
-                        s->id);
-                flush_frame(s);
-            }
             if (g_rtp.in_fu) {
                 /* 上一 AU 没等到 end 就来了新 start：整帧作废。
                  * 旧代码只是 cm_buf_reset 了事，既不计账也不补 PLI，
@@ -2033,6 +2090,7 @@ void cm_rtp_on_packet(cm_sess *s, unsigned char *pkt, int len, const char *from_
          * report block 要拿它填 SSRC_n（填 0 会被网关丢弃整条 RR）。 */
         s->stats.vid_ssrc_seen = ssrc;
         pthread_mutex_lock(&g_rtp_mu);
+        g_rtp.pkt_is_rtx = 0;   /* 每个包重置：只有 NACK 补回来的那条路径会置 1 */
         if (!g_rtp_init) {
             cm_buf_init(&g_rtp.frame);
             cm_buf_init(&g_rtp.sps);
@@ -2148,6 +2206,7 @@ void cm_rtp_on_packet(cm_sess *s, unsigned char *pkt, int len, const char *from_
                             return;
                         }
                     }
+                    g_rtp.pkt_is_rtx = 1;   /* hold 期间唯一允许入帧的来源 */
                     s->stats.vid_nack_recovered++;
                     /* L1：升到 LOGI 并限速。这是「NACK 到底有没有用」的直接
                      * 证据（recovered/nack_req 的分子）。弱网下一旦生效会持续

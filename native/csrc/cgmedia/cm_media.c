@@ -88,9 +88,20 @@
  * 两个条件同时成立 VWD_STALL_MS，判定「下游停止消费」，先补 PLI，
  * 再宽限 VWD_PLI_GRACE_MS；还是不出画就报 -7 交 JS 换会话。 */
 #define VWD_CHECK_MS        500    /* 检查粒度 */
-#define VWD_STALL_MS        6000   /* pushed 涨而 shown 不动的容忍时长 */
-#define VWD_PLI_GRACE_MS    4000   /* 先求 IDR 的宽限期，过了才交 JS */
+#define VWD_STALL_MS        2500   /* pushed 涨而 shown 不动的容忍时长 */
+#define VWD_PLI_GRACE_MS    1500   /* 先求 IDR 的宽限期，过了才交 JS */
 #define VWD_BACKLOG_SLACK   60     /* 超过正常管线延迟多少帧才算下游停摆 */
+/* ★ 2026-11-16 新增：解码器一级（decoded 不涨）的判据与恢复额度。
+ *
+ * 1.3.2 的三段计数把根因钉死在解码器这一级：pushed 913→959 时
+ * decoded 与 shown 双双死钉 821，bus 无 ERROR、appsrc 无 flow error。
+ * 也就是说「发 PLI 求 IDR」是治错的病 —— IDR 进得来，是解码器不消费。
+ * 所以现在先按 decoded 判、先做 flush 恢复，恢复不动才退回原来的
+ * 「求 IDR → 交 JS」两级。 */
+#define VWD_DEC_STALL_MS    1000   /* decoded 停涨多久就认定解码器停摆 */
+/* 单会话最多做几次递进式恢复：第 1 次 flush，第 2 次 READY 重置整条管线，
+ * 第 3 次仍不动就放弃、交给下面的「求 IDR → 交 JS」两级。 */
+#define VWD_MAX_RECOVERS    3
 
 /* ★ 为什么不再自己重建管线（2026-11-15 真机定案）★
  *
@@ -203,7 +214,7 @@ static void emit_stat(cm_sess *s) {
              * 判「画面在不在动」只能看它：pushed/fps 只代表交给了 appsrc，
              * 而 appsrc 是 leaky 的，队列满就默默丢帧，会把下游停摆掩盖掉。
              * 真机指纹：shown 长时间不涨而 fps 一直有 → 全黑/冻结。 */
-            "\"shown\":%llu}",
+            "\"shown\":%llu,\"decoded\":%llu}",
             (unsigned long long)s->stats.rtp_rx,
             /* ★ 这里原来是硬编码 0，JS 侧看到的 lost 永远是 0，等于把
              * 「到底丢没丢包」这个最关键的信息扔掉了。现在用 RTP 层
@@ -256,7 +267,8 @@ static void emit_stat(cm_sess *s) {
             (unsigned long long)s->stats.vid_p_drop,
             (unsigned long long)cm_rtp_au_joined(),
             (unsigned long long)cm_rtp_au_hold_released(),
-            (unsigned long long)cm_box_shown(s->vbox));
+            (unsigned long long)cm_box_shown(s->vbox),
+            (unsigned long long)cm_box_decoded(s->vbox));
     /* 每 10 秒打一次 PT 直方图（只打非零项），用来确认音频到底有没有到。 */
     {
         static uint64_t last_hist_ms = 0;
@@ -278,9 +290,14 @@ static void emit_stat(cm_sess *s) {
              *   两个都不动        → 根本没数据到，问题在上游/网关
              * 把这行留在生产日志里，是因为「有声音没画面」这类报障只能靠它定位，
              * 而 cm_emit 的 stat JSON 不进日志文件。 */
-            CM_LOGI("#%d video sink pushed=%llu shown=%llu join=%llu holdRel=%llu%s", s->id,
+            CM_LOGI("#%d video sink pushed=%llu parsed=%llu vdecin=%llu decoded=%llu shown=%llu queue=%llu recov=%llu join=%llu holdRel=%llu%s", s->id,
                     (unsigned long long)cm_box_pushed(s->vbox),
+                    (unsigned long long)cm_box_parsed(s->vbox),
+                    (unsigned long long)cm_box_vdecin(s->vbox),
+                    (unsigned long long)cm_box_decoded(s->vbox),
                     (unsigned long long)cm_box_shown(s->vbox),
+                    (unsigned long long)cm_box_queue_depth(s->vbox),
+                    (unsigned long long)cm_box_recoveries(s->vbox),
                     (unsigned long long)cm_rtp_au_joined(),
                     (unsigned long long)cm_rtp_au_hold_released(),
                     (s->vbox && s_sink_backlog_avg > 0 &&
@@ -320,9 +337,20 @@ void cm_media_loop(cm_sess *s) {
      * 原因见 VWD_PLI_GRACE_MS 上方那段注释。 */
     uint64_t s_vwd_pli_at = 0;
     int s_vwd_gave_up = 0;
-    /* 判定阈值的当前值：初值 VWD_STALL_MS（6s），发过 PLI 之后
-     * 再加上 VWD_PLI_GRACE_MS（4s），即总共等 10 秒才报 -7。
-     * 画面一恢复就回到 6s。 */
+    /* 解码器一级的判定状态（见 VWD_DEC_STALL_MS 注释）：
+     *   s_vwd_last_decoded  上一轮的 decoded，用来判断解码器是否还在出帧
+     *   s_vwd_dec_since     decoded 开始不涨的时刻
+     *   s_vwd_recovers      本会话已就地恢复（flush）几次 */
+    uint64_t s_vwd_last_decoded = 0;
+    uint64_t s_vwd_dec_since = 0;
+    int s_vwd_recovers = 0;
+    /* 判定阈值的当前值：初值 VWD_STALL_MS（2.5s），发过 PLI 之后
+     * 再加上 VWD_PLI_GRACE_MS（1.5s），即总共等 4 秒才报 -7。
+     * 画面一恢复就回到 2.5s。
+     *
+     * 2026-11-16 收紧（原 6s + 4s = 10s）：`IDR_HOLD_MS` 修好后，重传
+     * 窗口只需要 ~250ms，剩下的时间都在白等；而用户感知的「卡一下」正是
+     * 这段白等 + 换会话建连。4 秒足以覆盖一次「PLI + 重传往返」。 */
     uint64_t s_vwd_wait_ms = VWD_STALL_MS;
 
     /* 进循环前先建好 GStreamer 盒子（kmssink 一上来就要占住 KMS 平面） */
@@ -464,8 +492,11 @@ void cm_media_loop(cm_sess *s) {
         cm_ice_consent_tick(s);
         /* ---- 视频上屏看门狗：pushed 在涨、shown 不动 ⇒ 下游停止消费 ----
          * 判据与取舍见文件头 VWD_* 的注释。分两级：
-         *   1) 6 秒没上屏 → 只发 PLI 求 IDR，**不拆管线**
-         *   2) 再等 4 秒仍没上屏 → 报 -7 交 JS 换会话，**仍不拆管线**
+         *   1) VWD_STALL_MS（2.5 秒）没上屏 → 只发 PLI 求 IDR，**不拆管线**
+         *   2) 再宽限 VWD_PLI_GRACE_MS（1.5 秒）仍没上屏 → 报 -7 交 JS 换会话，
+         *      **仍不拆管线**。合计 4 秒，比 11-15 定案的 6+4=10 秒收紧，
+         *      因为 IDR hold 修好后重传窗口只需 ~250ms，剩下都是白等，
+         *      而用户感知的「卡一下」正是这段白等加上换会话建连的时间。
          * 为什么不拆：这一局的 IDR 间隔实测 604 秒
          * （kf 1→2→3→4 的时刻是 08:02:49 / 08:13:00 / 08:23:04 / 08:33:08），
          * 新解码器拿到 P 帧是解不出来的，一旦重建就必须再等一个 IDR ——
@@ -474,11 +505,19 @@ void cm_media_loop(cm_sess *s) {
         if (s->vbox && now - s_vwd_last_check >= VWD_CHECK_MS) {
             uint64_t vpushed = cm_box_pushed(s->vbox);
             uint64_t vshown = cm_box_shown(s->vbox);
+            /* 解码器输出帧数：判定「pushed 涨而 shown 不动」到底卡在哪一级。
+             * 这两个日志里带上它，现场就能分清「解码器停摆」与「下游不消费」。 */
+            uint64_t vdecoded = cm_box_decoded(s->vbox);
+            uint64_t vparsed = cm_box_parsed(s->vbox);
+            uint64_t vvdecin = cm_box_vdecin(s->vbox);
             s_vwd_last_check = now;
             if (s_vwd_sid != s->id) {
                 s_vwd_sid = s->id;
                 s_vwd_last_pushed = vpushed;
                 s_vwd_last_shown = vshown;
+                s_vwd_last_decoded = vdecoded;
+                s_vwd_dec_since = 0;
+                s_vwd_recovers = 0;
                 s_vwd_frozen_since = 0;
                 s_vwd_pli_at = 0;
                 s_vwd_gave_up = 0;
@@ -499,6 +538,78 @@ void cm_media_loop(cm_sess *s) {
                 s_vwd_gave_up = 0;
                 s_vwd_wait_ms = VWD_STALL_MS;
             } else if (vpushed != s_vwd_last_pushed) {
+                /* ---- 第 0 级：解码器这一级先判、先救（2026-11-16 新增）----
+                 *
+                 * 1.3.2 三段计数定案：pushed 913→959 时 decoded 与 shown
+                 * 双双死钉 821，bus 无 ERROR、appsrc 无 flow error。
+                 * 症结是 h264parse/mppvideodec 静默停止消费，而不是缺 IDR
+                 * （缺 IDR 会让 decoded 继续跟着 pushed 走，只是画面是坏的）。
+                 * 所以先看 decoded：它停涨就 flush 上游逼重新协商，
+                 * 恢复不动再退回下面「求 IDR → 交 JS」那两级。
+                 * 这一步的价值是把「换会话（闪黑 + 重连 5 秒）」换成
+                 * 「就地恢复（不碰状态机、不解绑平面）」。 */
+                if (vdecoded != s_vwd_last_decoded) {
+                    s_vwd_last_decoded = vdecoded;
+                    s_vwd_dec_since = 0;
+                } else {
+                    if (!s_vwd_dec_since) {
+                        s_vwd_dec_since = now;
+                    } else if (now - s_vwd_dec_since >= VWD_DEC_STALL_MS &&
+                               s_vwd_recovers < VWD_MAX_RECOVERS) {
+                        uint64_t qd = cm_box_queue_depth(s->vbox);
+                        int attempt = s_vwd_recovers + 1;
+                        int did = 0;
+                        /* 递进式恢复（2026-11-16 23:0x 真机定案）：
+                         *   第 1 次 → flush 上游（便宜，不碰状态机）
+                         *   第 2 次 → READY 重置整条视频管线
+                         * flush 救不回来的根因已经查明：dmesg 里
+                         * `mpp_rkvdec2 ... irq_status 0x000017 / resetting /
+                         * reset done` —— 硬件解码会话已被驱动自己重置，
+                         * flush 事件到不了已死的会话，只有让 GStreamer
+                         * 重新实例化 h264parse/mppvideodec（连带新的硬件
+                         * 会话）才能恢复。 */
+                        CM_LOGW("#%d decoder stalled %llu ms "
+                                "(pushed=%llu parsed=%llu vdecin=%llu decoded=%llu "
+                                "shown=%llu, queue=%llu) -> %s (recovery %d/%d)",
+                                s->id,
+                                (unsigned long long)(now - s_vwd_dec_since),
+                                (unsigned long long)vpushed,
+                                (unsigned long long)vparsed,
+                                (unsigned long long)vvdecin,
+                                (unsigned long long)vdecoded,
+                                (unsigned long long)vshown,
+                                (unsigned long long)qd,
+                                attempt == 1 ? "flush upstream to renegotiate"
+                                             : "READY reset to re-instantiate decoder",
+                                attempt, VWD_MAX_RECOVERS);
+                        if (attempt == 1) {
+                            did = cm_box_recover_decoder(s->vbox, now);
+                        } else {
+                            did = cm_box_reset_decoder(s->vbox, now);
+                            if (did) {
+                                /* 新实例的 DPB 是空的，直接喂 P 帧只会再死
+                                 * 一次。让 RTP 层回到「等 IDR」并重新要关键帧
+                                 * —— cm_rtp_after_rebuild 会清 have_kf/缺口表
+                                 * 并自己发一次 PLI。 */
+                                cm_rtp_after_rebuild(s);
+                            }
+                        }
+                        if (did) {
+                            s_vwd_recovers++;
+                            s_vwd_dec_since = 0;
+                            /* 参考帧全没了，必须重新要 IDR 才能出画；顺带把
+                             * 「求 IDR」这一级的计时也重置，否则会在同一轮里
+                             * 立刻又发一次 -7。 */
+                            if (attempt == 1) cm_send_pli(s);
+                            s_vwd_frozen_since = 0;
+                            s_vwd_pli_at = 0;
+                            s_vwd_gave_up = 0;   /* 恢复成功一次，允许下一次再报 */
+                            s_vwd_wait_ms = VWD_STALL_MS;
+                        } else {
+                            s_vwd_dec_since = now;   /* 没发起（限速/状态不对），下一轮再试 */
+                        }
+                    }
+                }
                 /* 我们还在往 appsrc 喂，但 kmssink 一帧都没新吃到 */
                 if (!s_vwd_frozen_since) {
                     s_vwd_frozen_since = now;
@@ -507,13 +618,17 @@ void cm_media_loop(cm_sess *s) {
                     if (!s_vwd_pli_at) {
                         s_vwd_pli_at = now;
                         CM_LOGW("#%d video sink stalled %llu ms "
-                                "(shown=%llu pushed=%llu, backlog avg=%llu) "
+                                "(pushed=%llu parsed=%llu vdecin=%llu decoded=%llu "
+                                "shown=%llu, backlog avg=%llu) "
                                 "-> request IDR (PLI), give it %d ms before "
                                 "handing over to JS",
                                 s->id,
                                 (unsigned long long)(now - s_vwd_frozen_since),
-                                (unsigned long long)vshown,
                                 (unsigned long long)vpushed,
+                                (unsigned long long)vparsed,
+                                (unsigned long long)vvdecin,
+                                (unsigned long long)vdecoded,
+                                (unsigned long long)vshown,
                                 (unsigned long long)s_sink_backlog_avg,
                                 VWD_PLI_GRACE_MS);
                         cm_send_pli(s);
@@ -527,20 +642,27 @@ void cm_media_loop(cm_sess *s) {
                          * 而用户此刻听得到的音频是「还能不能继续玩」的判据。 */
                         s_vwd_gave_up = 1;
                         CM_LOGE("#%d video still frozen %llu ms after PLI "
-                                "(shown=%llu pushed=%llu, backlog avg=%llu), "
+                                "(pushed=%llu parsed=%llu vdecin=%llu decoded=%llu "
+                                "shown=%llu, backlog avg=%llu), "
                                 "asking JS to reconnect instead of rebuilding",
                                 s->id,
                                 (unsigned long long)(now - s_vwd_frozen_since),
-                                (unsigned long long)vshown,
                                 (unsigned long long)vpushed,
+                                (unsigned long long)vparsed,
+                                (unsigned long long)vvdecin,
+                                (unsigned long long)vdecoded,
+                                (unsigned long long)vshown,
                                 (unsigned long long)s_sink_backlog_avg);
                         cm_emit(s, "{\"t\":\"error\",\"msg\":\"video sink frozen\","
                                    "\"code\":-7}");
                     }
                 }
             } else {
-                /* pushed 也没动：没有新数据，不是下游的问题，不计冻结 */
+                /* pushed 也没动：没有新数据，不是下游的问题，不计冻结。
+                 * decoded 也一起记住，免得「上游停发」被误判成解码器停摆。 */
                 s_vwd_last_pushed = vpushed;
+                s_vwd_last_decoded = vdecoded;
+                s_vwd_dec_since = 0;
             }
         }
 
