@@ -14,10 +14,7 @@
  *   { page: 'login',  delay: 2000, params: {} }
  *   { page: 'mine',   delay: 2000, params: {} }
  */
-export const DEV_AUTOSTART = {
-  page: 'play', delay: 3000,
-  params: { code: 'yssy', name: '原神-7.2版本', quality: 'low', gameType: 'mobile' }
-};
+export const DEV_AUTOSTART = null;
 
 /* ★ 仅取证用（bug2 真机验证专用，方案见 docs/BUGFIX-bug2-verify.md）★
  *

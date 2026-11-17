@@ -12,7 +12,6 @@
           <text v-if="nameL2" class="p2-name">{{ nameL2 }}</text>
         </div>
       </div>
-      <div class="p2-lstrip"><text class="p2-lstrip-text">{{ stripClip }}</text></div>
       <div class="p2-lrow">
         <div class="chip"><text class="chip-text">{{ regionText }}</text></div>
         <div class="chip p2-chipgap"><text class="chip-text">{{ qualityLabel }}</text></div>
@@ -29,7 +28,6 @@
         <text v-if="statusSub1" class="p2-lmsg-sub">{{ statusSub1 }}</text>
         <text v-if="statusSub2" class="p2-lmsg-sub">{{ statusSub2 }}</text>
       </div>
-      <div class="p2-lstat"><text class="p2-lstat-text">{{ dbgText }}</text></div>
     </div>
 
     <!-- 中栏 473x266：KMS 平面挖孔位。自身必须透明；未出画时 .mask 不透明盖满整块。 -->
@@ -542,10 +540,6 @@ export default {
       if (s === 'nologin') return '登录后才能申请云端机位';
       return '';
     },
-    stripText: function () {
-      var viz = this.vizOn ? ' · 已出画' : '';
-      return 'phase ' + this.phase + ' · ws ' + this.wsState + ' · ice ' + (this.iceState || '-') + viz;
-    },
     statusMain: function () {
       var s = this.stage;
       if (s === 'ticket') return '申请机位中 · 第 ' + this.attemptNo + ' 次尝试';
@@ -593,9 +587,6 @@ export default {
       if (!this.statAt && !this.vizOn) return '尚未出画';
       return '丢包 ' + (this.lost || 0) + ' · ' + this.vw + 'x' + this.vh;
     },
-    stripClip: function () {
-      return clip(this.stripText, 36);
-    },
     qualityTop: function () {
       return this.qualityList.slice(0, 2);
     },
@@ -606,10 +597,6 @@ export default {
       if (!this.statAt) return '暂无画面数据（尚未出画）';
       var mb = this.br > 0 ? (this.br / 1000).toFixed(1) + ' Mbps' : '--';
       return mb + ' · ' + (this.fps || 0) + 'fps · 丢包 ' + (this.lost || 0) + ' · ' + this.vw + 'x' + this.vh;
-    },
-    dbgText: function () {
-      if (!this.statAt) return 'kf - · pli - · rx -';
-      return 'kf ' + this.kf + ' · pli ' + this.pli + ' · rx ' + this.rx + ' · ' + this.phase;
     },
     vtagText: function () {
       var mb = this.br > 0 ? (this.br / 1000).toFixed(1) + 'M' : '--';
@@ -2719,22 +2706,6 @@ export default {
 }
 
 /* phase · ws · ice 调试条 */
-.p2-lstrip {
-  height: 5.2632vh;
-  margin-top: 2.2557vh;
-  padding-left: 0.625vw;
-  padding-right: 0.625vw;
-  border-radius: 0.4167vw;
-  justify-content: center;
-  overflow: hidden;
-  background-color: @background-color;
-}
-
-.p2-lstrip-text {
-  font-size: 0.9375vw;
-  color: @text-color-dim;
-}
-
 /* 地区 + 当前画质 */
 .p2-lrow {
   height: 6.767vh;
@@ -2792,17 +2763,6 @@ export default {
   font-size: 1.0417vw;
   color: @text-color-dim;
   margin-top: 0.7519vh;
-}
-
-.p2-lstat {
-  height: 5.2632vh;
-  justify-content: center;
-  overflow: hidden;
-}
-
-.p2-lstat-text {
-  font-size: 0.9375vw;
-  color: @text-color-dim;
 }
 
 /* ---------- 中栏：视频挖孔 473x266 ----------
