@@ -208,7 +208,7 @@ Opus 帧    →  appsrc ! opusdec ! fdsink → aplay（扬声器 / bluealsa）
 | [docs/CGAPI.md](docs/CGAPI.md) | 网易云游戏接口逆向笔记（登录、加密、机位、WS 信令、SDP） |
 | [docs/MEDIA.md](docs/MEDIA.md) | 媒体层实现细节与 native 契约 |
 | [docs/MEDIA_DEBUG.md](docs/MEDIA_DEBUG.md) | 媒体层攻坚纪实：每个真 bug 的现象、根因与判据 |
-| [docs/BUGFIX-video-sink-freeze.md](docs/BUGFIX-video-sink-freeze.md) | **游玩中卡一下/闪黑**：★真因=appsrc `do-timestamp` 时间轴丢包后断裂（v1.3.6 定案）；另含网关停推、IDR 周期 604 秒、五段探针判读法、「流畅优先 / 画质优先」两档策略 |
+| [docs/BUGFIX-video-sink-freeze.md](docs/BUGFIX-video-sink-freeze.md) | **游玩中卡一下/闪黑/周期性停摆**：★真因之一=appsrc `do-timestamp` 时间轴断裂（v1.3.6）；★真因之二=`mppvideodec` 的 `ignore-error=false` 让解码器出错后静默停摆（v1.3.9）。另含网关停推、IDR 周期 604 秒、五段探针判读法、「流畅优先 / 画质优先」两档策略 |
 | [docs/QUEUE.md](docs/QUEUE.md) | 排队协议逆向（加密帧、`queue_status` 真字段、`queue_success`） |
 | [docs/STATES.md](docs/STATES.md) | 页面状态机与 7 条待决策 |
 | [docs/PLATFORM.md](docs/PLATFORM.md) | X6 Pro 设备参数、Vue 方言铁律、布局算式 |
