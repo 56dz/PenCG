@@ -430,10 +430,27 @@ static const char *video_pipeline_fmt(char *out, size_t outlen, int use_fdsrc, i
      *   - 同机型 PenBili 的可用管线（native/csrc/player.c）用的是**插件默认值**
      *     （ignore-error=true、max-errors=-1），从不设置这两个属性。
      *
-     * 所以现在跟 PenBili 对齐：让解码器「坏帧就丢、继续解」，配合
-     * `discard-corrupted-frames=true` 把损坏帧直接丢弃而不是吐出去花屏。
-     * 我们自己的残帧拦截仍在 RTP 层（bug3/bug4 的第一道防线），
-     * 不依赖解码器上抛错误。 */
+     * 所以现在跟 PenBili 对齐：让解码器「坏帧就丢、继续解」。
+     *
+     * 【★ 2026-11-18 二次反转：discard-corrupted-frames 必须关掉 ★】
+     *
+     * 1.3.9 同时改了两件事：ignore-error 恢复默认（对，保留）与
+     * discard-corrupted-frames=false（错，撤掉）。后者是「把 MPP 标记为损坏的
+     * 帧直接丢弃、不输出」，于是这些帧本该刷新的宏块永远留在旧内容上，
+     * 直到下一个 IDR 才被重画 —— 而实测 IDR 间隔可达 604 秒。
+     *
+     * 与真机症状完全吻合：
+     *   - 白天校园网（7 会话 94 次丢包）「一直存在马赛克残留」；
+     *   - 18:56 原神「从全白加载界面进游玩界面，白色像素残留、画面特别亮」
+     *     —— 全白画面留下的宏块没人重画；
+     *   - 同一晚 #4 会话 drop broken=0、AU 全部完整，仍然有残留：
+     *     说明残留来自被静默丢弃的损坏帧，而不是我们组帧出错。
+     *   - 反证：1.3.6~1.3.8 期间（discard=false，只有 ignore-error 反复调）
+     *     从没收到过「像素残留」投诉。
+     *
+     * 改回 false 后损坏帧会被输出（局部花一下），但下一帧正常 P 帧会把它
+     * 重画掉，残留只持续一两帧而不是残留到几分钟后的下个 IDR。参考帧污染
+     * 的风险由 RTP 层的残缺 AU 拦截兜底（drop broken P AU / IDR AU）。 */
     /* ★ 2026-11-17 A/B 实验：源改成 format=bytes，彻底不让时间轴参与调度。
      *
      * 现场（1.3.5 五段探针）：健康期 `pushed==parsed==vdecin==decoded==shown`，
@@ -479,14 +496,14 @@ static const char *video_pipeline_fmt(char *out, size_t outlen, int use_fdsrc, i
         snprintf(out, outlen,
                  "fdsrc name=vsrc fd=%d blocksize=%d ! "
                  "h264parse name=vparse ! mppvideodec name=vdec rotation=270 "
-                 "ignore-error=true max-errors=-1 discard-corrupted-frames=true ! videoconvert" KMS_SINK_PROPS,
+                 "ignore-error=true max-errors=-1 discard-corrupted-frames=false ! videoconvert" KMS_SINK_PROPS,
                  fd, CM_PIPE_BLOCKSIZE);
     } else {
         snprintf(out, outlen,
                  "appsrc name=vsrc is-live=true format=bytes do-timestamp=false "
                  "caps=video/x-h264,stream-format=byte-stream,alignment=au "
                  "! h264parse name=vparse ! mppvideodec name=vdec rotation=270 "
-                 "ignore-error=true max-errors=-1 discard-corrupted-frames=true ! videoconvert" KMS_SINK_PROPS);
+                 "ignore-error=true max-errors=-1 discard-corrupted-frames=false ! videoconvert" KMS_SINK_PROPS);
     }
     return out;
 }
@@ -1811,7 +1828,7 @@ int cm_box_drain_bus(cm_box *b) {
      * 对视频而言这个置位尤为关键：以前 mppvideodec 设了 ignore-error=false
      * max-errors=16，理论上连续 16 次解码错误后它会 post flow error；但 1.3.1~
      * 1.3.8 的真机现场里一次都没出现过（解码器停摆时是静默的）。
-     * 现在改为插件默认 ignore-error=true + discard-corrupted-frames=true，
+     * 现在改为插件默认 ignore-error=true + discard-corrupted-frames=false，
      * 靠「丢坏帧继续解」而不是「上抛错误」，所以这条置位更多是兜底：
      * 真有 ERROR 时仍要能把 b->failed 置上，别让上层以为「fps 正常」。 */
     for (guard = 0; guard < 4; guard++) {

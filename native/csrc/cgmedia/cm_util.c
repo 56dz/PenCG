@@ -10,9 +10,26 @@
 
 int g_cm_log_level = 3;
 
+/* ★ debug 版开关（2026-11-18 新增，为排查「校园网马赛克残留」）。
+ *
+ * 背景：CM_LOGD 级别的日志（多 slice 压住/放行、迟到重传、stale retransmit…）
+ * 对复盘残帧非常有用，但默认 log_level=3 时全部不落盘。做成文件开关，
+ * 好处是不用重新打包就能在真机上开/关，也不会因为忘记关掉而在量产包里刷爆
+ * /userdata（那个分区只有 60MB 可用）。
+ *
+ * 用法：touch /userdisk/miniapp/data/cdebug.txt 然后重启 App。
+ * 删除该文件即恢复 JS 传入的 log_level。 */
+#define CM_DEBUG_SWITCH "/userdisk/miniapp/data/cdebug.txt"
+
 void cm_log_set_level(int lv) {
+    FILE *sw;
     if (lv < 0) lv = 0;
     if (lv > 5) lv = 5;
+    sw = fopen(CM_DEBUG_SWITCH, "r");
+    if (sw) {
+        fclose(sw);
+        if (lv < 4) lv = 4;   /* 开关文件存在：强制至少 DEBUG 级 */
+    }
     g_cm_log_level = lv;
 }
 

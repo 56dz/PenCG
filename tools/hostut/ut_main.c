@@ -162,7 +162,10 @@ static int marker_for(int policy, int i) {
     }
 }
 
-static void feed(cm_sess *s, int policy, int mtu, int drop_every) {
+/* purge_every：每 N 个 NAL 停一下，让真实时钟走过 NACK_GAP_TTL_MS(300ms)，
+ * 再调 cm_rtp_take_nack_gaps()（它内部第一件事就是 gap_purge_expired()）。
+ * 这样缺口会走「放弃重传」这条路径 —— 见 G 轮。0 表示关闭。 */
+static void feed(cm_sess *s, int policy, int mtu, int drop_every, int purge_every) {
     int i;
     uint16_t seq = 1000;
     unsigned char pkt[2048];
@@ -178,6 +181,13 @@ static void feed(cm_sess *s, int policy, int mtu, int drop_every) {
          * 到不了期（每个新切片都会续期）。所以必须在这里周期性 sleep+tick，
          * 才能检验「压住 400ms 硬上限」是不是真的在持续收包时生效。
          * 若只有软兜底，下面这个计数会保持 0。 */
+        if (purge_every > 0 && (i % purge_every) == (purge_every - 1)) {
+            unsigned char nbuf[256];
+            cm_sleep_ms(350);                 /* 让 TTL 过期 */
+            cm_rtp_take_nack_gaps(s, nbuf, 64);  /* -> gap_purge_expired -> gap_forget */
+            cm_rtp_au_join_tick(s);
+            cm_rtp_flush_held(s);
+        }
         if (policy == 6 && (i % 40) == 39) {
             uint64_t before = cm_rtp_au_hold_released();
             cm_sleep_ms(60);
@@ -341,7 +351,7 @@ int main(int argc, char **argv) {
      * 所以只检查「首切片不变量」：任何推出去的 AU 都不能从帧中间开始。
      * 这正是真机 reqeseq=3945 那种场景 —— 丢片被 NACK 补不回来时，
      * 绝不能把半帧推给 mppvideodec。 */
-    int npol = 7;
+    int npol = 8;
     int drop_every = argc > 3 ? atoi(argv[3]) : 7;
 
     printf("=== 真实 cm_rtp.c 单测: %s (mtu=%d) ===\n", file, mtu);
@@ -349,22 +359,40 @@ int main(int argc, char **argv) {
     printf("  NAL=%d\n", g_nnals);
 
     for (pol = 0; pol < npol; pol++) {
-        static const char *names[7] = {"A(参数集前)", "B(每帧末)", "C(每片)",
+        static const char *names[8] = {"A(参数集前)", "B(每帧末)", "C(每片)",
                                        "D(无marker)", "A+丢包", "A(紧跟重放)",
-                                       "F(永不发fm=0)"};
-        int drop = (pol == 4) ? drop_every : 0;
+                                       "F(永不发fm=0)", "G(缺口过期)"};
+        /* G 轮 = 策略 A + 每 drop_every 包丢 1 + 周期性让 TTL 过期并 purge。
+         * 这是 2026-11-18「马赛克残留」修复的回归测试：
+         *   修复前 gap_drop 连 au_missing 一起减 => 缺口被「放弃重传」后 AU
+         *     被误判成「重传已补上」，缺片帧推给解码器（画面花到下一个 IDR）。
+         *   修复后 gap_forget 只摘缺口表 => au_missing 仍 > 0 => 整帧丢弃。
+         * 该流每 drop_every 包就丢 1，连 IDR 都残缺，所以修复后应当一个 AU
+         * 都推不出去；修复前会有若干残帧蒙混过关（在 au.h264 上实测 5 个）。 */
+        int drop = (pol == 4 || pol == 7) ? drop_every : 0;
         cm_sess *s = mk_sess();
         clear_pushes();
         g_release_mid_feed = 0;
         {
             int rep = (pol == 6) ? 3 : 1, r;
             for (r = 0; r < rep; r++)
-                feed(s, (pol == 4) ? 0 : (pol == 5 ? 0 : pol), mtu, drop);
+                feed(s, (pol == 4 || pol == 7) ? 0 : (pol == 5 ? 0 : pol),
+                     mtu, drop, (pol == 7) ? 100 : 0);
         }
         /* 丢包轮的帧数必然对不上，只检查首切片不变量；其余轮全查。 */
         if (pol == 4) printf("  (每 %d 包丢 1)\n", drop_every);
         report(names[pol], (pol >= 4) ? 0 : want_au,
                (pol >= 4) ? 0 : want_idr_min, (pol >= 4) ? 0 : want_idr_max);
+        if (pol == 7) {
+            printf("  G 轮：每 %d 包丢 1 且缺口已过期，仍被推出的 AU 数 = %d",
+                   drop_every, g_npush);
+            if (g_npush != 0) {
+                printf(" => 缺片 AU 被当成已修复推给解码器（马赛克残留回归）\n");
+                g_fail = 1;
+            } else {
+                printf(" => 缺片 AU 全部整帧丢弃，正确\n");
+            }
+        }
         if (pol == 6 && !has_nonzero_fm_stream()) {
             /* 单 slice 流（原神/明日方舟那种）每帧只有一个切片且 first_mb 就是 0，
              * 策略 F 把所有 fm=0 的切片都丢掉，等于整条流一个切片都不喂 ——

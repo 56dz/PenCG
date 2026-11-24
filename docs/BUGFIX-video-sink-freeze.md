@@ -412,3 +412,351 @@ RTP 层的残帧拦截（`drop broken P AU` / `drop broken IDR AU`）完全保�
   8.3 的修复在两种源下都生效（appsrc 单会话 4157 帧零停摆、fdsrc 单会话
   23153 帧零停摆），所以没有理由把成熟度更低的 fdsrc 设为默认；
 - 网关侧为什么会周期性停推仍未解释，根因在服务端。
+
+## 九、2026-11-18 定案：`gap_drop` 语义混用是「马赛克残留」的真因
+
+### 9.1 现象
+
+用户在**校园网**（高丢包、低抖动）下游玩，反馈「**一直存在马赛克残留**」，
+但**从不冻结、从不重连**。随身 WiFi（低丢包）下始终复现不出来。
+
+现场日志（`DictPen_20261118_132106.log`，51438 行，7 个会话，画质优先档）：
+
+| 计数 | 值 | 含义 |
+|---|---|---|
+| `rtp gap: lost` | 94 | 单包零星丢失（92 次 lost 1、2 次 lost 2） |
+| `retransmit recovered` | 109 | 重传几乎都补回来了 |
+| `AU resequenced` | 86 | 重排确实在干活 |
+| `AU repaired by retransmissions` | 23 | ⚠ 见下 |
+| `drop broken P AU` | 1 | ⚠ 几乎没有帧被判残 |
+| `decoder stalled` / `native -7` | 0 / 0 | 没有冻结、没有换会话 |
+| `bus ERROR` / `corrupt` | 0 / 0 | 解码器没报错 |
+
+**决定性矛盾**：1540 条 `AU push` 日志**全部** `broken=0 missing=0`（0 例外）
+—— 也就是说 AU 拼接层认为「每一帧都完整」，可用户看到的画面是花的。
+而且 23 条 `AU repaired` 里有 **9 条前面根本没有 `retransmit recovered`**：
+没有任何重传到达，它凭什么「被重传修好」？
+
+### 9.2 真因
+
+`cm_rtp.c` 里只有一个 `gap_drop(seq)`，它同时做两件事：
+从 `gaps[]` 摘掉缺口、**并从 `au_miss[]` 摘掉且 `au_missing--`**。
+
+而它被三处语义完全不同的地方调用：
+
+| 调用点 | 语义 | 包收到了吗 |
+|---|---|---|
+| `gap_purge_expired()` | TTL(300ms) 过期，不等了 | ❌ 没有 |
+| `cm_rtp_take_nack_gaps()` | 重发轮数用完（P 3 轮 / IDR 5 轮） | ❌ 没有 |
+| `gap_take()` | 重传真的回来了 | ✅ 收到了 |
+
+前两处也会把 `au_missing` 减到 0，于是 `flush_frame()` 的判据命中：
+
+```c
+if (g_rtp.au_broken && g_rtp.au_broken_fixable && g_rtp.au_missing == 0) {
+    g_rtp.au_broken = 0;
+    g_rtp.au_broken_fixable = 0;
+    CM_LOGI("#%d AU repaired by retransmissions (%llu bytes)", ...);
+}
+```
+
+**缺片的 AU 被当成「已被重传修好」，直接推给了解码器。**
+
+后果比丢一帧严重得多：解码器拿到缺片的帧后，会用旧参考帧补出错误宏块，
+并且**把这帧当成新参考帧继续解后面的 P 帧** —— 错误会在参考链里一路累积，
+一直花到下一个 IDR 才恢复。而实测 IDR 间隔可以达到 **604 秒**。
+这就是「马赛克残留」：它不会自愈，只会被下一个 IDR 清掉。
+
+### 9.3 修复
+
+把 `gap_drop()` 拆成两个语义明确的函数：
+
+| 函数 | 摘 `gaps[]` | 摘 `au_miss[]` | 用在哪 |
+|---|---|---|---|
+| `gap_forget(seq)` | ✅ | ❌ **保留** | TTL 过期、轮数用完 |
+| `gap_satisfied(seq)` | ✅ | ✅ | 只有 `gap_take()` 命中 |
+
+关键点：`gap_forget()` 之后 `au_missing` **永不归零**，于是这一帧走到
+`flush_frame()` 的「残缺 AU」分支被整帧丢弃 ——
+**宁可丢一帧（33ms），也不能把缺片的帧喂给解码器（污染到下一个 IDR）。**
+
+配套改动：
+
+1. **迟到的重传照样收下**（`au_miss_take`）。缺口表条目可能已经因为 TTL/轮数
+   被 `gap_forget` 摘掉了，但那个包确实是 `au_miss[]` 里的 —— 它晚到一点
+   仍然能把这一帧救回来。所以重传接受路径改成
+   `if (gap_take(seq) || au_miss_take(seq))`，并且区分计数：
+   `gapForgot`（真的放弃了）vs `gapLate`（放弃了但后来还是收到了）。
+2. **日志带 seq 明细**：`drop broken P/IDR AU (bytes, missing=N [seq1,seq2,...])`
+   —— 复盘时可以直接把丢帧和 dump 出来的码流对上。
+3. **`gap_forget` 单独打一行**：
+   `gap forgotten without retransmit (seq=.., round=.., age=..ms, total=..) -> AU stays broken`
+   前 20 条全打，之后每 50 条打一条。
+4. **健康行加三个计数**：
+   `gapForgot=%llu gapLate=%llu auRep=%llu`（10 秒一行）。
+   判据：`auRep` 应该只统计**真的补上了**的帧；`gapForgot` 增长而
+   `auRep` 不跟涨，说明缺片帧现在走的是「整帧丢弃」这条正确路径。
+
+### 9.4 判据表（真机复盘用）
+
+| 观察 | 结论 |
+|---|---|
+| `gapForgot` 涨、`auRep` 不涨、`drop broken P AU` 跟着涨 | ✅ 修复生效，残帧被丢掉了 |
+| `gapLate` ≈ `gapForgot` | TTL 太短，可以调大 `NACK_GAP_TTL_MS`（现在 300ms）少丢帧 |
+| `gapLate` 远小于 `gapForgot` | 网关重传基本指望不上，丢帧是必然代价 |
+| `auRep` 仍然频繁且伴随马赛克 | 还有别的路径在推坏帧，需要继续查 |
+
+### 9.5 调试开关
+
+新增 `/userdisk/miniapp/data/cdebug.txt`（`cm_util.c` 的 `CM_DEBUG_SWITCH`）：
+文件存在时 `cm_log_set_level()` 强制把级别提到 4（DEBUG），
+这样 `CM_LOGD` 那些「多 slice 压住/放行」「stale retransmit」等诊断才落盘。
+**删除文件即恢复**，不用重新打包。排查完记得删 —— `/userdata` 只有 60MB 可用。
+
+### 9.6 未在此机型验证
+
+- `NACK_GAP_TTL_MS` / `NACK_ROUNDS_P` 的最优值没有扫过，只有 300ms / 3 轮这一个观测点。
+- 音频侧 `a[lost=188]` 明显高于视频侧 `v[lost=0]`，是否影响「马赛克」感知未验证
+  （马赛克是视频现象，音频丢包最多是爆音/卡顿，属另一条线）。
+
+---
+
+## 十、回归测试：主机侧单测新增 G 轮（缺口过期）
+
+第九章的修复有一个可被单测钉死的判据：**缺口被「放弃重传」之后，含该缺口的 AU 必须整帧丢弃**。
+`PenCG/tools/hostut/run.sh` 现在跑第 8 轮 `G(缺口过期)`：
+
+- 喂法 = 策略 A 的 marker + 每 `drop_every`（默认 7）个包丢 1 个 + 每 100 个 NAL `sleep 350ms`
+  并调一次 `cm_rtp_take_nack_gaps()`（内部第一件事就是 `gap_purge_expired()`）。
+- 断言：**推出的 AU 数必须为 0**（该流每 7 包丢 1，连 IDR 都残缺，没有任何一帧能凑全）。
+
+判定结果：
+
+| 版本 | `au.h264`（多切片）G 轮推出 AU 数 | 结论 |
+| --- | --- | --- |
+| 修复前（`gap_drop` 同时摘 `au_miss`） | **1** | 缺片 AU 蒙混过关 → FAIL |
+| 修复后（`gap_forget` 只摘缺口表） | **0** | 整帧丢弃 → PASS |
+
+> 单切片流（如 `au_mrfzzmd2.h264`）上 G 轮两版都是 0 —— 那种流每帧只有一个切片，
+> 丢一个包就等于整帧丢失，本来就推不出去，区分不出修复前后的差异。
+> **做这个回归必须用多切片流**（`.tmp/au.h264`、`.tmp/vpu/au_fail.h264` 等）。
+
+其余 7 轮（A/B/C/D/A+丢包/A 紧跟重放/F 永不发 fm=0）保持不变，仍全部 PASS。
+
+---
+
+## 十一、2026-11-18 晚自习反馈三条：重连死循环与像素残留
+
+用户在 1.3.11 上实测反馈三条：
+
+1. 18:56 原神：全白加载界面 → 游玩界面，出现**全白像素残留**，画面特别亮。
+2. 21:28 原神：没复现全白，但**还有大量其他类型的像素残留**。
+3. 21:30 终末地：**经常性重连 + 马赛克残留**。
+
+日志 `.tmp/white/evening.log`（112168 行，pid 1266，1.3.11）：
+
+```
+start # 31   stop # 31   native -7 0   decoder stalled 0   still frozen 0
+rtp gap 350   retransmit recovered 141   AU resequenced 1773   AU repaired 91
+drop broken P AU 113   drop broken IDR AU 19   gap forgotten 24
+AU starts at fm 109   IDR starvation 25   relaxing gate 0
+```
+
+### 11.1 终末地「经常性重连」= 画质优先的 -8 死循环
+
+`#6`–`#30`（21:29:44 → 21:35:03）是 **24 个连续会话，每个只活 3~9 秒**，全部死在同一条路径：
+
+```
+#N IDR starvation 4.0s under quality-first policy: keep gate closed (no artifacts), ask JS to switch session
+emit #N: {"t":"error","msg":"need fresh IDR","code":-8}
+[play] freeze: native 要新 IDR（画质优先，饥饿 4s） → L2 复用网关重连
+```
+
+而逐会话 `AU push key=1` 计数：**15 个会话整局 `key1push = 0`**（一个 IDR 都没收到），其余也只有 1 个且常被丢包打碎（`drop broken IDR AU 8819 bytes missing=1`）。整晚 `relaxing gate = 0`。
+
+根因：**「换会话必定拿到新 IDR」这个前提在终末地上不成立**。原来的降级路径是「4 秒拿不到 IDR → 报 -8 让 JS 换会话」，换回来还是不给 IDR，于是无限循环。
+
+修复（`cm_rtp.c`）：给画质优先的 `-8` 加次数上限 `POLICY_MAX_GIVEUPS = 2`。
+
+- 第 1、2 次：照常报 `-8` 换会话（多数局换完立刻出画，这是首选路径）。
+- 第 3 次起：**降级为放行 P 帧**，日志
+  `quality-first gave up after 2 session switches without any IDR: degrading to smoother behavior`，
+  计数 `vid_policy_degrade`。画面有马赛克但能继续玩，比每 3 秒重连强。
+- 拿到真 IDR 时（`mark_keyframe()`）把额度还回去，否则一次「开局 24 连换」会把额度永久耗光。
+
+### 11.2 「像素残留」= `discard-corrupted-frames=true`
+
+`mppvideodec` 的属性默认值（真机 `gst-inspect-1.0` 实测）：
+
+```
+discard-corrupted-frames: Boolean. Default: false
+ignore-error            : Boolean. Default: true
+max-errors              : Integer. Default: -1
+```
+
+1.3.9 跟 PenBili 对齐时改了两件事：`ignore-error` 恢复默认（对，保留）与
+`discard-corrupted-frames=true`（**错，本次撤掉**）。后者让 MPP 把「标记为损坏」的帧
+**直接丢弃、不输出** —— 于是这些帧本该刷新的宏块永远停在旧内容上，直到下一个 IDR
+才被重画，而实测 IDR 间隔可达 **604 秒**。
+
+对照现场：
+
+- `#4` 会话（18:51:19–18:54:20，就是用户说的「18:56 原神」）实测
+  `drop broken = 0`、`AU starts at fm = 0`、`gapForgot = 20`、`auRep = 1`
+  ⇒ **我们自己的组帧一帧没丢**，残留只能来自被解码器静默丢弃的损坏帧。
+- 全白加载界面的宏块没人重画 ⇒ 用户看到的「全白残留、画面特别亮」。
+- 反证：1.3.6~1.3.8 期间一直是 `discard=false`，从没收到过「像素残留」投诉。
+
+改成 `false` 后损坏帧会被输出（局部花一下），但下一帧正常 P 帧会把它重画掉，
+残留只持续一两帧。参考帧污染的风险由 RTP 层的残缺 AU 拦截兜底
+（`drop broken P AU` / `drop broken IDR AU`）。
+
+### 11.3 短包日志限速
+
+`cm_media.c` 的 `plen == -2 || -5` 分支原来是无条件 `CM_LOGD`，打开 `cdebug.txt` 后
+每 20 秒刷出几百行 25 字节短包，**晚自习那份 11 万行日志九成是它**。改成 1 秒最多一条
+并输出「这 1 秒被抑制了多少条」。
+
+### 11.4 判据
+
+| 现象 | 期望 |
+| --- | --- |
+| 终末地重连 | 不再 24 连换；出现 `quality-first gave up after 2 session switches`，`vid_policy_degrade` 增长 |
+| 像素残留 | 全白/错块最多持续一两帧，不再残留数分钟 |
+| 日志噪声 | `short packet` 每分钟 ≤ 60 行 |
+| 健康判据不变 | `pushed == parsed == vdecin == decoded == shown`、`queue=0`、`decoder stalled=0` |
+
+### 11.5 未验证
+
+- `POLICY_MAX_GIVEUPS = 2` 的取值只有一晚上的观测依据，终末地换会话能否稳定拿到 IDR 取决于
+  网关实现，尚未在校园网下复测。
+- 若把 `discard-corrupted-frames` 改回 `false` 后出现「参考帧被污染导致长时间花屏」，
+  说明 RTP 层拦截没能完全挡住，需要再看 `au_starts_at_fm` 与 `drop broken` 的比例。
+
+---
+
+## 十二、2026-11-23 定案：整帧丢失是「像素残留」的最终真因
+
+第十一章把 `discard-corrupted-frames` 改回 `false` 之后，用户仍报残留，且给出了
+一条极关键的现场描述：
+
+> 在移动角色这种小面积像素变化不容易出现残留，但是打开地图和活动这种大面积变化
+> 就会大概率出现上一帧相同区域的像素残留。
+
+「与画面变化面积相关」这一点直接排除了随机丢包 —— 丢包的影响和面积无关。于是
+换了思路：不再从我们的计数里找，而是**把码流本身拿到离线环境，和真机解码结果逐一
+对照**。
+
+### 12.1 决定性实验：同一份字节，硬解 300 帧 / 软解 290 帧
+
+用 v1.3.13 新增的滚动抓流拿到用户那一局的 600 帧（`au_a.h264` / `au_b.h264`，
+都不是加载界面，因为滚动抓流只保留最近 10 秒）。
+
+设备侧硬解：
+
+```sh
+gst-launch-1.0 -q filesrc location=au_b.h264 ! h264parse ! mppvideodec \
+  ! video/x-raw,format=NV12 ! filesink location=hw_b.raw
+# hw_b.raw = 414720000 B = 300 × 1382400（720p NV12 单帧）
+```
+
+本机软解：
+
+```sh
+ffmpeg -v error -i b1313.h264 -pix_fmt nv12 -f framemd5 sw_nv12.md5 -f null -
+# 290 帧
+```
+
+逐帧 md5 对齐的结果：
+
+| 项 | 值 |
+| --- | --- |
+| 硬解帧数 | 300 |
+| 软解帧数 | 290 |
+| 前 200 帧 | **逐字节完全相同** |
+| 第 201 帧起 | 软解第 i 帧 == 硬解第 i+10 帧（90/90 全部匹配） |
+| 软解中找不到对应硬解帧的 | **0** |
+
+⇒ **硬解多输出了 10 帧，正好是第 201~210 帧，软解完全没有对应输出。**
+
+### 12.2 码流级证据：`frame_num` 断档
+
+自写解析器读 slice 头的 `frame_num`（`log2_max_frame_num=4`）：
+
+```
+pic 34   frame_num=2   prev=0    delta=2  <== GAP
+pic 201  frame_num=1   prev=13   delta=4  <== 缺 3 帧
+pic 203  frame_num=5   prev=2    delta=3  <== 缺 2 帧
+...
+pictures=300 duplicates=0 gaps=9         合计缺 10 帧
+```
+
+⇒ **这 10 帧在码流里根本不存在**，不是切片缺失，是整帧丢失。缺的帧数与硬解多出的
+帧数完全对应。
+
+### 12.3 为什么残留没有被我们的计数器发现
+
+整帧丢失时**那个 AU 从未被组装**：它的 RTP 包一个都没到，`flush_frame()` 没有对象
+可丢，于是：
+
+- 不产生 `drop broken P AU` / `drop broken IDR AU`
+- `AU push` 行的 `broken=0 missing=0` 全部正常
+- `gapForgot` 也只在缺口过期时计一次，与「少了整帧」无关
+
+**我们的完整性校验管的是「已组装 AU 的切片全不全」，管不到「两个 AU 之间少了一整帧」。**
+这是设计上的盲区，不是实现 bug。
+
+### 12.4 MPP 的行为：用旧内容补缺
+
+把硬解多出的那 10 帧转成图逐帧看：
+
+- frame 200 与上一帧突变 98.3%（新画面开始）
+- frame 201 有 **64.6% 的 16×16 块仍是上一帧内容**，随后逐帧收敛
+- 目视就是满屏大块马赛克
+
+⇒ **MPP 在参考链断开时不报错、也不整帧丢弃，而是保留旧内容继续解后续 P 帧。**
+缺失区域一直不刷新，直到下一个 IDR 才重画。ffmpeg 则直接跳过这些帧不输出，所以
+之前所有离线校验都显示「码流合法、零解码错误」。
+
+这条机制同时解释了三件历史现象：
+
+1. 「小面积移动不残留、大面积变化残留」—— 小变化时旧内容本来就接近新内容；
+2. 终末地更容易花 —— 它是 8~16 切片流，整帧丢概率远高于原神的单切片流；
+3. 校园网残留多、随身 WiFi 复现不出 —— 取决于整帧丢失发生率。
+
+### 12.5 修复：`note_frame_num()`
+
+`cm_rtp.c` 新增整帧丢失检测：
+
+1. `sps_parse_size()` 现在把 `log2_max_frame_num_minus4` 解出来（以前直接丢弃），
+   经 `note_sps()` 存进 `g_rtp.log2_fn`；
+2. `slice_parse()` 继续往后解 `pic_parameter_set_id` 与 `frame_num`
+   （字段顺序：`first_mb_in_slice`(ue) / `slice_type`(ue) / `pps_id`(ue) / `frame_num`(u(n))）；
+3. `note_frame_num(cm_sess *s, int key, int fn)` 在**每个新图像的起始 slice**
+   （`first_mb_in_slice == 0`）上被调用，按 `2^log2` 取模算 `delta`，`delta > 1` 即缺帧：
+   - `g_rtp.vid_frame_gap` / `s->stats.vid_frame_gap` 累加缺帧数
+   - 打 `whole frame(s) lost: frame_num A -> B (delta=N), MPP will keep stale content until an IDR`
+   - **画质优先档**顺带 `have_kf = 0`（该档语义就是「宁可冻也不要错块」）
+   - 无条件 `kf_request(s, "whole frame lost")` 请求 IDR
+4. IDR 会合法重置 `frame_num`，所以 `key` 帧直接跳过断档判定；
+5. 换会话（`rtp_reset_all()`）清 `prev_frame_num` / `have_frame_num`，否则新会话第一个
+   IDR 会被谎报成整片丢失。
+
+为什么不给流畅优先档也清 `have_kf`：那会让闸门先冻 4 秒（`IDR_STARVE_RELAX_MS`）才放行，
+比残留一两个 GOP 更难受。两档在此处的唯一差异就是这一点。
+
+### 12.6 判据
+
+| 现象 | 期望 |
+| --- | --- |
+| 健康局（随身 WiFi） | `frameGap=0` |
+| 校园网 | `frameGap` 与我离线算出的断档数同量级（那一局 300 帧里 9 处、缺 10 帧） |
+| 残留时长 | 不再持续到下一个自然 IDR（实测可达 604 秒），最坏一个 PLI 往返 |
+| 日志 | 每次整帧丢失一条 `whole frame(s) lost` + 一条 `video gap (whole frame lost)` |
+
+### 12.7 未验证
+
+- 只在单切片流（原神）上验证过判据；终末地的 8~16 切片流里 `note_frame_num` 只在
+  `first_mb_in_slice == 0` 的 slice 上触发，理论上每帧一次，待真机确认不重复计数。
+- `kf_request` 有 `KF_REQ_MIN_MS` 限速，密集整帧丢失时部分请求会被限速吃掉，
+  依赖 `cm_kf_tick` 的 2 秒兜底。是否需要为整帧丢失单独放宽限速，待看真机 PLI 密度。

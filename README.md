@@ -11,7 +11,7 @@
 ![platform](https://img.shields.io/badge/X6%20Pro-RK3562-03C47E)
 ![runtime](https://img.shields.io/badge/Falcon-QuickJS%20%2B%20Vue2-03C47E)
 ![media](https://img.shields.io/badge/DTLS--SRTP-self--built-03C47E)
-![version](https://img.shields.io/badge/version-1.3.10-1E2831)
+![version](https://img.shields.io/badge/version-1.3.14-1E2831)
 ![license](https://img.shields.io/badge/license-GPL--3.0-1E2831)
 
 </div>
@@ -208,7 +208,7 @@ Opus 帧    →  appsrc ! opusdec ! fdsink → aplay（扬声器 / bluealsa）
 | [docs/CGAPI.md](docs/CGAPI.md) | 网易云游戏接口逆向笔记（登录、加密、机位、WS 信令、SDP） |
 | [docs/MEDIA.md](docs/MEDIA.md) | 媒体层实现细节与 native 契约 |
 | [docs/MEDIA_DEBUG.md](docs/MEDIA_DEBUG.md) | 媒体层攻坚纪实：每个真 bug 的现象、根因与判据 |
-| [docs/BUGFIX-video-sink-freeze.md](docs/BUGFIX-video-sink-freeze.md) | **游玩中卡一下/闪黑/周期性停摆**：★真因之一=appsrc `do-timestamp` 时间轴断裂（v1.3.6）；★真因之二=`mppvideodec` 的 `ignore-error=false` 让解码器出错后静默停摆（v1.3.9）。另含网关停推、IDR 周期 604 秒、五段探针判读法、「流畅优先 / 画质优先」两档策略 |
+| [docs/BUGFIX-video-sink-freeze.md](docs/BUGFIX-video-sink-freeze.md) | **游玩中卡一下/闪黑/周期性停摆/马赛克残留**：★真因之一=appsrc `do-timestamp` 时间轴断裂（v1.3.6）；★真因之二=`mppvideodec` 的 `ignore-error=false` 让解码器出错后静默停摆（v1.3.9）；★真因之三=`gap_drop` 语义混用，`TTL 过期/轮数用完` 被当成「重传已补上」，缺片 AU 被推给解码器导致马赛克残留到下一个 IDR（v1.3.11）；★真因之四=`mppvideodec` 的 `discard-corrupted-frames=true` 把坏帧直接丢弃、宏块永远停在旧内容上，表现为全白/像素残留（v1.3.12）；★真因之五=画质优先的 `-8` 没有次数上限，网关不给 IDR 时每 3 秒重连一次（v1.3.12）；★真因之六=**整帧丢失**（所有 RTP 包都没到）时我们连那个 AU 都没组装过，所以所有完整性计数都看不见它，而 MPP 会用旧内容补没刷新的区域 —— 这才是「上一帧相同区域的像素残留」的最终真因，靠 slice 头的 `frame_num` 断档检出（v1.3.14）。另含网关停推、IDR 周期 604 秒、五段探针判读法、「流畅优先 / 画质优先」两档策略 |
 | [docs/QUEUE.md](docs/QUEUE.md) | 排队协议逆向（加密帧、`queue_status` 真字段、`queue_success`） |
 | [docs/STATES.md](docs/STATES.md) | 页面状态机与 7 条待决策 |
 | [docs/PLATFORM.md](docs/PLATFORM.md) | X6 Pro 设备参数、Vue 方言铁律、布局算式 |

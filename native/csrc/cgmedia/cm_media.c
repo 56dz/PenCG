@@ -175,7 +175,8 @@ static void emit_stat(cm_sess *s) {
                         (unsigned long long)s->stats.vid_relax);
             } else if (s->have_kf && s->stats.vid_au_drop > 0) {
                 CM_LOGW("#%d packet loss seen (lost=%llu auDrop=%llu pDrop=%llu dup=%llu "
-                        "reorder=%llu nack=%llu recov=%llu staleRtx=%llu relax=%llu) "
+                        "reorder=%llu nack=%llu recov=%llu staleRtx=%llu relax=%llu gapForgot=%llu "
+                        "sliceUnknown=%llu frameGap=%llu) "
                         "— broken AUs dropped, not shown",
                         s->id, (unsigned long long)s->stats.vid_lost,
                         (unsigned long long)s->stats.vid_au_drop,
@@ -185,7 +186,10 @@ static void emit_stat(cm_sess *s) {
                         (unsigned long long)s->stats.vid_nack_sent,
                         (unsigned long long)s->stats.vid_nack_recovered,
                         (unsigned long long)s->stats.vid_stale_rtx,
-                        (unsigned long long)s->stats.vid_relax);
+                        (unsigned long long)s->stats.vid_relax,
+                        (unsigned long long)cm_rtp_gap_forgot(),
+                        (unsigned long long)cm_rtp_slice_unknown(),
+                        (unsigned long long)s->stats.vid_frame_gap);
             }
         }
     }
@@ -290,7 +294,7 @@ static void emit_stat(cm_sess *s) {
              *   两个都不动        → 根本没数据到，问题在上游/网关
              * 把这行留在生产日志里，是因为「有声音没画面」这类报障只能靠它定位，
              * 而 cm_emit 的 stat JSON 不进日志文件。 */
-            CM_LOGI("#%d video sink pushed=%llu parsed=%llu vdecin=%llu decoded=%llu shown=%llu queue=%llu recov=%llu join=%llu holdRel=%llu%s", s->id,
+            CM_LOGI("#%d video sink pushed=%llu parsed=%llu vdecin=%llu decoded=%llu shown=%llu queue=%llu recov=%llu join=%llu holdRel=%llu gapForgot=%llu gapLate=%llu auRep=%llu sliceUnknown=%llu frameGap=%llu%s", s->id,
                     (unsigned long long)cm_box_pushed(s->vbox),
                     (unsigned long long)cm_box_parsed(s->vbox),
                     (unsigned long long)cm_box_vdecin(s->vbox),
@@ -300,6 +304,11 @@ static void emit_stat(cm_sess *s) {
                     (unsigned long long)cm_box_recoveries(s->vbox),
                     (unsigned long long)cm_rtp_au_joined(),
                     (unsigned long long)cm_rtp_au_hold_released(),
+                    (unsigned long long)cm_rtp_gap_forgot(),
+                    (unsigned long long)s->stats.vid_gap_late,
+                    (unsigned long long)s->stats.vid_au_repaired,
+                    (unsigned long long)cm_rtp_slice_unknown(),
+                    (unsigned long long)s->stats.vid_frame_gap,
                     (s->vbox && s_sink_backlog_avg > 0 &&
                      cm_box_pushed(s->vbox) >
                          cm_box_shown(s->vbox) + s_sink_backlog_avg + VWD_BACKLOG_SLACK)
@@ -344,6 +353,9 @@ void cm_media_loop(cm_sess *s) {
     uint64_t s_vwd_last_decoded = 0;
     uint64_t s_vwd_dec_since = 0;
     int s_vwd_recovers = 0;
+    /* 短包日志限速（见 plen == -2/-5 分支）：上次打印时刻 + 这 1 秒内被抑制的条数 */
+    uint64_t s_last_short_ms = 0;
+    uint64_t s_short_suppressed = 0;
     /* 判定阈值的当前值：初值 VWD_STALL_MS（2.5s），发过 PLI 之后
      * 再加上 VWD_PLI_GRACE_MS（1.5s），即总共等 4 秒才报 -7。
      * 画面一恢复就回到 2.5s。
@@ -453,7 +465,20 @@ void cm_media_loop(cm_sess *s) {
                     CM_LOGD("#%d srtp auth fail (%d bytes)", s->id, n);
                 }
             } else if (plen == -2 || plen == -5) {
-                CM_LOGD("#%d short packet %d bytes", s->id, n);
+                /* ★ 2026-11-18：这里原来是一行无条件 CM_LOGD，打开 cdebug.txt
+                 * 之后每 20 秒能刷出几百行 25 字节的短包（STUN/RTCP 走错 SRTP
+                 * 分支的产物），把真正有用的诊断全淹掉了 —— 晚自习那份 11 万
+                 * 行日志里九成是它。改成 1 秒最多一条 + 计数，噪声降三个量级
+                 * 而信息量不减（短包与画面无关，只需知道有没有、有多少）。 */
+                uint64_t sn = cm_now_ms();
+                if (sn - s_last_short_ms >= 1000) {
+                    s_last_short_ms = sn;
+                    CM_LOGD("#%d short packet %d bytes (suppressed %llu in last 1s)",
+                            s->id, n, (unsigned long long)s_short_suppressed);
+                    s_short_suppressed = 0;
+                } else {
+                    s_short_suppressed++;
+                }
             }
         }
 

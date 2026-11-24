@@ -93,6 +93,21 @@
  * 那就不是客户端能修的了。 */
 #define RELAX_RESET_MS 10000
 
+/* ★ 2026-11-18 晚自习现场新增：画质优先政策最多报几次 code:-8 换会话。
+ *
+ * evening.log 的 #6~#30（21:29:44 → 21:35:03）是 24 个连续会话，每个只活
+ * 3~9 秒，全部死在同一条路径：
+ *   网关重连后不补发 IDR（15 个会话整局 key1push=0，其余也只有 1 个且被
+ *   丢包打碎 drop broken IDR AU 8819 bytes missing=1）
+ *   → 画质优先 4 秒拿不到 IDR 就报 -8 换会话
+ *   → 新会话仍不给 IDR → 再报 -8 → 死循环。整晚 relaxing gate = 0。
+ *
+ * 「换会话必定拿到新 IDR」这个前提在终末地上不成立，所以必须给次数上限。
+ * 取 2：第一次 -8 是正常协商（多数局换完会话立刻出画）；连续第二次仍然
+ * 拿不到 IDR，就说明这个游戏/这条链路根本不给关键帧，再换 20 次也一样。
+ * 达到上限后退化为放行 P 帧（画面有马赛克但能继续玩），比每 3 秒重连强得多。 */
+#define POLICY_MAX_GIVEUPS 2
+
 /* ---------- RTCP Generic NACK（RFC 4585 §6.2.1，PT=205 FMT=1） ---------- */
 
 /* 待重传缺口表容量。256 条 ≈ 5-8% 丢包率下 2~3 秒的缺口量
@@ -318,6 +333,39 @@ typedef struct {
         uint64_t t_ms;        /* 首次登记时刻（算 TTL / 判断该不该再要） */
     } gaps[NACK_GAP_MAX];
     int      gap_n;
+    /* ★ 2026-11-18 新增：被放弃重传（TTL 过期 / 轮数用完）的缺口总数。
+     * 这个数 >0 且 `AU repaired by retransmissions` 不再增长，就说明修复
+     * 生效了 —— 缺片帧现在会被整帧丢弃，而不是被当成「补好了」推给解码器。
+     * 它是「马赛克残留」问题的直接判据。 */
+    uint64_t vid_gap_forgot;
+    /* ★ 2026-11-22 新增：slice 头解析失败的累计次数。
+     *
+     * `au_slice_unknown` 置位后整帧退回「只看 marker」的旧行为，而多 slice 帧
+     * 的 marker 打在每组切片之后 —— 于是这个 AU 会带着 1/8 的宏块被当成完整
+     * 帧推给解码器（au_broken=0、missing=0、所有计数都显示"完整"）。解码器只
+     * 更新那一片区域，其余区域保持上一帧内容，用户看到的正是「上一帧相同区域
+     * 的像素残留」，且大面积变化时最明显（小范围移动恰好落在第一片里就看不出来，
+     * 与用户 m22898 的描述完全吻合）。
+     * 这个数 >0 就说明存在这条隐形路径，必须修。 */
+    uint64_t au_slice_unknown_cnt;
+
+    /* ★ 2026-11-23：整帧丢失检测。见 note_frame_num()。
+     *
+     * 现场（.tmp/slice/b1313.h264，用户 21:06 那局抓的 300 帧）：
+     *   硬解出 300 帧、ffmpeg 只解出 290 帧，逐帧 md5 对齐后「前 200 帧完全
+     *   相同，硬解多出第 201~210 帧」—— 这 10 帧在码流里根本不存在。
+     *   frame_num 序列证实：pic201 的 frame_num 从 13 跳到 1（delta=4），
+     *   全片 9 处断档、合计缺 10 帧，与硬解多出的 10 帧完全对应。
+     *
+     * 这些帧是**整帧丢失**（所有 RTP 包都没到），不是切片缺失 —— 所以那个
+     * AU 从未被组装过，flush_frame 没有对象可丢，我们的所有完整性计数
+     * （drop broken P/IDR AU、broken=、missing=）在设计上就看不见它。
+     * 但 MPP 拿到 frame_num 断档的 P 帧时不报错，而是继续用旧内容补没刷新
+     * 的区域 => 用户看到的「上一帧相同区域的像素残留」。 */
+    int log2_fn;                /* SPS 里的 log2_max_frame_num（frame_num 位宽） */
+    int prev_frame_num;
+    int have_frame_num;
+    uint64_t vid_frame_gap;     /* 已检测到的整帧丢失总数（统计用） */
 
     int sess_id;            /* 归属会话；换会话时整体复位（防跨局残留） */
 } rtp_ctx;
@@ -384,7 +432,7 @@ static int unescape_rbsp(const unsigned char *src, int n, unsigned char *dst, in
  * 最可疑的就是 profile 从 baseline(66) 变成 high(100)，而 mppvideodec
  * 仍按旧 SPS 初始化。 */
 static int sps_parse_size(const unsigned char *nal, int n, int *out_w, int *out_h,
-                          int *out_profile, int *out_level) {
+                          int *out_profile, int *out_level, int *out_log2_fn) {
     unsigned char rbsp[512];
     bitr b;
     int profile, level = 0, chroma = 1, frame_mbs_only, w, h;
@@ -424,7 +472,12 @@ static int sps_parse_size(const unsigned char *nal, int n, int *out_w, int *out_
             }
         }
     }
-    br_ue(&b);              /* log2_max_frame_num_minus4 */
+    /* ★ 2026-11-23：log2_max_frame_num_minus4 以前直接丢掉，现在要留着 ——
+     * 解码 slice 头里的 frame_num 必须知道它的位宽（见 note_frame_num）。 */
+    {
+        unsigned int l2 = br_ue(&b) + 4;
+        if (out_log2_fn) *out_log2_fn = (l2 >= 1 && l2 <= 16) ? (int)l2 : 0;
+    }
     {
         unsigned int poc_type = br_ue(&b);
         if (poc_type == 0) {
@@ -478,10 +531,10 @@ static int sps_parse_size(const unsigned char *nal, int n, int *out_w, int *out_
  * pic_parameter_set_id），后面的 slice 头字段依赖 PPS，不需要。
  * 32 字节足够容纳这三个字段（first_mb 最大 8191 时也就 2 字节）。 */
 static int slice_parse(const unsigned char *nal, int n, int *out_first_mb,
-                       int *out_slice_type) {
+                       int *out_slice_type, int log2_fn, int *out_frame_num) {
     unsigned char rbsp[64];
     bitr b;
-    unsigned int first_mb, slice_type;
+    unsigned int first_mb, slice_type, pps_id;
     int tn;
 
     if (!nal || n < 2) return -1;
@@ -498,6 +551,19 @@ static int slice_parse(const unsigned char *nal, int n, int *out_first_mb,
     if (first_mb > 8191 || slice_type > 9) return -1;
     if (out_first_mb) *out_first_mb = (int)first_mb;
     if (out_slice_type) *out_slice_type = (int)slice_type;
+    /* ★ 2026-11-23：继续往后解 frame_num —— 它是「整帧丢失」唯一可靠的判据。
+     * 字段顺序（H.264 7.3.3）：first_mb_in_slice(ue) / slice_type(ue) /
+     * pic_parameter_set_id(ue) / [separate_colour_plane_flag 时 colour_plane_id(u2)]
+     * / frame_num(u(log2_max_frame_num))。本机 profile_idc=66（baseline），
+     * separate_colour_plane_flag 不存在，所以 pps_id 之后直接是 frame_num。
+     * log2_fn<=0 表示 SPS 还没解到，此时跳过（不置错，仍返回成功）。 */
+    if (log2_fn > 0 && log2_fn <= 16 && out_frame_num) {
+        pps_id = br_ue(&b);
+        if (!b.err && pps_id < 256) {
+            unsigned int fn = (unsigned int)br_u(&b, log2_fn);
+            if (!b.err) *out_frame_num = (int)fn;
+        }
+    }
     return 0;
 }
 
@@ -506,6 +572,7 @@ static int slice_parse(const unsigned char *nal, int n, int *out_first_mb,
 /* 前向声明：切片区（下面这几个函数）要用到它们，但它们的定义在文件后半段。 */
 static void rtp_reset_au(void);
 static void flush_frame(cm_sess *s);
+static void kf_request(cm_sess *s, const char *why);   /* note_frame_num 要用 */
 
 #define AU_HOLD_MAX_MS 150
 /* 压住一个多 slice AU 的硬上限。软上限（AU_HOLD_MAX_MS）靠「码流静默」触发，
@@ -513,6 +580,59 @@ static void flush_frame(cm_sess *s);
  * 保证任何情况下 AU 都不会被无限压住。取 400ms ≈ 12 帧@30fps —— 明显长于
  * 任何正常的帧间隔或多 slice 装配时间，只有在码流真的不再给帧头时才会走到。 */
 #define AU_HOLD_HARD_MAX_MS 400
+
+/* 整帧丢失检测（★ 2026-11-23 新增，本文件里最重要的一处）。
+ *
+ * 现场铁证（.tmp/slice/b1313.h264，用户 21:06 那局抓的 300 帧码流）：
+ *   · 同一份字节，设备 MPP 硬解出 300 帧，ffmpeg 软解只出 290 帧；
+ *   · 逐帧 md5 对齐后「前 200 帧逐字节相同，硬解多出第 201~210 帧」；
+ *   · 自写解析器看 frame_num：pic201 从 13 跳到 1（delta=4）、pic203 再跳
+ *     2 帧，全片 9 处断档、合计缺 10 帧 —— 与硬解多出的 10 帧完全对应；
+ *   · 把那 10 帧转成图，64.6% 的 16x16 块仍是上一帧内容，然后逐帧补上。
+ *
+ * 结论：这 10 帧是**整帧丢失**（所有 RTP 包都没到），不是切片缺失。所以那个
+ * AU 从未被组装过，flush_frame 根本没有对象可丢 —— 我们的 drop broken P/IDR
+ * AU、AU push broken=、missing= 这些计数在设计上就看不见它。
+ *
+ * MPP 拿到「frame_num 断档的 P 帧」时不报错，而是继续用旧内容补没刷新的区域，
+ * 于是用户看到「上一帧相同区域的像素残留」，并且大面积变化时最明显（小范围
+ * 移动恰好落在已刷新的片里就看不出来）—— 与用户 m22898 的描述完全吻合。
+ *
+ * 这里能做的只有两件事，都做：
+ *   1. 立刻请求 IDR（PLI）。原来只能等网关的下一个自然 IDR，实测间隔可达
+ *      604 秒，那期间残留一直挂着。
+ *   2. 画质优先档顺便清 have_kf —— 该档的语义就是「宁可冻也不要错块」。
+ *      流畅优先档**不清**，否则会先冻 4 秒（IDR_STARVE_RELAX_MS）才放行，
+ *      比残留一两个 GOP 更难受。这是两个档位在此处的唯一差异。
+ *
+ * 判据说明：H.264 的 frame_num 对每个参考帧 +1（B 帧除外；本机 profile_idc=66
+ * baseline 无 B 帧），回绕按 2^log2_max_frame_num 取模。IDR 会把 frame_num
+ * 重置为 0，那是合法重置，不算丢失，所以 key 帧直接跳过断档判定。 */
+static void note_frame_num(cm_sess *s, int key, int fn) {
+    int l2, mod, delta;
+    if (!s || !g_rtp.have_frame_num || g_rtp.log2_fn <= 0) {
+        g_rtp.prev_frame_num = fn;
+        g_rtp.have_frame_num = 1;
+        return;
+    }
+    if (key) {                 /* IDR 合法重置 frame_num，不是丢失 */
+        g_rtp.prev_frame_num = fn;
+        return;
+    }
+    l2 = g_rtp.log2_fn;
+    if (l2 < 1 || l2 > 16) { g_rtp.prev_frame_num = fn; return; }
+    mod = 1 << l2;
+    delta = (fn - g_rtp.prev_frame_num + mod) % mod;
+    g_rtp.prev_frame_num = fn;
+    if (delta <= 1) return;    /* 0=重复帧 1=正常递增 */
+    g_rtp.vid_frame_gap += (uint64_t)(delta - 1);
+    s->stats.vid_frame_gap += (uint64_t)(delta - 1);
+    CM_LOGW("#%d whole frame(s) lost: frame_num %d -> %d (delta=%d), "
+            "MPP will keep stale content until an IDR (total %llu) -> request IDR",
+            s->id, fn - delta, fn, delta, (unsigned long long)g_rtp.vid_frame_gap);
+    if (s->cfg.policy) s->have_kf = 0;
+    kf_request(s, "whole frame lost");
+}
 
 /* 把一个 slice 登记进当前 AU，并判断它是不是「新图像的第一个 slice」。
  *
@@ -528,6 +648,13 @@ static int note_slice(int parsed, int first_mb) {
         /* 解析失败：这个 AU 里出现了我们看不懂的 slice。整帧退回旧行为
          * （只看 marker），宁可和以前一样，也不能把画面卡住。 */
         g_rtp.au_slice_unknown = 1;
+        g_rtp.au_slice_unknown_cnt++;
+        if (g_rtp.au_slice_unknown_cnt <= LOSS_LOG_MAX ||
+            (g_rtp.au_slice_unknown_cnt % 50u) == 0) {
+            CM_LOGW("slice header parse failed (#%llu) -> AU falls back to marker "
+                    "boundary, may push a partial picture",
+                    (unsigned long long)g_rtp.au_slice_unknown_cnt);
+        }
         return 0;
     }
     if (first_mb == 0 && g_rtp.au_slices > 0) {
@@ -645,6 +772,8 @@ static void au_on_slice_done(cm_sess *s, int marker) {
 /* 供 stat JSON 读「这一局接回了多少个切片组」（cm_media.c 的 emit_stat）。 */
 uint64_t cm_rtp_au_hold_released(void) { return g_rtp.au_hold_released; }
 
+uint64_t cm_rtp_slice_unknown(void) { return g_rtp.au_slice_unknown_cnt; }
+
 uint64_t cm_rtp_au_joined(void) {
     return g_rtp.au_joined;
 }
@@ -693,7 +822,7 @@ static void rtp_reset_au(void) {
      * gap_n（待重传表）**不在这里清** —— 缺口属于「已经丢掉的那个 AU」，
      * 但重传包回来时我们仍然希望能把它补进去（哪怕只能推给解码器当参考帧
      * 碎片也无害）。让它按 NACK_GAP_TTL_MS 自然过期，比在 AU 边界一刀切更宽容。
-     * 补洞成功后 gap_drop 会精确摘除。 */
+     * 补洞成功后 gap_satisfied 会精确摘除。 */
     g_rtp.seg_n = 0;
     g_rtp.seg_ordered = 1;
     g_rtp.seg_overflow = 0;
@@ -744,6 +873,10 @@ static void rtp_reset_all(void) {
      * 的判据，跨局累加就没有意义了。 */
     g_rtp.au_joined = 0;
     g_rtp.au_hold_released = 0;
+    /* ★ 2026-11-23：frame_num 断档追踪必须跨会话清零 —— 新会话的第一个 IDR
+     * 会把 frame_num 重置为 0，若保留上一局的 prev_frame_num 会谎报整片丢失。 */
+    g_rtp.prev_frame_num = 0;
+    g_rtp.have_frame_num = 0;
     cm_buf_reset(&g_rtp.sps);
     cm_buf_reset(&g_rtp.pps);
     cm_buf_reset(&g_rtp.au_out);
@@ -778,9 +911,61 @@ static void gap_add(uint16_t seq, unsigned char prio) {
     g_rtp.gap_n++;
 }
 
-/* 从缺口表里摘掉一个 seq（重传到达 / AU 已丢弃 / TTL 过期）。
- * 同时把它从当前 AU 的 au_miss[] 里摘掉，并递减 au_missing。 */
-static void gap_drop(uint16_t seq) {
+/* ===== 缺口表的两种「摘除」，语义必须严格区分（2026-11-18 定案）=====
+ *
+ * ★ 这是「校园网一直马赛克残留但从不冻结」的根因。
+ *
+ * 旧实现只有一个 gap_drop()，它同时做两件事：从 gaps[] 摘掉、并从
+ * au_miss[] 摘掉且 au_missing--。而它被三处语义完全不同的地方调用：
+ *   1) gap_purge_expired()      —— TTL(300ms) 过期，包**根本没收到**
+ *   2) cm_rtp_take_nack_gaps()  —— 重发轮数用完，包**根本没收到**
+ *   3) gap_take()               —— 重传真的回来了（唯一正确的调用）
+ *
+ * 于是 1 和 2 也会把 au_missing 减到 0，flush_frame() 那条
+ *   if (au_broken && au_broken_fixable && au_missing == 0) { au_broken = 0;
+ *       CM_LOGI("AU repaired by retransmissions"); }
+ * 就命中 —— **缺片的 AU 被当成「已被重传修好」推给了解码器**。
+ * 解码器用旧参考帧补错误宏块、污染参考链，画面就一直花到下一个 IDR。
+ *
+ * 现场证据（.tmp/mosaic/afternoon.log，51438 行，7 个会话）：
+ *   - 94 次 rtp gap、109 次 retransmit recovered、23 次 AU repaired；
+ *   - 1540 条 AU push **全部 broken=0 missing=0**（0 例外）；
+ *   - 其中 9 条 AU repaired 前面根本没有 retransmit recovered；
+ *   - decoder stalled=0 / video sink stalled=0 / native -7=0（没冻结，只有花屏）。
+ *
+ * 现在拆成两个函数：
+ *   gap_forget(seq)    —— 只是「不等了」：摘 gaps[]，**au_miss 原样保留**，
+ *                          于是 au_missing 永不归零，AU 一定被判残帧丢弃。
+ *   gap_satisfied(seq) —— 真的收到了：摘 gaps[] 和 au_miss[]（原行为）。
+ * 宁可丢一整帧，也不能把缺片的帧喂给解码器 —— 丢一帧只损失 33ms，
+ * 而坏参考帧会污染到下一个 IDR（实测可达 604 秒）。
+ */
+
+/* 从缺口表里摘掉一个 seq，但**不**认为它被补上了（TTL 过期 / 轮数用完）。 */
+static void gap_forget(uint16_t seq) {
+    int i;
+    for (i = 0; i < g_rtp.gap_n; i++) {
+        if (g_rtp.gaps[i].seq == seq) {
+            unsigned char round = g_rtp.gaps[i].round;
+            uint64_t age = cm_now_ms() - g_rtp.gaps[i].t_ms;
+            memmove(&g_rtp.gaps[i], &g_rtp.gaps[i + 1],
+                    sizeof(g_rtp.gaps[0]) * (size_t)(g_rtp.gap_n - i - 1));
+            g_rtp.gap_n--;
+            g_rtp.vid_gap_forgot++;
+            /* 限速打前 LOSS_LOG_MAX 条：这是「哪些洞最终没补上」的直接证据。 */
+            if (g_rtp.vid_gap_forgot <= LOSS_LOG_MAX ||
+                (g_rtp.vid_gap_forgot % 50u) == 0) {
+                CM_LOGW("gap forgotten without retransmit (seq=%u, round=%d, age=%llums, total=%llu) -> AU stays broken",
+                        (unsigned)seq, (int)round, (unsigned long long)age,
+                        (unsigned long long)g_rtp.vid_gap_forgot);
+            }
+            break;
+        }
+    }
+}
+
+/* 从缺口表里摘掉一个 seq，并认为它已经补上了（只有确认收到才调）。 */
+static void gap_satisfied(uint16_t seq) {
     int i;
     for (i = 0; i < g_rtp.gap_n; i++) {
         if (g_rtp.gaps[i].seq == seq) {
@@ -809,10 +994,11 @@ static void gap_purge_expired(void) {
         if (now > g_rtp.gaps[i].t_ms && (now - g_rtp.gaps[i].t_ms) > NACK_GAP_TTL_MS) {
             uint16_t sq = g_rtp.gaps[i].seq;
             /* ★ L2 修正（REVIEW-report L2）：摘缺口 + 同步摘 au_miss 这件事
-             * 本来就由 gap_drop() 负责，旧代码却在这里内联重写了一份。
-             * 三份重复实现正是「改一处忘另两处」的根源，现在统一走 gap_drop。
-             * gap_drop 不会动 i（下面 continue 保持不增），与旧行为等价。 */
-            gap_drop(sq);
+             * 本来就由摘除函数负责，旧代码却在这里内联重写了一份。
+             * ★ 2026-11-18：过期只能「忘掉」（gap_forget），绝不能算「补上」
+             * ——否则 au_missing 被减到 0，缺片 AU 会被当成 repaired 推给
+             * 解码器，画面就一直花（见 gap_forget 头的完整分析）。 */
+            gap_forget(sq);
             /* R5 修正（REVIEW-report R5）：只有**落在当前 AU 的 seq 范围里**的
              * 缺口过期，才说明这个 AU 确定残缺。旧代码摘掉任意过期缺口就置
              * au_broken=1，而 NACK_GAP_TTL_MS(300ms) 远大于帧间隔(33ms)：
@@ -845,6 +1031,37 @@ static void au_mark_missing(uint16_t seq) {
     g_rtp.au_miss[g_rtp.au_missing++] = seq;
 }
 
+/* 从当前 AU 的缺失表里摘掉一个 seq（迟到的重传包也算补上了）。
+ * 返回 1 表示本来就在缺失表里 —— 调用方可以把这个包当成有效的重传收下。 */
+static int au_miss_take(uint16_t seq) {
+    int i;
+    for (i = 0; i < g_rtp.au_missing; i++) {
+        if (g_rtp.au_miss[i] == seq) {
+            memmove(&g_rtp.au_miss[i], &g_rtp.au_miss[i + 1],
+                    sizeof(g_rtp.au_miss[0]) * (size_t)(g_rtp.au_missing - i - 1));
+            g_rtp.au_missing--;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* 把当前 AU 的缺失 seq 列表格式化成 "a,b,c"（最多 max 个，末尾加 ...）。
+ * 只给「丢帧」那几行日志用，方便把日志和 dump 出来的码流对起来。 */
+static const char *au_miss_list(char *buf, size_t cap, int max) {
+    int i, n = 0;
+    buf[0] = 0;
+    for (i = 0; i < g_rtp.au_missing && i < max; i++) {
+        n += snprintf(buf + n, cap - (size_t)n, "%s%u", i ? "," : "",
+                      (unsigned)g_rtp.au_miss[i]);
+        if ((size_t)n + 8 >= cap) break;
+    }
+    if (g_rtp.au_missing > max && (size_t)n + 4 < cap) {
+        snprintf(buf + n, cap - (size_t)n, ",...");
+    }
+    return buf;
+}
+
 /* 取走缺口表给 NACK 发送侧。
  *
  * 排序：IDR 优先级（prio=2）排前面 —— 真机 401 个 auDrop 换掉 15511 个
@@ -869,9 +1086,10 @@ int cm_rtp_take_nack_gaps(cm_sess *s, unsigned char *out, int cap_entries) {
             if (pass == 1 && is_idr) continue;
             if (g_rtp.gaps[i].round >= (unsigned char)maxround) {
                 /* 轮数用完：摘掉，并从 AU 缺失表里同步删除。
-                 * ★ L2 修正：这件事本来就由 gap_drop() 负责（第三处重复实现）。
+                 * ★ 2026-11-18：轮数用完也只是「不等了」，不是「收到了」。
+                 * 必须用 gap_forget 保留 au_miss，让这一帧被判残帧丢掉。
                  * gap_n-1 使下标 i 自然指向下一个元素，所以 i-- 保持不变。 */
-                gap_drop(g_rtp.gaps[i].seq);
+                gap_forget(g_rtp.gaps[i].seq);
                 i--;
                 continue;
             }
@@ -951,7 +1169,7 @@ static void kf_request(cm_sess *s, const char *why) {
  *   2. profile/level/分辨率任一发生变化时，把 have_kf 清零并重发 PLI 突发，
  *      逼网关立刻给一个带新 SPS 的 IDR —— 这是「切档后画面花掉」最可能的解药。
  */
-static void note_sps(cm_sess *s, int w, int h, int prof, int lev) {
+static void note_sps(cm_sess *s, int w, int h, int prof, int lev, int log2_fn) {
     int changed;
     int old_prof, old_lev;
     if (!s) return;
@@ -960,6 +1178,8 @@ static void note_sps(cm_sess *s, int w, int h, int prof, int lev) {
     changed = (s->sps_profile && (old_prof != prof || old_lev != lev));
     s->sps_profile = prof;
     s->sps_level = lev;
+    /* ★ 2026-11-23：frame_num 位宽随 SPS 一起更新（见 note_frame_num）。 */
+    if (log2_fn > 0) g_rtp.log2_fn = log2_fn;
     s->video_w = w;
     s->video_h = h;
     pthread_mutex_lock(&s->gst_mu);
@@ -997,6 +1217,10 @@ static void mark_keyframe(cm_sess *s) {
      * 饥饿结束了（可能是换会话回来了，也可能网关终于给了），下一段饥饿要能
      * 重新报一次 code:-8。 */
     s->policy_gave_up = 0;
+    /* ★ 2026-11-18：真 IDR 到手 = 这一轮饥饿彻底结束，把 -8 的次数额度
+     * 也还回去。否则一次「开局 24 连换」会把额度永久耗光，之后哪怕只是
+     * 偶发饥饿也再不会走「换会话」这条首选路径了。 */
+    s->policy_giveups = 0;
 }
 
 /* media 事件：首个视频帧上屏后立刻发（带分辨率 + fps），之后不再重复。
@@ -1049,12 +1273,25 @@ static void emit_media_if_needed(cm_sess *s) {
  * 关掉：删开关文件 + 重启 app。dump 完 300 帧后自动停止并打一行 CM_LOGI。 */
 #define AU_DUMP_SWITCH   "/userdisk/miniapp/data/dumpau.txt"
 #define AU_DUMP_FILE     "/userdisk/miniapp/data/au.h264"
+/* ★ 2026-11-22 滚动抓流：交替写两个文件，永远保留「最近 300 帧」。
+ *
+ * 起因：抓到的 300 帧全是游戏加载界面（灰度差分 f001~f039 变化 0~1%），
+ * 而用户报的像素残留发生在「游玩画面里打开地图/活动」这种大面积变化时刻。
+ * 一次性从首个 IDR 开始写的模式只能抓到开局，永远赶不上问题现场。
+ *
+ * 滚动模式：写满 300 帧（≈10 秒）就关掉，下一个 IDR 重新开另一个文件。
+ * 于是任何时刻磁盘上都有一份「刚刚的 10 秒」，用户一喊残留就能立刻取证。
+ * 两份交替是为了避免「正在写的文件被读走」读到半截。 */
+#define AU_DUMP_FILE_A   "/userdisk/miniapp/data/au_a.h264"
+#define AU_DUMP_FILE_B   "/userdisk/miniapp/data/au_b.h264"
 #define AU_DUMP_MAX_FRAMES 300
 #define AU_DUMP_MAX_BYTES  (8u * 1024u * 1024u)
 
-static int      g_dump_state = 0;   /* 0=未判定 1=关闭 2=记录中 3=已写完 */static FILE    *g_dump_fp = NULL;
+static int      g_dump_state = 0;   /* 0=未判定 1=关闭 2=记录中 3=已关闭 */
+static FILE    *g_dump_fp = NULL;
 static uint64_t g_dump_frames = 0;
 static uint64_t g_dump_bytes = 0;
+static int      g_dump_seg = 0;     /* 滚动抓流：写到第几段（偶数=A 奇数=B） */
 
 /* AU push 诊断日志的限速时间戳（1 秒一行）。放在文件级而不是 cm_sess 里，
  * 因为它是纯诊断，不值得占用会话结构、也不该进统计 JSON。 */
@@ -1067,7 +1304,7 @@ static int      g_auld = 0;
 
 /* 在 push 成功之后调用，p/n 必须就是推给 appsrc 的那一份字节。 */
 static void au_dump_hook(const unsigned char *p, int n, int key) {
-    if (g_dump_state == 1 || g_dump_state == 3) return;
+    if (g_dump_state == 1) return;
     if (n <= 0 || !p) return;
     if (g_dump_state == 0) {
         FILE *sw = fopen(AU_DUMP_SWITCH, "r");
@@ -1080,16 +1317,19 @@ static void au_dump_hook(const unsigned char *p, int n, int key) {
     if (g_dump_state != 2) return;
     /* ★ 只从关键帧开始：P 帧打头没有参考帧，ffmpeg 解不出来，判断会错。 */
     if (!g_dump_fp) {
+        const char *path;
         if (!key) return;
-        g_dump_fp = fopen(AU_DUMP_FILE, "wb");
+        path = (g_dump_seg & 1) ? AU_DUMP_FILE_B : AU_DUMP_FILE_A;
+        g_dump_fp = fopen(path, "wb");
         if (!g_dump_fp) {
-            CM_LOGW("AU dump: cannot open %s, disabled", AU_DUMP_FILE);
+            CM_LOGW("AU dump: cannot open %s, disabled", path);
             g_dump_state = 3;
             return;
         }
         g_dump_frames = 0;
         g_dump_bytes = 0;
-        CM_LOGW("AU dump: writing from IDR, %d bytes in first AU", n);
+        CM_LOGW("AU dump seg#%d: writing from IDR -> %s (%d bytes in first AU)",
+                g_dump_seg, path, n);
     }
     if (fwrite(p, 1, (size_t)n, g_dump_fp) != (size_t)n) {
         CM_LOGW("AU dump: short write, closing");
@@ -1101,12 +1341,15 @@ static void au_dump_hook(const unsigned char *p, int n, int key) {
     g_dump_frames++;
     g_dump_bytes += (uint64_t)n;
     if (g_dump_frames >= AU_DUMP_MAX_FRAMES || g_dump_bytes >= AU_DUMP_MAX_BYTES) {
+        const char *path = (g_dump_seg & 1) ? AU_DUMP_FILE_B : AU_DUMP_FILE_A;
         fclose(g_dump_fp);
         g_dump_fp = NULL;
-        g_dump_state = 3;
-        CM_LOGW("AU dump done: %llu frames, %llu bytes -> %s",
+        CM_LOGW("AU dump seg#%d done: %llu frames, %llu bytes -> %s "
+                "(rolling, next IDR starts seg#%d)",
+                g_dump_seg,
                 (unsigned long long)g_dump_frames,
-                (unsigned long long)g_dump_bytes, AU_DUMP_FILE);
+                (unsigned long long)g_dump_bytes, path, g_dump_seg + 1);
+        g_dump_seg++;      /* 滚动：下一个 IDR 继续写另一个文件，永远保留最近 10 秒 */
     }
 }
 
@@ -1165,6 +1408,7 @@ static void flush_frame(cm_sess *s) {
     if (g_rtp.au_broken && g_rtp.au_broken_fixable && g_rtp.au_missing == 0) {
         g_rtp.au_broken = 0;
         g_rtp.au_broken_fixable = 0;
+        s->stats.vid_au_repaired++;
         CM_LOGI("#%d AU repaired by retransmissions (%llu bytes)",
                 s->id, (unsigned long long)g_rtp.frame.len);
     }
@@ -1192,6 +1436,11 @@ static void flush_frame(cm_sess *s) {
 
     /* --- 1) 残缺 AU --- */
     if (g_rtp.au_broken) {
+        /* ★ 2026-11-18：这里打一行「缺了哪几片」。
+         * 修复前这些 AU 会被 gap_drop 的语义混用误判成「已补好」直接推进
+         * 解码器，于是没人能看到 missing 到底缺在哪 —— 用户只看到马赛克。
+         * 现在它会真的走到这里被丢掉，日志里带 seq 明细才能复盘。 */
+        char missbuf[96];
         s->stats.vid_au_drop++;
         if (key) {
             /* 坏掉的是 IDR：参考帧链从头就断了，必须清零重来。
@@ -1200,8 +1449,9 @@ static void flush_frame(cm_sess *s) {
             s->kf_starve_ms = 0;
             s->relax_until_ms = 0;   /* P1-7：重新回到「等 IDR」，放行期限作废 */
             g_rtp.drop_streak = 0;
-            CM_LOGW("#%d drop broken IDR AU (%llu bytes, missing=%d) -> request new IDR",
-                    s->id, (unsigned long long)g_rtp.frame.len, g_rtp.au_missing);
+            CM_LOGW("#%d drop broken IDR AU (%llu bytes, missing=%d [%s]) -> request new IDR",
+                    s->id, (unsigned long long)g_rtp.frame.len, g_rtp.au_missing,
+                    au_miss_list(missbuf, sizeof(missbuf), 8));
             kf_request(s, "broken IDR");
         } else {
             /* ★ 坏掉的是 P 帧 —— 这是本轮最重要的语义修正。
@@ -1224,9 +1474,10 @@ static void flush_frame(cm_sess *s) {
             s->stats.vid_p_drop++;
             if (s->stats.vid_p_drop <= LOSS_LOG_MAX ||
                 (s->stats.vid_p_drop % 100u) == 0) {
-                CM_LOGI("#%d drop broken P AU (%llu bytes, missing=%d, streak=%d, "
+                CM_LOGI("#%d drop broken P AU (%llu bytes, missing=%d [%s], streak=%d, "
                         "total=%llu%s)",
                         s->id, (unsigned long long)g_rtp.frame.len, g_rtp.au_missing,
+                        au_miss_list(missbuf, sizeof(missbuf), 8),
                         g_rtp.drop_streak,
                         (unsigned long long)s->stats.vid_p_drop,
                         s->have_kf ? "" : ", already waiting IDR");
@@ -1295,19 +1546,38 @@ static void flush_frame(cm_sess *s) {
              * 首帧」要几秒，这期间每分钟会有约 30 个 P 帧走到这里。所以用
              * policy_gave_up 保证每段饥饿只发一条事件（否则 JS 的 stallTries
              * 会被瞬间吃满，直接从 L2 跳到放弃）；标记在 mark_keyframe() 里复位。 */
-            if (s->cfg.policy) {
+            /* ★ 2026-11-18：画质优先不再允许无限换会话。
+             * 见 POLICY_MAX_GIVEUPS 的注释（evening.log 的 24 连换）。 */
+            if (s->cfg.policy && s->policy_giveups < POLICY_MAX_GIVEUPS) {
                 s->stats.vid_relax_dropped++;
                 if (!s->policy_gave_up) {
                     s->policy_gave_up = 1;
+                    s->policy_giveups++;
+                    s->last_giveup_ms = now;
                     CM_LOGW("#%d IDR starvation %.1fs under quality-first policy: "
-                            "keep gate closed (no artifacts), ask JS to switch session",
-                            s->id, (double)(IDR_STARVE_RELAX_MS) / 1000.0);
+                            "keep gate closed (no artifacts), ask JS to switch session "
+                            "(giveup %d/%d)",
+                            s->id, (double)(IDR_STARVE_RELAX_MS) / 1000.0,
+                            s->policy_giveups, POLICY_MAX_GIVEUPS);
                     cm_emit(s, "{\"t\":\"error\",\"msg\":\"need fresh IDR\",\"code\":-8}");
                 }
                 s->stats.vid_gate_drop++;
                 g_rtp.drop_streak++;
                 rtp_reset_au();
                 return;
+            }
+            if (s->cfg.policy) {
+                /* 连续 POLICY_MAX_GIVEUPS 次换会话都没换来任何 IDR：
+                 * 继续换只会让用户每 3 秒重连一次，不如放行 P 帧让他能玩。
+                 * 这里只打一次（policy_gave_up 复用为「已警告过」标记）。 */
+                s->stats.vid_policy_degrade++;
+                if (!s->policy_gave_up) {
+                    s->policy_gave_up = 1;
+                    CM_LOGW("#%d quality-first gave up after %d session switches "
+                            "without any IDR: degrading to smoother behavior "
+                            "(accept artifacts instead of reconnecting forever)",
+                            s->id, s->policy_giveups);
+                }
             }
             s->stats.vid_relax++;
             s->have_kf = 1;           /* 开门：后续 P 帧不再走闸门 */
@@ -1595,18 +1865,24 @@ static void gap_upgrade_since(uint64_t since_ms) {
 
 /* 查这个 seq 是不是我们在等重传的包；是就摘掉（缺口表 + AU 缺失表都摘）
  * 并返回 1。用它区分「重传包」和「真乱序」—— 前者要收下，后者必须丢。 */
-static int gap_take(uint16_t seq) {
-    int i, found = 0;
+static int gap_contains(uint16_t seq) {
+    int i;
     for (i = 0; i < g_rtp.gap_n; i++) {
-        if (g_rtp.gaps[i].seq == seq) { found = 1; break; }
+        if (g_rtp.gaps[i].seq == seq) return 1;
     }
-    if (!found) return 0;
-    /* ★ L2 修正（REVIEW-report L2）：摘缺口 + 同步摘 au_miss 由 gap_drop() 统一负责。
-     * 归零时 flush_frame 会把 au_broken 清掉。 */
-    gap_drop(seq);
-    return 1;
+    return 0;
 }
 
+/* 只查询、不修改。真正的摘除推迟到「归属校验通过」之后再做 ——
+ * 否则一个不属于当前 AU 的迟到包会先把 au_missing 减掉再被拒，
+ * 等于凭空「补上一片」，正是本文件 2026-11-18 修的那类错误。 */
+static int au_miss_contains(uint16_t seq) {
+    int i;
+    for (i = 0; i < g_rtp.au_missing; i++) {
+        if (g_rtp.au_miss[i] == seq) return 1;
+    }
+    return 0;
+}
 static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, uint16_t seq) {
     int nal_type;
     if (n < 1) return;
@@ -1677,15 +1953,16 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
             }
             t = p[o] & 0x1F;
             if (t == 7) {
-                int w = 0, h = 0, prof = 0, lev = 0;
-                if (sps_parse_size(p + o, sz, &w, &h, &prof, &lev) == 0) {
-                    note_sps(s, w, h, prof, lev);
+                int w = 0, h = 0, prof = 0, lev = 0, l2 = 0;
+                if (sps_parse_size(p + o, sz, &w, &h, &prof, &lev, &l2) == 0) {
+                    note_sps(s, w, h, prof, lev, l2);
                 }
             }
             if (t == 7 || t == 8) cache_param_set(p + o, sz);
             if (t == 1 || t == 5) {
-                int fm = 0, st = 0;
-                int ok = (slice_parse(p + o, sz, &fm, &st) == 0);
+                int fm = 0, st = 0, fnum = -1;
+                int ok = (slice_parse(p + o, sz, &fm, &st, g_rtp.log2_fn, &fnum) == 0);
+                if (ok && fm == 0 && fnum >= 0) note_frame_num(s, t == 5, fnum);
                 /* ★ 多 slice 修复：STAP-A 里如果出现「新图像的第一个 slice」，
                  * 先把正在攒的 AU 放出去，避免两帧拼成一个 AU。 */
                 if (note_slice(ok, fm)) {
@@ -1776,8 +2053,9 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
                 hdr[hn++] = nh;
                 for (k = 2; k < n && hn < (int)sizeof(hdr); k++) hdr[hn++] = p[k];
                 {
-                    int fm = 0, st = 0;
-                    int ok = (slice_parse(hdr, hn, &fm, &st) == 0);
+                    int fm = 0, st = 0, fnum = -1;
+                    int ok = (slice_parse(hdr, hn, &fm, &st, g_rtp.log2_fn, &fnum) == 0);
+                    if (ok && fm == 0 && fnum >= 0) note_frame_num(s, typ == 5, fnum);
                     if (note_slice(ok, fm)) {
                         /* 新图像的第一个 slice：先把上一帧交出去，再让这个
                          * 切片从干净状态开始。 */
@@ -1857,17 +2135,18 @@ static void handle_h264(cm_sess *s, const unsigned char *p, int n, int marker, u
     }
 
     if (nal_type == 7) {
-        int w = 0, h = 0, prof = 0, lev = 0;
-        if (sps_parse_size(p, n, &w, &h, &prof, &lev) == 0) {
-            note_sps(s, w, h, prof, lev);
+        int w = 0, h = 0, prof = 0, lev = 0, l2 = 0;
+        if (sps_parse_size(p, n, &w, &h, &prof, &lev, &l2) == 0) {
+            note_sps(s, w, h, prof, lev, l2);
         }
     }
     if (nal_type == 7 || nal_type == 8) cache_param_set(p, n);
     /* ★ 多 slice 修复：新图像的第一个 slice 到了 → 先把上一帧放出去。
      * 这一步必须在 annexb_put 之前做，否则新 slice 的字节会被拼进上一帧。 */
     if (nal_type == 1 || nal_type == 5) {
-        int fm = 0, st = 0;
-        int ok = (slice_parse(p, n, &fm, &st) == 0);
+        int fm = 0, st = 0, fnum = -1;
+        int ok = (slice_parse(p, n, &fm, &st, g_rtp.log2_fn, &fnum) == 0);
+        if (ok && fm == 0 && fnum >= 0) note_frame_num(s, nal_type == 5, fnum);
         if (note_slice(ok, fm)) {
             au_flush_boundary(s);
             note_slice(ok, fm);   /* 复位后重新登记这个 slice */
@@ -1973,6 +2252,18 @@ void cm_rtp_after_rebuild(cm_sess *s) {
     kf_request(s, "pipeline rebuild");
 }
 
+
+/* 被放弃重传（TTL 过期 / 轮数用完）的缺口累计数。
+ * 判据：它增长、但 `AU repaired by retransmissions` 不再跟着涨，就说明
+ * 缺片帧现在被整帧丢弃（而不是被当成「补好了」推给解码器）——
+ * 这正是 2026-11-18「校园网马赛克残留」的修复点。 */
+uint64_t cm_rtp_gap_forgot(void) {
+    uint64_t v;
+    pthread_mutex_lock(&g_rtp_mu);
+    v = g_rtp.vid_gap_forgot;
+    pthread_mutex_unlock(&g_rtp_mu);
+    return v;
+}
 void cm_rtp_reset(cm_sess *s) {
     if (!s) return;
     pthread_mutex_lock(&g_rtp_mu);
@@ -2210,14 +2501,28 @@ void cm_rtp_on_packet(cm_sess *s, unsigned char *pkt, int len, const char *from_
                  *       按到达顺序 append 会把分片插到错误位置，整帧必须丢。
                  *       也不要因此把 last_seq 往回拨 —— 那会让后面的正常包
                  *       全被当成「正向缺口」，形成雪崩。 */
-                if (gap_take(seq)) {
+                /* ★ 2026-11-18：缺口表里的条目可能已经因为 TTL 过期 / 轮数
+                 * 用完被 gap_forget 摘掉了，但这个包其实还是我们缺的那一片
+                 * （它还在 au_miss[] 里）。这种「迟到的重传」必须照样收下 ——
+                 * 否则我们会把本来能救回来的帧判残丢掉，白白损失一帧。
+                 * au_miss_take 只是从缺失表摘，不改 gaps[]（那里已经没有了）。 */
+                {
+                /* 先判断归属，再决定要不要真的从缺口表 / 缺失表里摘 ——
+                 * 顺序反了的话，一个不属于当前 AU 的迟到包会先把 au_missing
+                 * 减掉、再被范围校验拒掉，等于凭空「补上一片」。 */
+                int in_gap_table = 0, in_miss_list = 0;
+                if (gap_contains(seq)) in_gap_table = 1;
+                else if (au_miss_contains(seq)) in_miss_list = 1;
+                if (in_gap_table || in_miss_list) {
                     /* ★ R2 修正（REVIEW-report R2）：重传包必须判归属。
                      * 缺口表按 TTL 存活，而 AU 边界会 reset —— 上一 AU 的
                      * 重传包回来时，当前正在拼的可能是**另一个** AU，直接
                      * append 会把别人的分片拼进来，污染整帧且不被发现
                      * （成功分支原本不置 au_broken）。
                      * 用 au_first_seq/au_last_seq 做范围校验：不属于当前 AU
-                     * 的重传包丢掉（缺口已在 gap_take 里摘除，不会再要第二遍）。 */
+                     * 的重传包丢掉。注意：缺口/缺失表的摘除已经推迟到这次校验
+                     * 通过之后（gap_satisfied / au_miss_take），所以被拒的包
+                     * 不会凭空「补上一片」。 */
                     if (g_rtp.au_have_range) {
                         int16_t d0 = (int16_t)(seq - g_rtp.au_first_seq);
                         int16_t d1 = (int16_t)(seq - g_rtp.au_last_seq);
@@ -2233,8 +2538,25 @@ void cm_rtp_on_packet(cm_sess *s, unsigned char *pkt, int len, const char *from_
                             return;
                         }
                     }
+                    /* 归属校验已通过，现在才真正摘除。 */
+                    if (in_gap_table) gap_satisfied(seq);
+                    else au_miss_take(seq);
                     g_rtp.pkt_is_rtx = 1;   /* hold 期间唯一允许入帧的来源 */
                     s->stats.vid_nack_recovered++;
+                    if (in_miss_list) {
+                        /* 迟到的重传：缺口表里已经没有它（TTL 过期 / 轮数用完），
+                         * 但我们确实还缺这一片。收下之后这一帧就能完整推出，
+                         * 不至于白丢。打一行限速日志便于真机确认。 */
+                        s->stats.vid_gap_late++;
+                        if (s->stats.vid_gap_late <= LOSS_LOG_MAX ||
+                            (s->stats.vid_gap_late % 50u) == 0) {
+                            CM_LOGI("#%d late retransmit seq=%u accepted (%llu/%llu, missing left=%d)",
+                                    s->id, (unsigned)seq,
+                                    (unsigned long long)s->stats.vid_gap_late,
+                                    (unsigned long long)s->stats.vid_nack_recovered,
+                                    g_rtp.au_missing);
+                        }
+                    }
                     /* L1：升到 LOGI 并限速。这是「NACK 到底有没有用」的直接
                      * 证据（recovered/nack_req 的分子）。弱网下一旦生效会持续
                      * 触发，所以只详细打前 LOSS_LOG_MAX 条，之后每 100 条汇总。 */
@@ -2256,6 +2578,7 @@ void cm_rtp_on_packet(cm_sess *s, unsigned char *pkt, int len, const char *from_
                     }
                     pthread_mutex_unlock(&g_rtp_mu);
                     return;
+                }
                 }
             }
         }

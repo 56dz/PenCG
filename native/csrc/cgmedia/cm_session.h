@@ -191,6 +191,15 @@ typedef struct {
      *
      * 排查「马赛克残留」投诉时先看它：不涨就说明错块不是来自饥饿放行。 */
     uint64_t vid_relax_dropped;
+    /* ★ 2026-11-18 晚自习现场新增：画质优先把 -8 次数用完之后、被迫降级
+     * 放行 P 帧的次数（cm_rtp.c 的 POLICY_MAX_GIVEUPS 分支）。
+     *
+     * 这是用来直接回答「终末地为什么不再无限重连」的判据：
+     *   =0 且 vid_relax_dropped 在涨 => 还在换会话阶段（正常）
+     *   >0                          => 已经降级，画面会有马赛克但不再重连
+     * 它一旦增长，说明网关在这个游戏上根本不给 IDR —— 那是服务端问题，
+     * 客户端能做的只有「别让用户每 3 秒重连一次」。 */
+    uint64_t vid_policy_degrade;
     /* 落在当前 AU seq 范围之外的重传包数（R2 修正后才有的计数）。
      * >0 说明缺口表 TTL 跨过了 AU 边界 —— 归零不影响功能，是健康信号。 */
     uint64_t vid_stale_rtx;
@@ -200,6 +209,37 @@ typedef struct {
      * pDrop 是「有关键帧、但这一帧拼不全所以只丢这一帧」—— 后者增长
      * 说明丢包在发生但画面还能继续动（这是我们要的健康态）。 */
     uint64_t vid_p_drop;
+
+    /* ★ 2026-11-18 新增：缺口表里已经摘掉（TTL 过期 / 轮数用完）、但仍在
+     * au_miss[] 里的「迟到重传」被收下的次数。
+     *
+     * 背景：修复「马赛克残留」后，out-of-budget 的缺口不再伪装成「已补上」，
+     * 而是保留在 au_miss[] 里让整帧被判残。但如果网关的重传只是晚了一点
+     * （>300ms），这一帧其实还能救 —— 收下它能少丢一帧。
+     *
+     * 判据：vid_gap_forgot 涨得比 vid_gap_late 快很多，说明重传基本指望不上，
+     * 丢帧是必然代价；两者接近说明只是 TTL 太短，可以调 NACK_GAP_TTL_MS。 */
+    uint64_t vid_gap_late;
+
+    /* ★ 2026-11-23 新增：检测到的**整帧丢失**帧数（cm_rtp.c 的 note_frame_num）。
+     *
+     * 与 vid_p_drop / vid_au_drop 的区别（这三者互不重叠，加起来才是完整图景）：
+     *   vid_p_drop / vid_au_drop = 帧到了、但拼不全，我们主动丢了它
+     *   vid_frame_gap            = 帧**根本没到**（所有 RTP 包都丢），我们从未
+     *                              组装过它，所以上面两个计数永远抓不到
+     *
+     * 现场铁证（用户 21:06 那局 300 帧码流）：硬解 300 帧 / 软解 290 帧，多出的
+     * 10 帧对应 frame_num 的 9 处断档；解码器会拿旧内容补没刷新的区域，用户
+     * 看到的就是「上一帧相同区域的像素残留」。它 >0 就说明这条路径在工作。
+     *
+     * 判据：这个数涨而 vid_relax / vid_relax_dropped 都不涨 => 残留来自整帧丢失
+     * 而不是饥饿放行，方向对。 */
+    uint64_t vid_frame_gap;
+
+    /* 「AU repaired by retransmissions」真正发生的次数（缺片全补齐的 AU 数）。
+     * 修复后这个数只统计**真的补上了**的帧 —— 修复前它还包含 TTL 过期 /
+     * 轮数用完被误判成「补好了」的帧，所以这个计数曾经虚高。 */
+    uint64_t vid_au_repaired;
 
     /* ---- RTCP RR（RFC 3550 §6.4.1 / §A.3）的统计基础（cm_rtp.c 维护）----
      *
@@ -364,6 +404,21 @@ typedef struct cm_sess {
      * 0 = 还没报；1 = 已报，等到下一个完整 IDR 再复位。
      * 没有这个标记会每秒发一条事件，JS 侧会把 stallTries 一次吃满。 */
     int      policy_gave_up;
+    /* ★ 2026-11-18 晚自习现场新增：本会话已经报过几次 code:-8 换会话。
+     *
+     * 真机事实（evening.log 的 #6~#30）：终末地从 21:29:44 到 21:35:03
+     * 连开 24 个会话，每个只活 3~9 秒，全部死在同一条路径上 ——
+     *   网关重连后**不补发 IDR**（其中 15 个会话整局 key1push=0）
+     *   → 画质优先政策 4 秒拿不到 IDR 就报 -8 让 JS 换会话
+     *   → 新会话仍然不给 IDR → 再报 -8 → 死循环。
+     * 整晚 relaxing gate = 0，说明降级路径一次都没被调用过。
+     *
+     * 换会话的前提是「新会话必定给新 IDR」，这个前提在终末地上不成立。
+     * 所以给 -8 加次数上限：连报 POLICY_MAX_GIVEUPS 次都没换来 IDR，
+     * 就承认换会话这条路走不通，**退化为放行 P 帧**（画面有马赛克但能玩），
+     * 而不是每 3 秒重连一次。真 IDR 到手时（mark_keyframe）清零。 */
+    int      policy_giveups;
+    uint64_t last_giveup_ms;   /* 最近一次报 -8 的时刻（诊断用） */
     /* ★ 2026-11-17 校园网现场新增：本会话是否已经把 SPS/PPS 推给过下游。
      *
      * appsrc 用 format=bytes 之后（v1.3.6 为修时间轴断裂而改），h264parse
@@ -483,6 +538,10 @@ void cm_rtp_reset(cm_sess *s);
  * 缺口表与 have_kf 闸门，并立刻补一次 PLI。**不清 SPS/PPS 缓存** ——
  * 新解码器仍然需要它们（终末地的 IDR 不带 SPS/PPS，只能靠缓存注入）。 */
 void cm_rtp_after_rebuild(cm_sess *s);
+/* 被放弃重传的缺口累计数（TTL 过期 / 轮数用完）。
+ * 与 vid_nack_recovered 对照看：以前这两条路都会把 au_missing 减到 0，
+ * 让缺片 AU 被误判成「已被重传修好」推给解码器，表现就是马赛克残留。 */
+uint64_t cm_rtp_gap_forgot(void);
 /* 取走「最近发现的视频 seq 缺口」并清空。
  *
  * cm_cmd.c 的 NACK 发送在拿到这批缺口后，用 BLP 位图压成 FCI 发出去。
@@ -508,6 +567,8 @@ void cm_rtp_flush_held(cm_sess *s);
  * cm_media.c 的主循环每轮调一次，到期就放行。 */
 void cm_rtp_au_join_tick(cm_sess *s);
 /* 本局「接回了多少个切片组」的计数，进 stat JSON 给前端看。 */
+/* slice 头解析失败的累计次数（>0 = 存在退回 marker 边界的残片 AU）。 */
+uint64_t cm_rtp_slice_unknown(void);
 uint64_t cm_rtp_au_joined(void);
 uint64_t cm_rtp_au_hold_released(void);
 
